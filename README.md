@@ -1,2 +1,2 @@
-# Thesis
-Smart Household Electrical Monitoring System with Meralco Tiered Billing and Tagalog NLG Advisory
+# Documentation
+Where all of the processes and methods resides in
