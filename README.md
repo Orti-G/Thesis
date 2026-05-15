@@ -1,2 +1,2 @@
-# Thesis
-Smart Household Electrical Monitoring System with Meralco Tiered Billing and Tagalog NLG Advisory
+# Mobile ui branch
+Flutter-based UI branch for the project repository.
