@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "485544516354",
+    "project_id": "kuro-b87b0",
+    "storage_bucket": "kuro-b87b0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:485544516354:android:3e6969935b2634735a401b",
+        "android_client_info": {
+          "package_name": "com.example.flutter_mobile_ui"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBZKqPOZHqcS1ZStBzja08K38Qdsi_rax0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
