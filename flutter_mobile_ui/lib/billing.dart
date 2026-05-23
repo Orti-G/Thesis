@@ -23,7 +23,7 @@ class BillingScreen extends StatelessWidget {
                 gradient: LinearGradient(
                   colors: [
                     lightOrangeBg,
-                    lightOrangeBg.withOpacity(0.7),
+                    lightOrangeBg.withValues(alpha: 0.7),
                     creamBg,
                   ],
                   begin: Alignment.topCenter,
@@ -41,7 +41,7 @@ class BillingScreen extends StatelessWidget {
                       Text(
                         'ESTIMATED MONTHLY BILL:',
                         style: TextStyle(
-                          color: Colors.white.withOpacity(0.85),
+                          color: Colors.white.withValues(alpha: 0.85),
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 1.0,
@@ -61,7 +61,7 @@ class BillingScreen extends StatelessWidget {
                       Text(
                         '(Based on current consumption trajectory)',
                         style: TextStyle(
-                          color: Colors.white.withOpacity(0.8),
+                          color: Colors.white.withValues(alpha: 0.8),
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
                         ),
@@ -82,7 +82,7 @@ class BillingScreen extends StatelessWidget {
                           Container(
                             height: 35,
                             width: 1,
-                            color: Colors.white.withOpacity(0.25),
+                            color: Colors.white.withValues(alpha: 0.25),
                           ),
                           Expanded(
                             child: _buildTrajectoryMetric(
@@ -105,7 +105,7 @@ class BillingScreen extends StatelessWidget {
                             color: primaryOrange,
                             boxShadow: [
                               BoxShadow(
-                                color: primaryOrange.withOpacity(0.25),
+                                color: primaryOrange.withValues(alpha: 0.25),
                                 blurRadius: 15,
                                 offset: const Offset(0, 8),
                               ),
@@ -133,7 +133,7 @@ class BillingScreen extends StatelessWidget {
                                       Text(
                                         '₱0.9803/kWh',
                                         style: TextStyle(
-                                          color: Colors.white.withOpacity(0.9),
+                                          color: Colors.white.withValues(alpha: 0.9),
                                           fontSize: 12,
                                           fontWeight: FontWeight.w600,
                                         ),
@@ -175,7 +175,7 @@ class BillingScreen extends StatelessWidget {
                                   Text(
                                     'TOTAL KWH CONSUMPTION',
                                     style: TextStyle(
-                                      color: Colors.white.withOpacity(0.75),
+                                      color: Colors.white.withValues(alpha: 0.75),
                                       fontSize: 10,
                                       fontWeight: FontWeight.w700,
                                       letterSpacing: 0.5,
@@ -186,7 +186,7 @@ class BillingScreen extends StatelessWidget {
                                     borderRadius: BorderRadius.circular(10),
                                     child: LinearProgressIndicator(
                                       value: 0.826,
-                                      backgroundColor: Colors.white.withOpacity(0.25),
+                                      backgroundColor: Colors.white.withValues(alpha: 0.25),
                                       valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
                                       minHeight: 7,
                                     ),
@@ -204,7 +204,7 @@ class BillingScreen extends StatelessWidget {
                                         child: Text(
                                           '34.80 kWh remaining before tier escalation',
                                           style: TextStyle(
-                                            color: Colors.white.withOpacity(0.95),
+                                            color: Colors.white.withValues(alpha: 0.95),
                                             fontSize: 11,
                                             fontWeight: FontWeight.w500,
                                           ),
@@ -296,7 +296,7 @@ class BillingScreen extends StatelessWidget {
             Text(
               title,
               style: TextStyle(
-                color: Colors.white.withOpacity(0.9),
+                color: Colors.white.withValues(alpha: 0.9),
                 fontSize: 11,
                 fontWeight: FontWeight.w500,
               ),
@@ -334,7 +334,7 @@ class BillingScreen extends StatelessWidget {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.015),
+            color: Colors.black.withValues(alpha: 0.015),
             blurRadius: 8,
             offset: const Offset(0, 3),
           ),
@@ -350,7 +350,7 @@ class BillingScreen extends StatelessWidget {
               Text(
                 tierTitle,
                 style: TextStyle(
-                  color: isActive ? Colors.white.withOpacity(0.9) : Colors.grey[600],
+                  color: isActive ? Colors.white.withValues(alpha: 0.9) : Colors.grey[600],
                   fontSize: 11,
                   fontWeight: FontWeight.w700,
                 ),
@@ -359,7 +359,7 @@ class BillingScreen extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.35),
+                    color: Colors.white.withValues(alpha: 0.35),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: const Text(
@@ -377,7 +377,7 @@ class BillingScreen extends StatelessWidget {
           Text(
             range,
             style: TextStyle(
-              color: isActive ? Colors.white : textDark.withOpacity(0.85),
+              color: isActive ? Colors.white : textDark.withValues(alpha: 0.85),
               fontSize: 18,
               fontWeight: FontWeight.w700,
             ),
@@ -386,7 +386,7 @@ class BillingScreen extends StatelessWidget {
           Text(
             'RATE',
             style: TextStyle(
-              color: isActive ? Colors.white.withOpacity(0.75) : Colors.grey[500],
+              color: isActive ? Colors.white.withValues(alpha: 0.75) : Colors.grey[500],
               fontSize: 9,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.5,
@@ -411,7 +411,7 @@ class CardWavePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = Colors.white.withOpacity(0.06) // Smooth subtle light lines matching the image
+      ..color = Colors.white.withValues(alpha: 0.06) // Smooth subtle light lines matching the image
       ..style = PaintingStyle.stroke
       ..strokeWidth = 28.0; // Thick smooth vector strokes
 

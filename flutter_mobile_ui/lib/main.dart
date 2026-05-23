@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
+import 'package:firebase_core/firebase_core.dart'; // 1. Added Firebase Core import
 
 // ── IMPORT YOUR ACTUAL FILES HERE ─────────────────────────────────────────
 import 'dashboard.dart';
 import 'billing.dart'; // This connects your navigation to your real billing file
 import 'alert.dart';
 
-void main() {
+// 2. Made main() asynchronous to allow Firebase initialization
+void main() async {
+  // 3. Ensure Flutter bindings are initialized before calling native code
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // 4. Initialize Firebase
+  await Firebase.initializeApp();
+  
   runApp(const MyApp());
 }
 
@@ -134,7 +142,7 @@ class _MainScreenState extends State<MainScreen> {
             borderRadius: BorderRadius.circular(40),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.10),
+                color: Colors.black.withValues(alpha: 0.10),
                 blurRadius: 24,
                 offset: const Offset(0, 6),
               ),
@@ -194,6 +202,3 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 }
-
-// Note: The dummy "BillingScreen" class has been deleted from here 
-// so your code links directly to the one declared inside 'billing.dart'.

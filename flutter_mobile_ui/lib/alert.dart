@@ -23,7 +23,7 @@ class AlertsScreen extends StatelessWidget {
                 gradient: LinearGradient(
                   colors: [
                     lightOrangeBg,
-                    lightOrangeBg.withOpacity(0.6),
+                    lightOrangeBg.withValues(alpha: 0.6),
                     creamBg,
                   ],
                   begin: Alignment.topCenter,
@@ -42,7 +42,7 @@ class AlertsScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // ── TOP HERO SECTION CONTAINER (BACKGROUND REMOVED) ──────
-                  Container(
+                  SizedBox(
                     width: double.infinity,
                     child: SafeArea(
                       bottom: false,
@@ -65,7 +65,7 @@ class AlertsScreen extends StatelessWidget {
                             Text(
                               'Real-time system deviations',
                               style: TextStyle(
-                                color: Colors.white.withOpacity(0.85),
+                                color: Colors.white.withValues(alpha: 0.85),
                                 fontSize: 14,
                                 fontWeight: FontWeight.w500,
                               ),
@@ -81,7 +81,7 @@ class AlertsScreen extends StatelessWidget {
                                 borderRadius: BorderRadius.circular(24),
                                 boxShadow: [
                                   BoxShadow(
-                                    color: Colors.black.withOpacity(0.04),
+                                    color: Colors.black.withValues(alpha: 0.04),
                                     blurRadius: 16,
                                     offset: const Offset(0, 6),
                                   ),
@@ -242,7 +242,7 @@ class AlertsScreen extends StatelessWidget {
                         borderRadius: BorderRadius.circular(24),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withOpacity(0.03),
+                            color: Colors.black.withValues(alpha: 0.03),
                             blurRadius: 16,
                             offset: const Offset(0, 6),
                           ),

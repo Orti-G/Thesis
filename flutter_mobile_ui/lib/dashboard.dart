@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:firebase_database/firebase_database.dart';
 
 class Dashboard extends StatefulWidget {
   const Dashboard({super.key});
@@ -11,16 +11,27 @@ class Dashboard extends StatefulWidget {
 }
 
 class _DashboardState extends State<Dashboard> {
+  // Timer & Firebase Subscription
   Timer? _timer;
-  double _timeOffset = 0.0;
+  StreamSubscription<DatabaseEvent>? _dbSubscription;
   
   // State for collapsible Advanced Metrics
   bool _isAdvancedMetricsExpanded = false;
   
-  // Live numeric values
-  double _currentWatts = 1450.0;
-  double _currentAmps = 6.3;
-  double _currentVoltage = 230.2;
+  // Live numeric values from Firebase
+  double _currentWatts = 0.0;
+  double _cumulativeEnergy = 0.0;
+  double _currentAmps = 0.0;
+  double _frequency = 0.0;
+  double _powerFactor = 0.0;
+  double _currentVoltage = 0.0;
+
+  // Chart History Arrays (keeps the last 20 data points)
+  final int maxDataPoints = 20;
+  late List<double> _energyHistory; // For cumulative energy (kWh)
+  late List<double> _wattsHistory;
+  late List<double> _ampsHistory;
+  late List<double> _voltageHistory;
   
   // Colors matching your system design
   final Color primaryOrange = const Color(0xFFF26E22);
@@ -31,52 +42,97 @@ class _DashboardState extends State<Dashboard> {
   @override
   void initState() {
     super.initState();
-    _timer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+    
+    // Initialize history arrays with zeros and make them GROWABLE
+    _energyHistory = List.filled(maxDataPoints, 0.0, growable: true);
+    _wattsHistory = List.filled(maxDataPoints, 0.0, growable: true);
+    _ampsHistory = List.filled(maxDataPoints, 0.0, growable: true);
+    _voltageHistory = List.filled(maxDataPoints, 0.0, growable: true);
+
+    _setupFirebaseListener();
+
+    // Timer to update charts every 2 seconds
+    _timer = Timer.periodic(const Duration(seconds: 2), (timer) {
       setState(() {
-        _timeOffset += 0.006;
-        _currentWatts = 1450 + (math.sin(_timeOffset * 1.5) * 20);
-        _currentAmps = 6.3 + (math.sin((_timeOffset * 2.0) + (math.pi / 2)) * 0.1);
-        _currentVoltage = 230.2 + (math.sin((_timeOffset * 1.0) + math.pi) * 0.5);
+        // Shift data to the left and append the newest live reading
+        if (_energyHistory.length >= maxDataPoints) {
+          _energyHistory.removeAt(0);
+        }
+        _energyHistory.add(_cumulativeEnergy);
+
+        if (_wattsHistory.length >= maxDataPoints) {
+          _wattsHistory.removeAt(0);
+        }
+        _wattsHistory.add(_currentWatts);
+
+        if (_ampsHistory.length >= maxDataPoints) {
+          _ampsHistory.removeAt(0);
+        }
+        _ampsHistory.add(_currentAmps);
+
+        if (_voltageHistory.length >= maxDataPoints) {
+          _voltageHistory.removeAt(0);
+        }
+        _voltageHistory.add(_currentVoltage);
       });
+    });
+  }
+
+  void _setupFirebaseListener() {
+    // Reference to your specific Firebase Realtime Database node
+    DatabaseReference ref = FirebaseDatabase.instance.ref('live_reading');
+    
+    _dbSubscription = ref.onValue.listen((event) {
+      if (event.snapshot.value != null) {
+        final data = event.snapshot.value as Map<dynamic, dynamic>;
+        
+        setState(() {
+          // Parse values safely, defaulting to 0.0 if missing
+          // Match exact Firebase field names from your database
+          _currentWatts = (data['active_power_W'] ?? 0).toDouble();
+          _cumulativeEnergy = (data['cumulative_energy_kWh'] ?? 0).toDouble();
+          _currentAmps = (data['current_A'] ?? 0).toDouble();
+          _frequency = (data['frequency_Hz'] ?? 0).toDouble();
+          _powerFactor = (data['power_factor'] ?? 0).toDouble();
+          _currentVoltage = (data['voltage_V'] ?? 0).toDouble();
+        });
+      }
     });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _dbSubscription?.cancel();
     super.dispose();
   }
 
-  List<FlSpot> _generateLiveStepSpots() {
-    List<FlSpot> spots = [];
-    double segmentWidth = 2.5;
-    double offset = _timeOffset % segmentWidth;
-    for (double x = -2.5; x <= 12.5; x += segmentWidth) {
-      double currentX = x - offset;
-      int stepIndex = ((x + _timeOffset) / segmentWidth).floor();
-      double y = 4.0 + (stepIndex % 3) * 1.8 + math.sin(stepIndex.toDouble()) * 0.7;
-      y = y.clamp(1.5, 9.0);
-      spots.add(FlSpot(currentX, y));
-    }
-    spots.sort((a, b) => a.x.compareTo(b.x));
-    return spots;
+  // Helper to convert historical double arrays into FlSpots for the charts
+  List<FlSpot> _generateChartSpots(List<double> history) {
+    return history.asMap().entries.map((e) {
+      return FlSpot(e.key.toDouble(), e.value);
+    }).toList();
   }
 
-  List<FlSpot> _generateLiveSpots(
-      double frequency, double amplitude, double phase, double yOffset) {
-    return List.generate(20, (index) {
-      final x = index.toDouble();
-      final y = math.sin((x * frequency) + (_timeOffset * 3.5) + phase) *
-              amplitude +
-          yOffset;
-      return FlSpot(x, y);
-    });
+  // Calculate min and max for dynamic chart scaling
+  double _getMinY(List<double> history) {
+    if (history.isEmpty) return 0;
+    double min = history.reduce((a, b) => a < b ? a : b);
+    // Add 20% padding below
+    return (min * 0.8).clamp(0, double.infinity);
+  }
+
+  double _getMaxY(List<double> history) {
+    if (history.isEmpty) return 1;
+    double max = history.reduce((a, b) => a > b ? a : b);
+    // Add 20% padding above
+    return max * 1.2;
   }
 
   String _formatWithCommas(double value) {
     RegExp reg = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
     String mathFunc(Match match) => '${match[1]},';
-    return value.toStringAsFixed(0).replaceAllMapped(reg, mathFunc);
+    return value.toStringAsFixed(2).replaceAllMapped(reg, mathFunc);
   }
 
   @override
@@ -84,7 +140,7 @@ class _DashboardState extends State<Dashboard> {
     return Scaffold(
       backgroundColor: bgColor,
       body: SafeArea(
-        bottom: false, // Allows the scroll content to flow perfectly past the bottom notch/navbar
+        bottom: false,
         child: SingleChildScrollView(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 16.0),
@@ -93,14 +149,14 @@ class _DashboardState extends State<Dashboard> {
               children: [
                 const SizedBox(height: 10),
                 
-                // HEADER SECTION
+                // HEADER SECTION (Cumulative Energy)
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
-                    const Text(
-                      '342.85',
-                      style: TextStyle(
+                    Text(
+                      _formatWithCommas(_cumulativeEnergy),
+                      style: const TextStyle(
                         fontSize: 44,
                         fontWeight: FontWeight.w800,
                         letterSpacing: -1,
@@ -119,7 +175,7 @@ class _DashboardState extends State<Dashboard> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  '+2.4 kWh (0.7%) today',
+                  'Live Update Mode Active',
                   style: TextStyle(
                       fontSize: 14,
                       color: Colors.grey[800],
@@ -136,7 +192,7 @@ class _DashboardState extends State<Dashboard> {
                 ),
                 const SizedBox(height: 25),
                 
-                // MAIN STEPPED LIVE CHART
+                // MAIN STEPPED LIVE CHART (Cumulative Energy / kWh)
                 SizedBox(
                   height: 160,
                   width: double.infinity,
@@ -145,13 +201,11 @@ class _DashboardState extends State<Dashboard> {
                       gridData: const FlGridData(show: false),
                       titlesData: const FlTitlesData(show: false),
                       borderData: FlBorderData(show: false),
-                      minX: 0,
-                      maxX: 10,
-                      minY: 0,
-                      maxY: 10,
+                      minY: _getMinY(_energyHistory),
+                      maxY: _getMaxY(_energyHistory),
                       lineBarsData: [
                         LineChartBarData(
-                          spots: _generateLiveStepSpots(),
+                          spots: _generateChartSpots(_energyHistory),
                           isCurved: false,
                           isStepLineChart: true,
                           color: primaryOrange,
@@ -161,8 +215,8 @@ class _DashboardState extends State<Dashboard> {
                             show: true,
                             gradient: LinearGradient(
                               colors: [
-                                primaryOrange.withOpacity(0.25),
-                                primaryOrange.withOpacity(0.0),
+                                primaryOrange.withValues(alpha: 0.25),
+                                primaryOrange.withValues(alpha: 0.0),
                               ],
                               begin: Alignment.topCenter,
                               end: Alignment.bottomCenter,
@@ -192,7 +246,7 @@ class _DashboardState extends State<Dashboard> {
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: const Text(
-                        'ALL',
+                        'LIVE',
                         style: TextStyle(
                             color: Colors.white,
                             fontSize: 12,
@@ -222,26 +276,29 @@ class _DashboardState extends State<Dashboard> {
                 // LIVE FEED CARDS
                 _buildLiveFeedCard(
                   title: 'Watts',
-                  value: _formatWithCommas(_currentWatts),
+                  value: _currentWatts.toStringAsFixed(0),
                   unit: 'W',
-                  subtitle: 'Normal range',
-                  spots: _generateLiveSpots(0.4, 1.5, 0, 5),
+                  subtitle: 'Active Power',
+                  spots: _generateChartSpots(_wattsHistory),
+                  history: _wattsHistory,
                 ),
                 const SizedBox(height: 12),
                 _buildLiveFeedCard(
                   title: 'Current',
-                  value: _currentAmps.toStringAsFixed(1),
+                  value: _currentAmps.toStringAsFixed(2),
                   unit: 'A',
-                  subtitle: 'Peak load: 8.2 A',
-                  spots: _generateLiveSpots(0.6, 2.0, math.pi / 2, 4),
+                  subtitle: 'Live Amperage',
+                  spots: _generateChartSpots(_ampsHistory),
+                  history: _ampsHistory,
                 ),
                 const SizedBox(height: 12),
                 _buildLiveFeedCard(
                   title: 'Voltage',
                   value: _currentVoltage.toStringAsFixed(1),
                   unit: 'V',
-                  subtitle: 'Normal range',
-                  spots: _generateLiveSpots(0.3, 1.0, math.pi, 6),
+                  subtitle: 'Mains Line Voltage',
+                  spots: _generateChartSpots(_voltageHistory),
+                  history: _voltageHistory,
                 ),
                 const SizedBox(height: 30),
                 
@@ -264,11 +321,15 @@ class _DashboardState extends State<Dashboard> {
                               fontWeight: FontWeight.w700,
                               letterSpacing: 0.5),
                         ),
-                        Icon(
-                          _isAdvancedMetricsExpanded
-                              ? Icons.keyboard_arrow_up_rounded
-                              : Icons.keyboard_arrow_down_rounded,
-                          color: Colors.grey[800],
+                        AnimatedRotation(
+                          turns: _isAdvancedMetricsExpanded ? 0.5 : 0,
+                          duration: const Duration(milliseconds: 300),
+                          alignment: Alignment.center,
+                          child: Icon(
+                            Icons.expand_more_rounded,
+                            color: Colors.grey[800],
+                            size: 24,
+                          ),
                         ),
                       ],
                     ),
@@ -278,7 +339,7 @@ class _DashboardState extends State<Dashboard> {
                 
                 // ADVANCED METRICS CARDS (Collapsible)
                 AnimatedSize(
-                  duration: const Duration(milliseconds: 250),
+                  duration: const Duration(milliseconds: 300),
                   curve: Curves.easeInOut,
                   child: _isAdvancedMetricsExpanded
                       ? Column(
@@ -287,12 +348,12 @@ class _DashboardState extends State<Dashboard> {
                               children: [
                                 Expanded(
                                   child: _buildMetricCard(
-                                      'Frequency', '60.0', 'Hz'),
+                                      'Frequency', _frequency.toStringAsFixed(1), 'Hz'),
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: _buildMetricCard(
-                                      'Power Factor', '0.95', 'PF'),
+                                      'Power Factor', _powerFactor.toStringAsFixed(2), 'PF'),
                                 ),
                               ],
                             ),
@@ -302,7 +363,6 @@ class _DashboardState extends State<Dashboard> {
                       : const SizedBox.shrink(),
                 ),
                 
-                // Padding block ensures the content rolls cleanly above the floating navbar
                 const SizedBox(height: 120),
               ],
             ),
@@ -332,6 +392,7 @@ class _DashboardState extends State<Dashboard> {
     required String unit,
     required String subtitle,
     required List<FlSpot> spots,
+    required List<double> history,
   }) {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -340,7 +401,7 @@ class _DashboardState extends State<Dashboard> {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
+            color: Colors.black.withValues(alpha: 0.02),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -395,10 +456,8 @@ class _DashboardState extends State<Dashboard> {
                 gridData: const FlGridData(show: false),
                 titlesData: const FlTitlesData(show: false),
                 borderData: FlBorderData(show: false),
-                minX: 0,
-                maxX: 19,
-                minY: 0,
-                maxY: 10,
+                minY: _getMinY(history),
+                maxY: _getMaxY(history),
                 lineBarsData: [
                   LineChartBarData(
                     spots: spots,
@@ -410,8 +469,8 @@ class _DashboardState extends State<Dashboard> {
                       show: true,
                       gradient: LinearGradient(
                         colors: [
-                          primaryOrange.withOpacity(0.2),
-                          primaryOrange.withOpacity(0.0),
+                          primaryOrange.withValues(alpha: 0.2),
+                          primaryOrange.withValues(alpha: 0.0),
                         ],
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
@@ -435,7 +494,7 @@ class _DashboardState extends State<Dashboard> {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
+            color: Colors.black.withValues(alpha: 0.02),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
