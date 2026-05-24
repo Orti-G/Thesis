@@ -8,6 +8,7 @@ import 'package:firebase_database/firebase_database.dart'; // <-- ADDED THIS IMP
 import 'dashboard.dart';
 import 'billing.dart' as billing;
 import 'alert.dart';
+import 'settings.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -152,6 +153,7 @@ class _MainScreenState extends State<MainScreen> {
     const Dashboard(),
     billing.BillingScreen(),
     AlertsScreen(),
+    const SettingsScreen(),
     const Center(
       child: Text("Settings"),
     ),
