@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart'; 
+import 'package:http/http.dart' as http; 
+import 'package:lottie/lottie.dart';
+import 'package:custom_refresh_indicator/custom_refresh_indicator.dart';
 
 class BillingScreen extends StatelessWidget {
   BillingScreen({super.key});
@@ -12,6 +15,21 @@ class BillingScreen extends StatelessWidget {
   // Reference to the root of your Realtime Database
   final DatabaseReference _dbRef = FirebaseDatabase.instance.ref();
 
+  // HTTP trigger function to calculate new forecasts
+  Future<void> _handleRefresh() async {
+    final url = Uri.parse('http://35.209.250.46:8000/forecast');
+    try {
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        debugPrint('Forecast successfully refreshed via API.');
+      } else {
+        debugPrint('API server returned an error: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Error sending refresh request: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -19,6 +37,7 @@ class BillingScreen extends StatelessWidget {
       body: StreamBuilder<DatabaseEvent>(
         stream: _dbRef.onValue,
         builder: (context, snapshot) {
+          
           // Default fallback values
           double forecast = 0.0;
           double cumulativeEnergy = 0.0;
@@ -27,16 +46,16 @@ class BillingScreen extends StatelessWidget {
           if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
             final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
             
-            // Remapped forecast to predicted_day_total_kwh
+            // Case-sensitive lookup for predicted_day_total_kWh
             final forecastData = data['forecast'] as Map<dynamic, dynamic>?;
             if (forecastData != null) {
-              forecast = (forecastData['predicted_day_total_kwh'] ?? 0).toDouble();
+              forecast = (forecastData['predicted_day_total_kWh'] ?? forecastData['predicted_day_total_kwh'] ?? 0).toDouble();
             }
             
-            // Remapped cumulative energy to cumul_kwh
+            // Defensive check for cumul_kWh casing as well
             final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
             if (liveReading != null) {
-              cumulativeEnergy = (liveReading['cumul_kwh'] ?? 0).toDouble();
+              cumulativeEnergy = (liveReading['cumul_kWh'] ?? liveReading['cumul_kwh'] ?? 0).toDouble();
             }
           }
 
@@ -44,276 +63,323 @@ class BillingScreen extends StatelessWidget {
           final double percentage = (cumulativeEnergy / 200).clamp(0.0, 1.0);
           final double remaining = (200 - cumulativeEnergy).clamp(0.0, 200.0);
 
-          return SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // ── TOP HERO SECTION WITH PNG BACKGROUND ─────────────────────────
-                Stack(
-                  children: [
-                    Image.asset(
-                      'assets/billingbg.png', 
-                      width: double.infinity,
-                      fit: BoxFit.fitWidth,
-                    ),
-                    SafeArea(
-                      bottom: false,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const SizedBox(height: 10),
-                            Text(
-                              'ESTIMATED END OF THE DAY BILL:',
-                              style: TextStyle(
-                                color: brandOrangeText.withValues(alpha: 0.9),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0.5,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              '(Based on current consumption trajectory)',
-                              style: TextStyle(
-                                color: const Color(0xFFBA7A5F).withValues(alpha: 0.8),
-                                fontSize: 11,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            // MAPPED FORECAST
-                            Text(
-                              '₱${forecast.toStringAsFixed(2)}',
-                              style: TextStyle(
-                                color: brandOrangeText,
-                                fontSize: 44,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: -0.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      bottom: 10.0,
-                      right: 24.0,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.trending_up_rounded,
-                                color: Colors.greenAccent,
-                                size: 15,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                'Current Consumption',
-                                style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.95),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 2),
-                          // MAPPED CUMULATIVE ENERGY
-                          Text(
-                            '${cumulativeEnergy.toStringAsFixed(2)} kWh',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 19,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+          // ── REPLACED DEFAULT REFRESH INDICATOR WITH CUSTOM LOTTIE INDICATOR ──
+          return CustomMaterialIndicator(
+            onRefresh: _handleRefresh,
+            backgroundColor: Colors.white,
+            indicatorBuilder: (context, controller) {
+              return Padding(
+                padding: const EdgeInsets.all(6.0),
+                child: Lottie.asset(
+                  'assets/spark loading.json',
+                  // Kept small to fit nicely inside the standard pull-to-refresh circle
+                  width: 30, 
+                  height: 30,
+                  fit: BoxFit.contain,
                 ),
-
-                // ── MAIN CONTENT BODY ────────────────────────────────────────────
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+              );
+            },
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(
+                parent: BouncingScrollPhysics(),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // ── TOP HERO SECTION WITH PNG BACKGROUND ─────────────────────────
+                  Stack(
                     children: [
-                      const SizedBox(height: 20),
-                      Text(
-                        'TIER',
-                        style: TextStyle(
-                          color: brandOrangeText,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.6,
-                        ),
+                      Image.asset(
+                        'assets/billingbg.png', 
+                        width: double.infinity,
+                        fit: BoxFit.fitWidth,
                       ),
-                      const SizedBox(height: 12),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(28),
-                        child: Container(
-                          width: double.infinity,
-                          color: primaryOrange,
-                          child: CustomPaint(
-                            painter: CardWavePainter(),
-                            child: Padding(
-                              padding: const EdgeInsets.all(22),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                      SafeArea(
+                        bottom: false,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(height: 5),
+                              // Subtle pull to refresh text hint
+                              Row(
                                 children: [
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      const Text(
-                                        'TIER 1 STATUS',
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w800,
-                                          letterSpacing: 0.5,
-                                        ),
-                                      ),
-                                      Text(
-                                        '₱0.9803/kWh',
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(alpha: 0.9),
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
+                                  Icon(
+                                    Icons.refresh_rounded, 
+                                    size: 12, 
+                                    color: brandOrangeText.withValues(alpha: 0.5),
                                   ),
-                                  const SizedBox(height: 20),
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    crossAxisAlignment: CrossAxisAlignment.baseline,
-                                    textBaseline: TextBaseline.alphabetic,
-                                    children: [
-                                      RichText(
-                                        text: TextSpan(
-                                          style: const TextStyle(color: Colors.white),
-                                          children: [
-                                            // DYNAMIC CONSUMPTION FOR TIER
-                                            TextSpan(
-                                              text: '${cumulativeEnergy.toStringAsFixed(2)} ',
-                                              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
-                                            ),
-                                            const TextSpan(
-                                              text: '/ 200',
-                                              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w500),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      // DYNAMIC PERCENTAGE
-                                      Text(
-                                        '${(percentage * 100).toStringAsFixed(1)}%',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 4),
+                                  const SizedBox(width: 4),
                                   Text(
-                                    'TOTAL KWH CONSUMPTION',
+                                    'PULL DOWN TO REFRESH FORECAST',
                                     style: TextStyle(
-                                      color: Colors.white.withValues(alpha: 0.75),
+                                      color: brandOrangeText.withValues(alpha: 0.5),
                                       fontSize: 10,
                                       fontWeight: FontWeight.w700,
                                       letterSpacing: 0.5,
                                     ),
                                   ),
-                                  const SizedBox(height: 16),
-                                  ClipRRect(
-                                    borderRadius: BorderRadius.circular(10),
-                                    child: LinearProgressIndicator(
-                                      value: percentage, // DYNAMIC PROGRESS BAR
-                                      backgroundColor: Colors.white.withValues(alpha: 0.25),
-                                      valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-                                      minHeight: 7,
-                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                'ESTIMATED END OF THE DAY BILL:',
+                                style: TextStyle(
+                                  color: brandOrangeText.withValues(alpha: 0.9),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '(Based on current consumption trajectory)',
+                                style: TextStyle(
+                                  color: const Color(0xFFBA7A5F).withValues(alpha: 0.8),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              // Displays mapped forecast value dynamically
+                              Text(
+                                '₱${forecast.toStringAsFixed(2)}',
+                                style: TextStyle(
+                                  color: brandOrangeText,
+                                  fontSize: 44,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: -0.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        bottom: 10.0,
+                        right: 24.0,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.trending_up_rounded,
+                                  color: Colors.greenAccent,
+                                  size: 15,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Current Consumption',
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.95),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
                                   ),
-                                  const SizedBox(height: 16),
-                                  Row(
-                                    children: [
-                                      const Icon(
-                                        Icons.info_outline_rounded,
-                                        color: Colors.white,
-                                        size: 15,
-                                      ),
-                                      const SizedBox(width: 6),
-                                      Expanded(
-                                        child: Text(
-                                          // DYNAMIC REMAINING KWH
-                                          '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation',
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${cumulativeEnergy.toStringAsFixed(2)} kWh',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 19,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // ── MAIN CONTENT BODY ────────────────────────────────────────────
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 20),
+                        Text(
+                          'TIER',
+                          style: TextStyle(
+                            color: brandOrangeText,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(28),
+                          child: Container(
+                            width: double.infinity,
+                            color: primaryOrange,
+                            child: CustomPaint(
+                              painter: CardWavePainter(),
+                              child: Padding(
+                                padding: const EdgeInsets.all(22),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        const Text(
+                                          'TIER 1 STATUS',
                                           style: TextStyle(
-                                            color: Colors.white.withValues(alpha: 0.95),
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w500,
+                                            color: Colors.white,
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 0.5,
                                           ),
                                         ),
+                                        Text(
+                                          '₱0.9803/kWh',
+                                          style: TextStyle(
+                                            color: Colors.white.withValues(alpha: 0.9),
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 20),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                                      textBaseline: TextBaseline.alphabetic,
+                                      children: [
+                                        RichText(
+                                          text: TextSpan(
+                                            style: const TextStyle(color: Colors.white),
+                                            children: [
+                                              TextSpan(
+                                                text: '${cumulativeEnergy.toStringAsFixed(2)} ',
+                                                style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
+                                              ),
+                                              const TextSpan(
+                                                text: '/ 200',
+                                                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w500),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Text(
+                                          '${(percentage * 100).toStringAsFixed(1)}%',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'TOTAL KWH CONSUMPTION',
+                                      style: TextStyle(
+                                        color: Colors.white.withValues(alpha: 0.75),
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w700,
+                                        letterSpacing: 0.5,
                                       ),
-                                    ],
-                                  ),
-                                ],
+                                    ),
+                                    const SizedBox(height: 16),
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(10),
+                                      child: LinearProgressIndicator(
+                                        value: percentage, 
+                                        backgroundColor: Colors.white.withValues(alpha: 0.25),
+                                        valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                                        minHeight: 7,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.info_outline_rounded,
+                                          color: Colors.white,
+                                          size: 15,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                          child: Text(
+                                            '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation',
+                                            style: TextStyle(
+                                              color: Colors.white.withValues(alpha: 0.95),
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 28),
-                      Text(
-                        'RATE BRACKETS',
-                        style: TextStyle(
-                          color: textDark,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 0.5,
+                        
+                        // Subtle visual divider
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 24.0),
+                          child: Divider(
+                            color: textDark.withValues(alpha: 0.08),
+                            thickness: 1,
+                            height: 1,
+                          ),
                         ),
-                      ),
-                    ],
+
+                        Text(
+                          'RATE BRACKETS',
+                          style: TextStyle(
+                            color: textDark,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  height: 155,
-                  child: ListView(
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 18.0),
-                    physics: const BouncingScrollPhysics(),
-                    children: [
-                      _buildRateCard(
-                        tierTitle: 'TIER 1',
-                        range: 'Up to 200 kWh',
-                        rate: '₱0.9803/kWh',
-                        isActive: cumulativeEnergy <= 200, // DYNAMIC ACTIVE STATE
-                      ),
-                      _buildRateCard(
-                        tierTitle: 'TIER 2',
-                        range: '201 - 300 kWh',
-                        rate: '₱1.2908/kWh',
-                        isActive: cumulativeEnergy > 200 && cumulativeEnergy <= 300, 
-                      ),
-                      _buildRateCard(
-                        tierTitle: 'TIER 3',
-                        range: '301 - 400 kWh',
-                        rate: '₱1.5837/kWh',
-                        isActive: cumulativeEnergy > 300, 
-                      ),
-                    ],
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    height: 155,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 18.0),
+                      physics: const BouncingScrollPhysics(),
+                      children: [
+                        _buildRateCard(
+                          tierTitle: 'TIER 1',
+                          range: 'Up to 200 kWh',
+                          rate: '₱0.9803/kWh',
+                          isActive: cumulativeEnergy <= 200, 
+                        ),
+                        _buildRateCard(
+                          tierTitle: 'TIER 2',
+                          range: '201 - 300 kWh',
+                          rate: '₱1.2908/kWh',
+                          isActive: cumulativeEnergy > 200 && cumulativeEnergy <= 300, 
+                        ),
+                        _buildRateCard(
+                          tierTitle: 'TIER 3',
+                          range: '301 - 400 kWh',
+                          rate: '₱1.5837/kWh',
+                          isActive: cumulativeEnergy > 300, 
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 60),
-              ],
+                  const SizedBox(height: 120),
+                ],
+              ),
             ),
           );
         }
