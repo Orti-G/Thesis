@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_database/firebase_database.dart';
 
 class AlertsScreen extends StatelessWidget {
-  const AlertsScreen({super.key});
+  AlertsScreen({super.key});
 
   final Color primaryOrange = const Color(0xFFF26E22);
   final Color lightOrangeBg = const Color(0xFFFA8B39);
@@ -9,6 +10,12 @@ class AlertsScreen extends StatelessWidget {
   final Color textDark = const Color(0xFF1E1E1E);
   final Color criticalText = const Color(0xFFE53935);
   final Color criticalBg = const Color(0xFFFFEBEE);
+  final Color safeText = const Color(0xFF2E7D32);
+  final Color safeBg = const Color(0xFFE8F5E9);
+
+  // Reference to the 'anomaly_alert' node in Firebase Realtime Database
+  final DatabaseReference _anomalyRef =
+      FirebaseDatabase.instance.ref().child('anomaly_alert');
 
   @override
   Widget build(BuildContext context) {
@@ -33,7 +40,7 @@ class AlertsScreen extends StatelessWidget {
               ),
             ),
           ),
-          
+
           // ── SCROLLABLE CONTENTS LAYER ───────────────────────────────────
           Positioned.fill(
             child: SingleChildScrollView(
@@ -41,13 +48,14 @@ class AlertsScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ── TOP HERO SECTION CONTAINER (BACKGROUND REMOVED) ──────
+                  // ── TOP HERO SECTION ──────
                   SizedBox(
                     width: double.infinity,
                     child: SafeArea(
                       bottom: false,
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 24.0, vertical: 20.0),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -72,159 +80,40 @@ class AlertsScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 24),
 
-                            // ── CRITICAL ANOMALY PROFILE CARD ──────────────────
-                            Container(
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(20),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(24),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: 0.04),
-                                    blurRadius: 16,
-                                    offset: const Offset(0, 6),
-                                  ),
-                                ],
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(10),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFFFF3E0),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(color: const Color(0xFFFFE0B2), width: 1),
-                                    ),
-                                    child: Icon(
-                                      Icons.warning_amber_rounded,
-                                      color: primaryOrange,
-                                      size: 24,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 16),
-                                  
-                                  Row(
-                                    children: [
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: criticalBg,
-                                          borderRadius: BorderRadius.circular(8),
-                                        ),
-                                        child: Text(
-                                          'CRITICAL',
-                                          style: TextStyle(
-                                            color: criticalText,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w900,
-                                            letterSpacing: 0.5,
-                                          ),
-                                        ),
+                            // ── FIREBASE STREAM BUILDER ──────────────────
+                            StreamBuilder<DatabaseEvent>(
+                              stream: _anomalyRef.onValue,
+                              builder: (context, snapshot) {
+                                if (snapshot.connectionState ==
+                                    ConnectionState.waiting) {
+                                  return const Center(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(20.0),
+                                      child: CircularProgressIndicator(
+                                        color: Colors.white,
                                       ),
-                                      const SizedBox(width: 10),
-                                      Text(
-                                        'Just now',
-                                        style: TextStyle(
-                                          color: Colors.grey[500],
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 12),
-                                  
-                                  Text(
-                                    'Critical Anomaly Detected',
-                                    style: TextStyle(
-                                      color: textDark,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w800,
                                     ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'A significant deviation in current draw (45A vs 20A normal) has been detected outside of typical operating patterns.',
-                                    style: TextStyle(
-                                      color: Colors.grey[600],
-                                      fontSize: 14,
-                                      height: 1.4,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 20),
+                                  );
+                                }
 
-                                  Container(
-                                    width: double.infinity,
-                                    padding: const EdgeInsets.all(16),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFF8F9FA),
-                                      borderRadius: BorderRadius.circular(16),
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'Was this expected?',
-                                          style: TextStyle(
-                                            color: textDark,
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w800,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 12),
-                                        
-                                        SizedBox(
-                                          width: double.infinity,
-                                          height: 44,
-                                          child: ElevatedButton.icon(
-                                            onPressed: () {},
-                                            icon: const Icon(Icons.search_rounded, size: 18),
-                                            label: const Text('No, investigate'),
-                                            style: ElevatedButton.styleFrom(
-                                              backgroundColor: primaryOrange,
-                                              foregroundColor: Colors.white,
-                                              elevation: 0,
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius: BorderRadius.circular(12),
-                                              ),
-                                              textStyle: const TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        
-                                        SizedBox(
-                                          width: double.infinity,
-                                          height: 44,
-                                          child: OutlinedButton.icon(
-                                            onPressed: () {},
-                                            icon: const Icon(Icons.check_circle_outline_rounded, size: 18),
-                                            label: const Text('Yes, it was me'),
-                                            style: OutlinedButton.styleFrom(
-                                              foregroundColor: textDark,
-                                              side: BorderSide(color: Colors.grey[300]!, width: 1.5),
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius: BorderRadius.circular(12),
-                                              ),
-                                              backgroundColor: Colors.white,
-                                              textStyle: const TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                if (snapshot.hasError ||
+                                    !snapshot.hasData ||
+                                    snapshot.data?.snapshot.value == null) {
+                                  return _buildSafeCard(); // Default to safe if no data
+                                }
+
+                                // Parse Firebase Data
+                                final data = snapshot.data!.snapshot.value
+                                    as Map<dynamic, dynamic>;
+                                final bool isAnomaly =
+                                    data['is_anomaly'] ?? false;
+                                
+                                if (isAnomaly) {
+                                  return _buildCriticalCard(data);
+                                } else {
+                                  return _buildSafeCard();
+                                }
+                              },
                             ),
                           ],
                         ),
@@ -234,7 +123,8 @@ class AlertsScreen extends StatelessWidget {
 
                   // ── NOTIFICATIONS FEED LIST SECTION ────────────────────────────
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 8.0),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24.0, vertical: 8.0),
                     child: Container(
                       width: double.infinity,
                       decoration: BoxDecoration(
@@ -252,7 +142,11 @@ class AlertsScreen extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Padding(
-                            padding: const EdgeInsets.only(left: 20.0, right: 20.0, top: 22.0, bottom: 6.0),
+                            padding: const EdgeInsets.only(
+                                left: 20.0,
+                                right: 20.0,
+                                top: 22.0,
+                                bottom: 6.0),
                             child: Text(
                               'Notifications Feed',
                               style: TextStyle(
@@ -262,23 +156,24 @@ class AlertsScreen extends StatelessWidget {
                               ),
                             ),
                           ),
-                          
                           _buildNotificationItem(
                             icon: Icons.trending_up_rounded,
                             title: 'Tier-Crossing Warning',
                             timestamp: '1 hr ago',
-                            description: 'You are approaching Tier 2 escalation based on current trajectory.',
+                            description:
+                                'You are approaching Tier 2 escalation based on current trajectory.',
                           ),
-                          
                           _buildNotificationItem(
                             icon: Icons.eco_outlined,
                             title: 'Daily Report',
                             timestamp: 'Yesterday',
-                            description: 'Your energy efficiency improved by 5% yesterday compared to the weekly average.',
+                            description:
+                                'Your energy efficiency improved by 5% yesterday compared to the weekly average.',
                           ),
-                          
-                          Divider(color: Colors.grey[100], height: 1, thickness: 1),
-                          
+                          Divider(
+                              color: Colors.grey[100],
+                              height: 1,
+                              thickness: 1),
                           InkWell(
                             onTap: () {},
                             borderRadius: const BorderRadius.only(
@@ -307,6 +202,231 @@ class AlertsScreen extends StatelessWidget {
                   const SizedBox(height: 120),
                 ],
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── CRITICAL ANOMALY WIDGET (is_anomaly == true) ────────────────────────
+  Widget _buildCriticalCard(Map<dynamic, dynamic> data) {
+    final powerAvg = data['power_avg'] ?? 0;
+    final score = data['score'] ?? 0.0;
+    
+    // Attempt to format timestamp safely
+    String timeString = "Just now";
+    if (data['timestamp'] != null) {
+      try {
+        DateTime parsedTime = DateTime.parse(data['timestamp'].toString());
+        timeString = "${parsedTime.hour}:${parsedTime.minute.toString().padLeft(2, '0')}";
+      } catch (e) {
+        timeString = "Just now";
+      }
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF3E0),
+              shape: BoxShape.circle,
+              border: Border.all(color: const Color(0xFFFFE0B2), width: 1),
+            ),
+            child: Icon(
+              Icons.warning_amber_rounded,
+              color: primaryOrange,
+              size: 24,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: criticalBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'CRITICAL',
+                  style: TextStyle(
+                    color: criticalText,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                timeString,
+                style: TextStyle(
+                  color: Colors.grey[500],
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Critical Anomaly Detected',
+            style: TextStyle(
+              color: textDark,
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 8),
+          // Mapping real-time database variables here
+          Text(
+            'A deviation has been detected outside typical operating patterns.\nPower Avg: $powerAvg W\nAnomaly Score: ${score.toStringAsFixed(2)}',
+            style: TextStyle(
+              color: Colors.grey[600],
+              fontSize: 14,
+              height: 1.4,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Was this expected?',
+                  style: TextStyle(
+                    color: textDark,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  height: 44,
+                  child: ElevatedButton.icon(
+                    onPressed: () {},
+                    icon: const Icon(Icons.search_rounded, size: 18),
+                    label: const Text('No, investigate'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: primaryOrange,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      textStyle: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  height: 44,
+                  child: OutlinedButton.icon(
+                    onPressed: () {},
+                    icon: const Icon(Icons.check_circle_outline_rounded,
+                        size: 18),
+                    label: const Text('Yes, it was me'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: textDark,
+                      side: BorderSide(color: Colors.grey[300]!, width: 1.5),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      backgroundColor: Colors.white,
+                      textStyle: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── SAFE WIDGET (is_anomaly == false) ──────────────────────────────────
+  Widget _buildSafeCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: safeBg,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.check_circle_rounded,
+              color: safeText,
+              size: 32,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'All Clear',
+            style: TextStyle(
+              color: textDark,
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'No anomalies detected for now.\nSystem is operating optimally.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.grey[600],
+              fontSize: 14,
+              height: 1.4,
+              fontWeight: FontWeight.w500,
             ),
           ),
         ],

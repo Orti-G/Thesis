@@ -1,7 +1,8 @@
-import 'dart:ui'; // Required for ImageFilter
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_database/firebase_database.dart'; // <-- ADDED THIS IMPORT
 
 // ── IMPORT YOUR ACTUAL FILES HERE ─────────────────────────────────────────
 import 'dashboard.dart';
@@ -141,21 +142,16 @@ class _MainScreenState extends State<MainScreen> {
 
   final Color primaryOrange = const Color(0xFFF26E22);
   final Color navIconColor = const Color(0xFF8C6B5E);
+  final Color badgeRed = const Color(0xFFE53935); // Added color for the red dot
 
-  // Since we are creating instances of classes, we use 'late'
-  // so it initializes when needed
+  // Firebase reference for the alert dot
+  final DatabaseReference _anomalyRef =
+      FirebaseDatabase.instance.ref().child('anomaly_alert');
+
   late final List<Widget> _screens = [
-    // IMPORTANT:
-    // Make sure the class inside dashboard.dart
-    // is actually named "Dashboard"
     const Dashboard(),
-
-    // Using the "billing." prefix fixes
-    // the ambiguous import error
     billing.BillingScreen(),
-
-    const AlertsScreen(),
-
+    AlertsScreen(),
     const Center(
       child: Text("Settings"),
     ),
@@ -173,10 +169,7 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  // ── REFACTORED FLOATING NAV BAR BUILDER ───────────────────────────────────────
-  // Achieves blur + drop shadows + partial transparency via layering.
   Widget _buildFloatingNavBar() {
-    // Shared geometry constants for alignment
     const double navHeight = 72.0;
     const double navBorderRadius = 40.0;
     const EdgeInsets navPadding = EdgeInsets.only(left: 24, right: 24, bottom: 28);
@@ -184,18 +177,12 @@ class _MainScreenState extends State<MainScreen> {
     return Padding(
       padding: navPadding,
       child: Stack(
-        // Centering is crucial so standard container is directly over shadow container
         alignment: Alignment.center,
         children: [
-          
-          // Layer 1: The Shadow Container
-          // To make standard drop shadows work with transparent elements on top,
-          // we use an invisible container that only contains the shadow definition.
           Container(
             height: navHeight,
-            // geometry matches the foreground layer
             decoration: BoxDecoration(
-              color: Colors.transparent, // Shadow drawn outside invisible bounds
+              color: Colors.transparent,
               borderRadius: BorderRadius.circular(navBorderRadius),
               boxShadow: [
                 BoxShadow(
@@ -206,9 +193,6 @@ class _MainScreenState extends State<MainScreen> {
               ],
             ),
           ),
-
-          // Layer 2: The Blur / Transparency Container
-          // We apply the frosted glass effect in its own layer to keep shadows clean.
           ClipRRect(
             borderRadius: BorderRadius.circular(navBorderRadius),
             child: BackdropFilter(
@@ -216,10 +200,8 @@ class _MainScreenState extends State<MainScreen> {
               child: Container(
                 height: navHeight,
                 decoration: BoxDecoration(
-                  // Slightly lowering the alpha makes Underlying content more visible
                   color: Colors.white.withValues(alpha: 0.80),
                   borderRadius: BorderRadius.circular(navBorderRadius),
-                  // Removed the solid border from Turn 5, as shadows are back.
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -234,11 +216,27 @@ class _MainScreenState extends State<MainScreen> {
                       icon: Icons.receipt_long_outlined,
                       label: 'Billing',
                     ),
-                    _buildNavItem(
-                      index: 2,
-                      icon: Icons.notifications_outlined,
-                      label: 'Alerts',
+                    
+                    // ── FIREBASE STREAM FOR ALERTS ICON BADGE ─────────────────
+                    StreamBuilder<DatabaseEvent>(
+                      stream: _anomalyRef.onValue,
+                      builder: (context, snapshot) {
+                        bool showRedDot = false;
+                        
+                        if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
+                          final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
+                          showRedDot = data['is_anomaly'] ?? false;
+                        }
+
+                        return _buildNavItem(
+                          index: 2,
+                          icon: Icons.notifications_outlined,
+                          label: 'Alerts',
+                          showBadge: showRedDot, // Pass the boolean state here
+                        );
+                      },
                     ),
+
                     _buildNavItem(
                       index: 3,
                       icon: Icons.settings_outlined,
@@ -258,6 +256,7 @@ class _MainScreenState extends State<MainScreen> {
     required int index,
     required IconData icon,
     required String label,
+    bool showBadge = false, // <-- Added badge parameter
   }) {
     final bool isSelected = _selectedNavIndex == index;
 
@@ -280,10 +279,34 @@ class _MainScreenState extends State<MainScreen> {
                 color: isSelected ? primaryOrange : Colors.transparent,
                 borderRadius: BorderRadius.circular(30),
               ),
-              child: Icon(
-                icon,
-                size: 22,
-                color: isSelected ? Colors.white : navIconColor,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Icon(
+                    icon,
+                    size: 22,
+                    color: isSelected ? Colors.white : navIconColor,
+                  ),
+                  
+                  // ── THE RED DOT BADGE ───────────────────────────────────────
+                  if (showBadge)
+                    Positioned(
+                      top: -2,
+                      right: -2,
+                      child: Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: badgeRed,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: isSelected ? primaryOrange : Colors.white,
+                            width: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
             const SizedBox(height: 2),
