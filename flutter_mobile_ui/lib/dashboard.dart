@@ -2,6 +2,18 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:intl/intl.dart';
+
+// Wrapper class to store both the telemetry reading and its exact reception time
+class ChartDataPoint {
+  final DateTime timestamp;
+  final double value;
+
+  ChartDataPoint({
+    required this.timestamp,
+    required this.value,
+  });
+}
 
 class Dashboard extends StatefulWidget {
   const Dashboard({super.key});
@@ -14,10 +26,10 @@ class _DashboardState extends State<Dashboard> {
   // Timer & Firebase Subscription
   Timer? _timer;
   StreamSubscription<DatabaseEvent>? _dbSubscription;
-  
+
   // State for collapsible Advanced Metrics
   bool _isAdvancedMetricsExpanded = false;
-  
+
   // Live numeric values from Firebase
   double _currentWatts = 0.0;
   double _cumulativeEnergy = 0.0;
@@ -26,16 +38,16 @@ class _DashboardState extends State<Dashboard> {
   double _powerFactor = 0.0;
   double _currentVoltage = 0.0;
 
-  // Chart History Arrays (keeps the last 20 data points)
+  // Chart History Arrays storing timed data objects
   final int maxDataPoints = 20;
-  late List<double> _energyHistory; // For cumulative energy (kWh)
-  late List<double> _wattsHistory;
-  late List<double> _ampsHistory;
-  late List<double> _voltageHistory;
-  
+
+  late List<ChartDataPoint> _wattsHistory;
+  late List<ChartDataPoint> _ampsHistory;
+  late List<ChartDataPoint> _voltageHistory;
+
   // Colors matching your system design
   final Color primaryOrange = const Color(0xFFF26E22);
-  final Color topCardColor = const Color(0xFFFA8B39); // Requested Top Background Color
+  final Color topCardColor = const Color(0xFFFA8B39);
   final Color darkButtonColor = const Color(0xFF3B150F);
   final Color bgColor = const Color(0xFFFAFAFA);
   final Color cardColor = Colors.white;
@@ -43,69 +55,101 @@ class _DashboardState extends State<Dashboard> {
   @override
   void initState() {
     super.initState();
-    
-    // Initialize history arrays with zeros and make them GROWABLE
-    _energyHistory = List.filled(maxDataPoints, 0.0, growable: true);
-    _wattsHistory = List.filled(maxDataPoints, 0.0, growable: true);
-    _ampsHistory = List.filled(maxDataPoints, 0.0, growable: true);
-    _voltageHistory = List.filled(maxDataPoints, 0.0, growable: true);
+
+    // Seed history structures with initial mock timestamps
+    DateTime now = DateTime.now();
+
+    _wattsHistory = List.generate(
+      maxDataPoints,
+      (i) => ChartDataPoint(
+        timestamp: now.subtract(
+          Duration(seconds: (maxDataPoints - i) * 2),
+        ),
+        value: 0.0,
+      ),
+      growable: true,
+    );
+
+    _ampsHistory = List.generate(
+      maxDataPoints,
+      (i) => ChartDataPoint(
+        timestamp: now.subtract(
+          Duration(seconds: (maxDataPoints - i) * 2),
+        ),
+        value: 0.0,
+      ),
+      growable: true,
+    );
+
+    _voltageHistory = List.generate(
+      maxDataPoints,
+      (i) => ChartDataPoint(
+        timestamp: now.subtract(
+          Duration(seconds: (maxDataPoints - i) * 2),
+        ),
+        value: 0.0,
+      ),
+      growable: true,
+    );
 
     _setupFirebaseListener();
 
-    // Timer to update charts every 2 seconds
-    _timer = Timer.periodic(const Duration(seconds: 2), (timer) {
-      setState(() {
-        // Shift data to the left and append the newest live reading
-        if (_energyHistory.length >= maxDataPoints) {
-          _energyHistory.removeAt(0);
-        }
-        _energyHistory.add(_cumulativeEnergy);
-
-        if (_wattsHistory.length >= maxDataPoints) {
-          _wattsHistory.removeAt(0);
-        }
-        _wattsHistory.add(_currentWatts);
-
-        if (_ampsHistory.length >= maxDataPoints) {
-          _ampsHistory.removeAt(0);
-        }
-        _ampsHistory.add(_currentAmps);
-
-        if (_voltageHistory.length >= maxDataPoints) {
-          _voltageHistory.removeAt(0);
-        }
-        _voltageHistory.add(_currentVoltage);
-      });
-    });
+    // Timer running every 2 seconds appending data CONSTANTLY ONLY for the main Watts chart
+    _timer = Timer.periodic(
+      const Duration(seconds: 2),
+      (timer) {
+        setState(() {
+          if (_wattsHistory.length >= maxDataPoints) {
+            _wattsHistory.removeAt(0);
+          }
+          _wattsHistory.add(
+            ChartDataPoint(
+              timestamp: DateTime.now(),
+              value: _currentWatts,
+            ),
+          );
+        });
+      },
+    );
   }
 
   void _setupFirebaseListener() {
     DatabaseReference ref = FirebaseDatabase.instance.ref('live_reading');
-    
+
     _dbSubscription = ref.onValue.listen((event) {
       if (event.snapshot.value != null) {
         try {
-          // SAFER CAST: Converts Firebase's Object Map to a usable String/Dynamic Map
-          final data = Map<String, dynamic>.from(event.snapshot.value as Map);
-          
-          // DEBUG: Check your debug console to see if this prints
-          print("🟢 FIREBASE DATA RECEIVED: $data"); 
+          final data = Map<String, dynamic>.from(
+            event.snapshot.value as Map,
+          );
 
           setState(() {
-            // SAFER PARSING: Handles ints, doubles, and strings without crashing
             _currentWatts = double.tryParse(data['power'].toString()) ?? 0.0;
             _cumulativeEnergy = double.tryParse(data['cumul_kwh'].toString()) ?? 0.0;
             _currentAmps = double.tryParse(data['current'].toString()) ?? 0.0;
             _frequency = double.tryParse(data['frequency'].toString()) ?? 0.0;
             _powerFactor = double.tryParse(data['power_factor'].toString()) ?? 0.0;
             _currentVoltage = double.tryParse(data['voltage'].toString()) ?? 0.0;
+
+            final timestamp = DateTime.now();
+
+            // Append new points to the smaller charts ONLY when Firebase pushes new data
+
+            // --- AMPS ---
+            if (_ampsHistory.length >= maxDataPoints) {
+              _ampsHistory.removeAt(0);
+            }
+            _ampsHistory.add(ChartDataPoint(timestamp: timestamp, value: _currentAmps));
+
+            // --- VOLTAGE ---
+            if (_voltageHistory.length >= maxDataPoints) {
+              _voltageHistory.removeAt(0);
+            }
+            _voltageHistory.add(ChartDataPoint(timestamp: timestamp, value: _currentVoltage));
           });
         } catch (e) {
-          // DEBUG: If the cast fails, this will tell you why
           print("🔴 ERROR PARSING DATA: $e");
         }
-      } else {
-        print("🟡 FIREBASE SNAPSHOT IS NULL");
       }
     });
   }
@@ -117,29 +161,46 @@ class _DashboardState extends State<Dashboard> {
     super.dispose();
   }
 
-  // Helper to convert historical double arrays into FlSpots for the charts
-  List<FlSpot> _generateChartSpots(List<double> history) {
+  // Generates FlSpots mapping list indexes on X axis against read values on Y axis
+  List<FlSpot> _generateChartSpots(
+    List<ChartDataPoint> history,
+  ) {
     return history.asMap().entries.map((e) {
-      return FlSpot(e.key.toDouble(), e.value);
+      return FlSpot(
+        e.key.toDouble(),
+        e.value.value,
+      );
     }).toList();
   }
 
-  // Calculate min and max for dynamic chart scaling
-  double _getMinY(List<double> history) {
+  // MIN/MAX Helpers that work explicitly with our ChartDataPoint structures
+  double _getMinY(List<ChartDataPoint> history) {
     if (history.isEmpty) return 0;
-    double min = history.reduce((a, b) => a < b ? a : b);
+
+    double min = history
+        .map((e) => e.value)
+        .reduce((a, b) => a < b ? a : b);
+
     return (min * 0.8).clamp(0, double.infinity);
   }
 
-  double _getMaxY(List<double> history) {
+  double _getMaxY(List<ChartDataPoint> history) {
     if (history.isEmpty) return 1;
-    double max = history.reduce((a, b) => a > b ? a : b);
-    return max * 1.2;
+
+    double max = history
+        .map((e) => e.value)
+        .reduce((a, b) => a > b ? a : b);
+
+    return max == 0 ? 1.0 : max * 1.2;
   }
 
   String _formatWithCommas(double value) {
-    RegExp reg = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
+    RegExp reg = RegExp(
+      r'(\d{1,3})(?=(\d{3})+(?!\d))',
+    );
+
     String mathFunc(Match match) => '${match[1]},';
+
     return value.toStringAsFixed(2).replaceAllMapped(reg, mathFunc);
   }
 
@@ -151,7 +212,7 @@ class _DashboardState extends State<Dashboard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // --- REDESIGNED HEADER SECTION ---
+            // --- HEADER SECTION WITH MAIN ZOOMABLE TIMED CHART ---
             Container(
               width: double.infinity,
               color: topCardColor,
@@ -191,27 +252,52 @@ class _DashboardState extends State<Dashboard> {
                               const Text(
                                 'kWh',
                                 style: TextStyle(
-                                  fontSize: 20, 
+                                  fontSize: 20,
                                   color: Colors.white,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
                               const SizedBox(width: 12),
-                              Icon(Icons.visibility_off_outlined,
-                                  size: 20, color: Colors.white.withValues(alpha: 0.8)),
+                              Icon(
+                                Icons.visibility_off_outlined,
+                                size: 20,
+                                color: Colors.white.withValues(alpha: 0.8),
+                              ),
                             ],
                           ),
                           const SizedBox(height: 8),
                           Row(
                             children: [
-                              const Icon(Icons.arrow_upward, color: Colors.white, size: 16),
-                              const SizedBox(width: 4),
-                              const Text(
-                                'Live Update Mode Active',
-                                style: TextStyle(
-                                  fontSize: 14,
+                              // --- Custom Green Glowing Circle Widget ---
+                              Container(
+                                width: 16, // Original icon space
+                                height: 16,
+                                alignment: Alignment.center,
+                                child: Container(
+                                  width: 8, // Inner solid dot
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF00E676), // Bright Green
+                                    shape: BoxShape.circle,
+                                    boxShadow: [
+                                      // Bloom effects
+                             
+                                      BoxShadow(
+                                        color: const Color(0xFF00E676).withOpacity(0.3),
+                                        blurRadius: 6.0,
+                                        spreadRadius: 1.0,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Live Power: ${_currentWatts.toStringAsFixed(0)} W',
+                                style: const TextStyle(
+                                  fontSize: 13,
                                   color: Colors.white,
-                                  fontWeight: FontWeight.w500,
+                                  fontWeight: FontWeight.w400,
                                 ),
                               ),
                             ],
@@ -219,112 +305,148 @@ class _DashboardState extends State<Dashboard> {
                         ],
                       ),
                     ),
-                    const SizedBox(height: 20),
-                    
-                    // MAIN CURVED LIVE CHART (Matches reference image)
+                    const SizedBox(height: 10),
+                    // INTERACTIVE VIEW BOX FOR PAN & PINCH ZOOM
                     SizedBox(
-                      height: 160,
+                      height: 210,
                       width: double.infinity,
-                      child: LineChart(
-                        LineChartData(
-                          gridData: const FlGridData(show: false),
-                          titlesData: const FlTitlesData(show: false),
-                          borderData: FlBorderData(show: false),
-                          minY: _getMinY(_energyHistory),
-                          maxY: _getMaxY(_energyHistory),
-                          lineBarsData: [
-                            LineChartBarData(
-                              spots: _generateChartSpots(_energyHistory),
-                              isCurved: true,
-                              color: Colors.white,
-                              barWidth: 3,
-                              isStrokeCapRound: true,
-                              // Dot at the very end of the line
-                              dotData: FlDotData(
-                                show: true,
-                                checkToShowDot: (spot, barData) {
-                                  return spot.x == barData.spots.last.x;
-                                },
-                                getDotPainter: (spot, percent, barData, index) {
-                                  return FlDotCirclePainter(
-                                    radius: 5,
-                                    color: Colors.white,
-                                    strokeWidth: 0,
-                                  );
-                                },
+                      child: InteractiveViewer(
+                        clipBehavior: Clip.none,
+                        alignment: Alignment.center,
+                        minScale: 1.0,
+                        maxScale: 5.0,
+                        scaleEnabled: true,
+                        panEnabled: true,
+                        child: Padding(
+                          padding: const EdgeInsets.only(
+                            right: 24.0,
+                            left: 10.0,
+                          ),
+                          child: LineChart(
+                            LineChartData(
+                              gridData: const FlGridData(
+                                show: false,
                               ),
-                              belowBarData: BarAreaData(show: false), // No gradient fill
+                              borderData: FlBorderData(show: false),
+                              minY: _getMinY(_wattsHistory),
+                              maxY: _getMaxY(_wattsHistory),
+                              titlesData: FlTitlesData(
+                                topTitles: const AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: false,
+                                  ),
+                                ),
+                                rightTitles: const AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: false,
+                                  ),
+                                ),
+                                leftTitles: const AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: false,
+                                  ),
+                                ),
+                                bottomTitles: AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: true,
+                                    reservedSize: 28,
+                                    interval: 4,
+                                    getTitlesWidget: (value, meta) {
+                                      int index = value.toInt();
+
+                                      if (index >= 0 &&
+                                          index < _wattsHistory.length) {
+                                        DateTime time =
+                                            _wattsHistory[index].timestamp;
+
+                                        String formattedTime = DateFormat(
+                                          'HH:mm:ss',
+                                        ).format(time);
+
+                                        return SideTitleWidget(
+                                          meta: meta,
+                                          space: 8,
+                                          child: Text(
+                                            formattedTime,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        );
+                                      }
+
+                                      return const SizedBox.shrink();
+                                    },
+                                  ),
+                                ),
+                              ),
+                              lineBarsData: [
+                                LineChartBarData(
+                                  spots: _generateChartSpots(
+                                    _wattsHistory,
+                                  ),
+                                  isCurved: true,
+                                  color: Colors.white,
+                                  barWidth: 3,
+                                  isStrokeCapRound: true,
+                                  dotData: FlDotData(
+                                    show: true,
+                                    checkToShowDot: (spot, barData) {
+                                      return spot.x == barData.spots.last.x;
+                                    },
+                                    getDotPainter: (spot, percent, barData, index) {
+                                      return FlDotCirclePainter(
+                                        radius: 5,
+                                        color: Colors.white,
+                                        strokeWidth: 0,
+                                      );
+                                    },
+                                  ),
+                                  belowBarData: BarAreaData(
+                                    show: false,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 10),
                   ],
                 ),
               ),
             ),
-            
-            // --- BOTTOM SECTION ---
+
+            // --- BOTTOM FEED SECTION ---
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 20.0),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 20.0,
+                vertical: 20.0,
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // TIME SELECTORS
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.start,
-                    children: [
-                      _buildTimeTab('1M'),
-                      _buildTimeTab('3M'),
-                      _buildTimeTab('6M'),
-                      _buildTimeTab('1Y'),
-                      const SizedBox(width: 20),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: darkButtonColor,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text(
-                          'LIVE',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 40),
-                  
-                  // LIVE FEED HEADER
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text(
                         'LIVE FEED',
                         style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 0.5),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                        ),
                       ),
-                      Icon(Icons.menu, color: Colors.grey[800]),
+                      Icon(
+                        Icons.menu,
+                        color: Colors.grey[800],
+                      ),
                     ],
                   ),
                   const SizedBox(height: 16),
-                  
-                  // LIVE FEED CARDS
-                  _buildLiveFeedCard(
-                    title: 'Watts',
-                    value: _currentWatts.toStringAsFixed(0),
-                    unit: 'W',
-                    subtitle: 'Active Power',
-                    spots: _generateChartSpots(_wattsHistory),
-                    history: _wattsHistory,
-                  ),
-                  const SizedBox(height: 12),
                   _buildLiveFeedCard(
                     title: 'Current',
                     value: _currentAmps.toStringAsFixed(2),
@@ -338,19 +460,16 @@ class _DashboardState extends State<Dashboard> {
                     title: 'Voltage',
                     value: _currentVoltage.toStringAsFixed(1),
                     unit: 'V',
-                    subtitle: 'Mains Line Voltage',
+                    subtitle: 'Mains Voltage',
                     spots: _generateChartSpots(_voltageHistory),
                     history: _voltageHistory,
                   ),
                   const SizedBox(height: 30),
-                  
-                  // ADVANCED METRICS COLLAPSIBLE HEADER
                   GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        _isAdvancedMetricsExpanded = !_isAdvancedMetricsExpanded;
-                      });
-                    },
+                    onTap: () => setState(
+                      () => _isAdvancedMetricsExpanded =
+                          !_isAdvancedMetricsExpanded,
+                    ),
                     child: Container(
                       color: Colors.transparent,
                       child: Row(
@@ -359,9 +478,10 @@ class _DashboardState extends State<Dashboard> {
                           const Text(
                             'ADVANCED METRICS',
                             style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.5),
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.5,
+                            ),
                           ),
                           AnimatedRotation(
                             turns: _isAdvancedMetricsExpanded ? 0.5 : 0,
@@ -378,8 +498,6 @@ class _DashboardState extends State<Dashboard> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  
-                  // ADVANCED METRICS CARDS (Collapsible)
                   AnimatedSize(
                     duration: const Duration(milliseconds: 300),
                     curve: Curves.easeInOut,
@@ -390,12 +508,18 @@ class _DashboardState extends State<Dashboard> {
                                 children: [
                                   Expanded(
                                     child: _buildMetricCard(
-                                        'Frequency', _frequency.toStringAsFixed(1), 'Hz'),
+                                      'Frequency',
+                                      _frequency.toStringAsFixed(1),
+                                      'Hz',
+                                    ),
                                   ),
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: _buildMetricCard(
-                                        'Power Factor', _powerFactor.toStringAsFixed(2), 'PF'),
+                                      'Power Factor',
+                                      _powerFactor.toStringAsFixed(2),
+                                      'PF',
+                                    ),
                                   ),
                                 ],
                               ),
@@ -404,7 +528,6 @@ class _DashboardState extends State<Dashboard> {
                           )
                         : const SizedBox.shrink(),
                   ),
-                  
                   const SizedBox(height: 120),
                 ],
               ),
@@ -415,27 +538,14 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  // ── UI WIDGET HELPERS ──────────────────────────────────────────────────────
-  Widget _buildTimeTab(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 24.0),
-      child: Text(
-        text,
-        style: TextStyle(
-            color: Colors.grey[500],
-            fontSize: 13,
-            fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-
+  // --- SUB CARD WIDGET UI HELPERS ---
   Widget _buildLiveFeedCard({
     required String title,
     required String value,
     required String unit,
     required String subtitle,
     required List<FlSpot> spots,
-    required List<double> history,
+    required List<ChartDataPoint> history,
   }) {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -456,11 +566,14 @@ class _DashboardState extends State<Dashboard> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title,
-                  style: TextStyle(
-                      fontSize: 13,
-                      color: Colors.grey[800],
-                      fontWeight: FontWeight.w600)),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.grey[800],
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               const SizedBox(height: 8),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -469,25 +582,29 @@ class _DashboardState extends State<Dashboard> {
                   Text(
                     value,
                     style: const TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.5),
+                      fontSize: 28,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.5,
+                    ),
                   ),
                   const SizedBox(width: 4),
                   Text(
                     unit,
                     style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey[800],
-                        fontWeight: FontWeight.w500),
+                      fontSize: 14,
+                      color: Colors.grey[800],
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
                 ],
               ),
               const SizedBox(height: 8),
               Text(
                 subtitle,
-                style:
-                    TextStyle(fontSize: 11, color: Colors.grey[600]),
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey[600],
+                ),
               ),
             ],
           ),
@@ -529,7 +646,11 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  Widget _buildMetricCard(String title, String value, String unit) {
+  Widget _buildMetricCard(
+    String title,
+    String value,
+    String unit,
+  ) {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -546,11 +667,14 @@ class _DashboardState extends State<Dashboard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title,
-              style: TextStyle(
-                  fontSize: 13,
-                  color: Colors.grey[800],
-                  fontWeight: FontWeight.w600)),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 13,
+              color: Colors.grey[800],
+              fontWeight: FontWeight.w600,
+            ),
+          ),
           const SizedBox(height: 12),
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -559,17 +683,19 @@ class _DashboardState extends State<Dashboard> {
               Text(
                 value,
                 style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.5),
+                  fontSize: 24,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.5,
+                ),
               ),
               const SizedBox(width: 4),
               Text(
                 unit,
                 style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.grey[800],
-                    fontWeight: FontWeight.w500),
+                  fontSize: 14,
+                  color: Colors.grey[800],
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ],
           ),
