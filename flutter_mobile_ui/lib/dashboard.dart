@@ -80,22 +80,32 @@ class _DashboardState extends State<Dashboard> {
   }
 
   void _setupFirebaseListener() {
-    // Reference to your specific Firebase Realtime Database node
     DatabaseReference ref = FirebaseDatabase.instance.ref('live_reading');
     
     _dbSubscription = ref.onValue.listen((event) {
       if (event.snapshot.value != null) {
-        final data = event.snapshot.value as Map<dynamic, dynamic>;
-        
-        setState(() {
-          // Parse values safely, defaulting to 0.0 if missing
-          _currentWatts = (data['active_power_W'] ?? 0).toDouble();
-          _cumulativeEnergy = (data['cumulative_energy_kWh'] ?? 0).toDouble();
-          _currentAmps = (data['current_A'] ?? 0).toDouble();
-          _frequency = (data['frequency_Hz'] ?? 0).toDouble();
-          _powerFactor = (data['power_factor'] ?? 0).toDouble();
-          _currentVoltage = (data['voltage_V'] ?? 0).toDouble();
-        });
+        try {
+          // SAFER CAST: Converts Firebase's Object Map to a usable String/Dynamic Map
+          final data = Map<String, dynamic>.from(event.snapshot.value as Map);
+          
+          // DEBUG: Check your debug console to see if this prints
+          print("🟢 FIREBASE DATA RECEIVED: $data"); 
+
+          setState(() {
+            // SAFER PARSING: Handles ints, doubles, and strings without crashing
+            _currentWatts = double.tryParse(data['power'].toString()) ?? 0.0;
+            _cumulativeEnergy = double.tryParse(data['cumul_kwh'].toString()) ?? 0.0;
+            _currentAmps = double.tryParse(data['current'].toString()) ?? 0.0;
+            _frequency = double.tryParse(data['frequency'].toString()) ?? 0.0;
+            _powerFactor = double.tryParse(data['power_factor'].toString()) ?? 0.0;
+            _currentVoltage = double.tryParse(data['voltage'].toString()) ?? 0.0;
+          });
+        } catch (e) {
+          // DEBUG: If the cast fails, this will tell you why
+          print("🔴 ERROR PARSING DATA: $e");
+        }
+      } else {
+        print("🟡 FIREBASE SNAPSHOT IS NULL");
       }
     });
   }

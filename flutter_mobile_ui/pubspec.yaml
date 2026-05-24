@@ -38,6 +38,7 @@ dependencies:
   fl_chart: ^1.2.0
   firebase_core: ^4.9.0
   firebase_database: ^12.4.1
+  firebase_messaging: ^16.2.2
 
 dev_dependencies:
   flutter_test:

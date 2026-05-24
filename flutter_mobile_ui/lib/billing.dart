@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart'; // Add this import
+import 'package:firebase_database/firebase_database.dart'; 
 
 class BillingScreen extends StatelessWidget {
   BillingScreen({super.key});
@@ -27,11 +27,16 @@ class BillingScreen extends StatelessWidget {
           if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
             final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
             
-            forecast = (data['forecast'] ?? 0).toDouble();
+            // Remapped forecast to predicted_day_total_kwh
+            final forecastData = data['forecast'] as Map<dynamic, dynamic>?;
+            if (forecastData != null) {
+              forecast = (forecastData['predicted_day_total_kwh'] ?? 0).toDouble();
+            }
             
+            // Remapped cumulative energy to cumul_kwh
             final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
             if (liveReading != null) {
-              cumulativeEnergy = (liveReading['cumulative_energy_kWh'] ?? 0).toDouble();
+              cumulativeEnergy = (liveReading['cumul_kwh'] ?? 0).toDouble();
             }
           }
 
