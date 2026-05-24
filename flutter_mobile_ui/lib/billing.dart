@@ -1,118 +1,162 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_database/firebase_database.dart'; // Add this import
 
 class BillingScreen extends StatelessWidget {
-  const BillingScreen({super.key});
+  BillingScreen({super.key});
 
   final Color primaryOrange = const Color(0xFFF26E22);
-  final Color lightOrangeBg = const Color(0xFFFA8B39);
-  final Color creamBg = const Color(0xFFFFFDF9); 
+  final Color creamBg = const Color(0xFFFFFDF9);
   final Color textDark = const Color(0xFF1E1E1E);
+  final Color brandOrangeText = const Color(0xFFE25319);
+
+  // Reference to the root of your Realtime Database
+  final DatabaseReference _dbRef = FirebaseDatabase.instance.ref();
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: creamBg,
-      body: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ── TOP GRADIENT HERO SECTION ────────────────────────────────────
-            Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    lightOrangeBg,
-                    lightOrangeBg.withValues(alpha: 0.7),
-                    creamBg,
-                  ],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  stops: const [0.0, 0.5, 1.0],
-                ),
-              ),
-              child: SafeArea(
-                bottom: false,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
-                  child: Column(
-                    children: [
-                      const SizedBox(height: 10),
-                      Text(
-                        'ESTIMATED MONTHLY BILL:',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.85),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 1.0,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        '₱2,610.75',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 42,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '(Based on current consumption trajectory)',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.8),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      const SizedBox(height: 30),
-                      
-                      // Consumption Trajectory Split Row
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _buildTrajectoryMetric(
-                              icon: Icons.trending_up_rounded,
-                              iconColor: Colors.greenAccent,
-                              title: 'Current Consumption',
-                              value: '165.20 kWh',
+      body: StreamBuilder<DatabaseEvent>(
+        stream: _dbRef.onValue,
+        builder: (context, snapshot) {
+          // Default fallback values
+          double forecast = 0.0;
+          double cumulativeEnergy = 0.0;
+
+          // Safely extract data if it exists
+          if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
+            final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
+            
+            forecast = (data['forecast'] ?? 0).toDouble();
+            
+            final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
+            if (liveReading != null) {
+              cumulativeEnergy = (liveReading['cumulative_energy_kWh'] ?? 0).toDouble();
+            }
+          }
+
+          // Calculate dynamic tier values based on a 200 kWh limit
+          final double percentage = (cumulativeEnergy / 200).clamp(0.0, 1.0);
+          final double remaining = (200 - cumulativeEnergy).clamp(0.0, 200.0);
+
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // ── TOP HERO SECTION WITH PNG BACKGROUND ─────────────────────────
+                Stack(
+                  children: [
+                    Image.asset(
+                      'assets/billingbg.png', 
+                      width: double.infinity,
+                      fit: BoxFit.fitWidth,
+                    ),
+                    SafeArea(
+                      bottom: false,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const SizedBox(height: 10),
+                            Text(
+                              'ESTIMATED END OF THE DAY BILL:',
+                              style: TextStyle(
+                                color: brandOrangeText.withValues(alpha: 0.9),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.5,
+                              ),
                             ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '(Based on current consumption trajectory)',
+                              style: TextStyle(
+                                color: const Color(0xFFBA7A5F).withValues(alpha: 0.8),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            // MAPPED FORECAST
+                            Text(
+                              '₱${forecast.toStringAsFixed(2)}',
+                              style: TextStyle(
+                                color: brandOrangeText,
+                                fontSize: 44,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 10.0,
+                      right: 24.0,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.trending_up_rounded,
+                                color: Colors.greenAccent,
+                                size: 15,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                'Current Consumption',
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.95),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
                           ),
-                          Container(
-                            height: 35,
-                            width: 1,
-                            color: Colors.white.withValues(alpha: 0.25),
-                          ),
-                          Expanded(
-                            child: _buildTrajectoryMetric(
-                              icon: Icons.trending_down_rounded,
-                              iconColor: Colors.redAccent,
-                              title: 'Projected Consumption',
-                              value: '245.50 kWh',
+                          const SizedBox(height: 2),
+                          // MAPPED CUMULATIVE ENERGY
+                          Text(
+                            '${cumulativeEnergy.toStringAsFixed(2)} kWh',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 19,
+                              fontWeight: FontWeight.w800,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 25),
+                    ),
+                  ],
+                ),
 
-                      // ── TIER 1 STATUS CARD WITH THE EXACT WAVE BACKGROUND ──
+                // ── MAIN CONTENT BODY ────────────────────────────────────────────
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const SizedBox(height: 20),
+                      Text(
+                        'TIER',
+                        style: TextStyle(
+                          color: brandOrangeText,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.6,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
                       ClipRRect(
                         borderRadius: BorderRadius.circular(28),
                         child: Container(
                           width: double.infinity,
-                          decoration: BoxDecoration(
-                            color: primaryOrange,
-                            boxShadow: [
-                              BoxShadow(
-                                color: primaryOrange.withValues(alpha: 0.25),
-                                blurRadius: 15,
-                                offset: const Offset(0, 8),
-                              ),
-                            ],
-                          ),
+                          color: primaryOrange,
                           child: CustomPaint(
-                            painter: CardWavePainter(), // Draws the background curves
+                            painter: CardWavePainter(),
                             child: Padding(
                               padding: const EdgeInsets.all(22),
                               child: Column(
@@ -147,23 +191,25 @@ class BillingScreen extends StatelessWidget {
                                     textBaseline: TextBaseline.alphabetic,
                                     children: [
                                       RichText(
-                                        text: const TextSpan(
-                                          style: TextStyle(color: Colors.white),
+                                        text: TextSpan(
+                                          style: const TextStyle(color: Colors.white),
                                           children: [
+                                            // DYNAMIC CONSUMPTION FOR TIER
                                             TextSpan(
-                                              text: '165.20 ',
-                                              style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
+                                              text: '${cumulativeEnergy.toStringAsFixed(2)} ',
+                                              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
                                             ),
-                                            TextSpan(
+                                            const TextSpan(
                                               text: '/ 200',
                                               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w500),
                                             ),
                                           ],
                                         ),
                                       ),
-                                      const Text(
-                                        '82.6%',
-                                        style: TextStyle(
+                                      // DYNAMIC PERCENTAGE
+                                      Text(
+                                        '${(percentage * 100).toStringAsFixed(1)}%',
+                                        style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 15,
                                           fontWeight: FontWeight.bold,
@@ -185,7 +231,7 @@ class BillingScreen extends StatelessWidget {
                                   ClipRRect(
                                     borderRadius: BorderRadius.circular(10),
                                     child: LinearProgressIndicator(
-                                      value: 0.826,
+                                      value: percentage, // DYNAMIC PROGRESS BAR
                                       backgroundColor: Colors.white.withValues(alpha: 0.25),
                                       valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
                                       minHeight: 7,
@@ -202,7 +248,8 @@ class BillingScreen extends StatelessWidget {
                                       const SizedBox(width: 6),
                                       Expanded(
                                         child: Text(
-                                          '34.80 kWh remaining before tier escalation',
+                                          // DYNAMIC REMAINING KWH
+                                          '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation',
                                           style: TextStyle(
                                             color: Colors.white.withValues(alpha: 0.95),
                                             fontSize: 11,
@@ -218,101 +265,54 @@ class BillingScreen extends StatelessWidget {
                           ),
                         ),
                       ),
+                      const SizedBox(height: 28),
+                      Text(
+                        'RATE BRACKETS',
+                        style: TextStyle(
+                          color: textDark,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
                     ],
                   ),
                 ),
-              ),
-            ),
-
-            // ── RATE BRACKETS SECTION ────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.only(left: 24.0, top: 16.0, bottom: 12.0),
-              child: Text(
-                'RATE BRACKETS',
-                style: TextStyle(
-                  color: textDark,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.5,
+                const SizedBox(height: 12),
+                SizedBox(
+                  height: 155,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 18.0),
+                    physics: const BouncingScrollPhysics(),
+                    children: [
+                      _buildRateCard(
+                        tierTitle: 'TIER 1',
+                        range: 'Up to 200 kWh',
+                        rate: '₱0.9803/kWh',
+                        isActive: cumulativeEnergy <= 200, // DYNAMIC ACTIVE STATE
+                      ),
+                      _buildRateCard(
+                        tierTitle: 'TIER 2',
+                        range: '201 - 300 kWh',
+                        rate: '₱1.2908/kWh',
+                        isActive: cumulativeEnergy > 200 && cumulativeEnergy <= 300, 
+                      ),
+                      _buildRateCard(
+                        tierTitle: 'TIER 3',
+                        range: '301 - 400 kWh',
+                        rate: '₱1.5837/kWh',
+                        isActive: cumulativeEnergy > 300, 
+                      ),
+                    ],
+                  ),
                 ),
-              ),
+                const SizedBox(height: 60),
+              ],
             ),
-
-            SizedBox(
-              height: 145,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 18.0),
-                physics: const BouncingScrollPhysics(),
-                children: [
-                  _buildRateCard(
-                    tierTitle: 'TIER 1',
-                    range: 'Up to 200 kWh',
-                    rate: '₱0.9803/kWh',
-                    isActive: true,
-                  ),
-                  _buildRateCard(
-                    tierTitle: 'TIER 2',
-                    range: '201–300 kWh',
-                    rate: '₱1.2908/kWh',
-                    isActive: false,
-                  ),
-                  _buildRateCard(
-                    tierTitle: 'TIER 3',
-                    range: '301–400 kWh',
-                    rate: '₱1.5837/kWh',
-                    isActive: false,
-                  ),
-                  _buildRateCard(
-                    tierTitle: 'TIER 4',
-                    range: 'Above 400 kWh',
-                    rate: '₱2.0941/kWh',
-                    isActive: false,
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 120),
-          ],
-        ),
+          );
+        }
       ),
-    );
-  }
-
-  Widget _buildTrajectoryMetric({
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required String value,
-  }) {
-    return Column(
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: iconColor, size: 14),
-            const SizedBox(width: 4),
-            Text(
-              title,
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.9),
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 16,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ],
     );
   }
 
@@ -322,23 +322,18 @@ class BillingScreen extends StatelessWidget {
     required String rate,
     required bool isActive,
   }) {
-    final Color activeCardColor = const Color(0xFFFDB482); 
-    final Color inactiveCardColor = const Color(0xFFEFE8DE); 
+    final Color activeCardColor = const Color(0xFFFDB482);
+    final Color inactiveCardColor = const Color(0xFFF6EDE2);
+    final Color activeTextColor = const Color(0xFF432511);
+    final Color inactiveTextColor = const Color(0xFF7A726A);
 
     return Container(
       width: 215,
       margin: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 4.0),
-      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+      padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 16.0),
       decoration: BoxDecoration(
         color: isActive ? activeCardColor : inactiveCardColor,
         borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.015),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -350,43 +345,44 @@ class BillingScreen extends StatelessWidget {
               Text(
                 tierTitle,
                 style: TextStyle(
-                  color: isActive ? Colors.white.withValues(alpha: 0.9) : Colors.grey[600],
+                  color: isActive ? activeTextColor.withValues(alpha: 0.8) : inactiveTextColor,
                   fontSize: 11,
-                  fontWeight: FontWeight.w700,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
               if (isActive)
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.35),
-                    borderRadius: BorderRadius.circular(8),
+                    color: Colors.transparent,
+                    border: Border.all(color: activeTextColor.withValues(alpha: 0.4), width: 1),
+                    borderRadius: BorderRadius.circular(6),
                   ),
-                  child: const Text(
+                  child: Text(
                     '[ ACTIVE ]',
                     style: TextStyle(
-                      color: Colors.white,
+                      color: activeTextColor,
                       fontSize: 9,
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.w900,
                     ),
                   ),
                 ),
             ],
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           Text(
             range,
             style: TextStyle(
-              color: isActive ? Colors.white : textDark.withValues(alpha: 0.85),
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
+              color: isActive ? activeTextColor : textDark,
+              fontSize: 19,
+              fontWeight: FontWeight.w800,
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
           Text(
             'RATE',
             style: TextStyle(
-              color: isActive ? Colors.white.withValues(alpha: 0.75) : Colors.grey[500],
+              color: isActive ? activeTextColor.withValues(alpha: 0.6) : inactiveTextColor.withValues(alpha: 0.8),
               fontSize: 9,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.5,
@@ -395,9 +391,9 @@ class BillingScreen extends StatelessWidget {
           Text(
             rate,
             style: TextStyle(
-              color: isActive ? Colors.white : textDark,
-              fontSize: 18,
-              fontWeight: FontWeight.w800,
+              color: isActive ? activeTextColor : textDark,
+              fontSize: 19,
+              fontWeight: FontWeight.w900,
             ),
           ),
         ],
@@ -406,16 +402,14 @@ class BillingScreen extends StatelessWidget {
   }
 }
 
-// ── CUSTOM PAINTER FOR BACKGROUND WAVES ──────────────────────────────────────
 class CardWavePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.06) // Smooth subtle light lines matching the image
+      ..color = Colors.white.withValues(alpha: 0.06)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 28.0; // Thick smooth vector strokes
+      ..strokeWidth = 28.0;
 
-    // Path 1: Inner Wave running from left to bottom right
     final path1 = Path();
     path1.moveTo(-size.width * 0.2, size.height * 0.4);
     path1.cubicTo(
@@ -425,7 +419,6 @@ class CardWavePainter extends CustomPainter {
     );
     canvas.drawPath(path1, paint);
 
-    // Path 2: Outer parallel shifting wave
     final path2 = Path();
     path2.moveTo(-size.width * 0.1, size.height * 0.6);
     path2.cubicTo(

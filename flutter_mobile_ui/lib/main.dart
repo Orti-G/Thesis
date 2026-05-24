@@ -1,20 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
-import 'package:firebase_core/firebase_core.dart'; // 1. Added Firebase Core import
+import 'package:firebase_core/firebase_core.dart';
 
 // ── IMPORT YOUR ACTUAL FILES HERE ─────────────────────────────────────────
 import 'dashboard.dart';
-import 'billing.dart'; // This connects your navigation to your real billing file
+
+// Fix for the ambiguous import error: giving this import a prefix
+import 'billing.dart' as billing;
+
 import 'alert.dart';
 
-// 2. Made main() asynchronous to allow Firebase initialization
 void main() async {
-  // 3. Ensure Flutter bindings are initialized before calling native code
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // 4. Initialize Firebase
   await Firebase.initializeApp();
-  
+
   runApp(const MyApp());
 }
 
@@ -30,65 +29,114 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// ── 1. WELCOME SCREEN WITH LOTTIE ──────────────────────────────────────────
-class HomePage extends StatelessWidget {
+// ── 1. WELCOME SCREEN WITH LOTTIE ─────────────────────────────────────────
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
   static const Color accentColor = Color(0xFFFA8B39);
 
   @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _lottieController;
+
+  bool _showButton = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _lottieController = AnimationController(vsync: this);
+
+    _lottieController.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        setState(() {
+          _showButton = true;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _lottieController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
+
       body: SafeArea(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+
           children: [
-            // LOTTIE ANIMATION
             Center(
               child: Lottie.asset(
                 'assets/Comp 1.json',
+
+                controller: _lottieController,
+
                 width: 500,
                 height: 500,
-                repeat: false,
+
+                onLoaded: (composition) {
+                  _lottieController
+                    ..duration = composition.duration
+                    ..forward();
+                },
               ),
             ),
 
-            // CONTINUE AS GUEST BUTTON
-            SizedBox(
-              width: 220,
-              height: 45,
-              child: ElevatedButton(
-                onPressed: () {
-                  Navigator.pushReplacement(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const MainScreen(),
+            AnimatedOpacity(
+              opacity: _showButton ? 1.0 : 0.0,
+
+              duration: const Duration(milliseconds: 500),
+
+              child: SizedBox(
+                width: 220,
+                height: 45,
+
+                child: ElevatedButton(
+                  onPressed: _showButton
+                      ? () {
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const MainScreen(),
+                            ),
+                          );
+                        }
+                      : null,
+
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: HomePage.accentColor,
+                    foregroundColor: Colors.white,
+                    elevation: 3,
+
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(40),
                     ),
-                  );
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: accentColor,
-                  foregroundColor: Colors.white,
-                  elevation: 3,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(40),
                   ),
-                ),
-                child: const Text(
-                  'TRY BETA NOW',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
+
+                  child: const Text(
+                    'TRY BETA NOW',
+
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
             ),
 
             const SizedBox(height: 16),
-
-            // LOGIN / SIGN UP BUTTON
-
           ],
         ),
       ),
@@ -106,25 +154,40 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _selectedNavIndex = 0;
+
   final Color primaryOrange = const Color(0xFFF26E22);
   final Color navIconColor = const Color(0xFF8C6B5E);
 
-  // List of screens corresponding to your nav items
-  final List<Widget> _screens = [
-    const Dashboard(),                     // Index 0: Home (from dashboard.dart)
-    const BillingScreen(),                 // Index 1: Billing (now pointing to billing.dart)
-    const AlertsScreen(),   // Index 2: Alerts (Placeholder)
-    const Center(child: Text("Settings")), // Index 3: Settings (Placeholder)
+  // Since we are creating instances of classes, we use 'late'
+  // so it initializes when needed
+  late final List<Widget> _screens = [
+    // IMPORTANT:
+    // Make sure the class inside dashboard.dart
+    // is actually named "Dashboard"
+
+    const Dashboard(),
+
+    // Using the "billing." prefix fixes
+    // the ambiguous import error
+    billing.BillingScreen(),
+
+    const AlertsScreen(),
+
+    const Center(
+      child: Text("Settings"),
+    ),
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      extendBody: true, // Ensures content goes behind the floating navbar
+      extendBody: true,
+
       body: IndexedStack(
         index: _selectedNavIndex,
         children: _screens,
       ),
+
       bottomNavigationBar: _buildFloatingNavBar(),
     );
   }
@@ -133,13 +196,22 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildFloatingNavBar() {
     return Container(
       color: Colors.transparent,
+
       child: Padding(
-        padding: const EdgeInsets.only(left: 24, right: 24, bottom: 28),
+        padding: const EdgeInsets.only(
+          left: 24,
+          right: 24,
+          bottom: 28,
+        ),
+
         child: Container(
           height: 72,
+
           decoration: BoxDecoration(
             color: Colors.white,
+
             borderRadius: BorderRadius.circular(40),
+
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.10),
@@ -148,13 +220,34 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ],
           ),
+
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
+
             children: [
-              _buildNavItem(index: 0, icon: Icons.home_rounded, label: 'Home'),
-              _buildNavItem(index: 1, icon: Icons.receipt_long_outlined, label: 'Billing'),
-              _buildNavItem(index: 2, icon: Icons.notifications_outlined, label: 'Alerts'),
-              _buildNavItem(index: 3, icon: Icons.settings_outlined, label: 'Settings'),
+              _buildNavItem(
+                index: 0,
+                icon: Icons.home_rounded,
+                label: 'Home',
+              ),
+
+              _buildNavItem(
+                index: 1,
+                icon: Icons.receipt_long_outlined,
+                label: 'Billing',
+              ),
+
+              _buildNavItem(
+                index: 2,
+                icon: Icons.notifications_outlined,
+                label: 'Alerts',
+              ),
+
+              _buildNavItem(
+                index: 3,
+                icon: Icons.settings_outlined,
+                label: 'Settings',
+              ),
             ],
           ),
         ),
@@ -162,38 +255,63 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildNavItem({required int index, required IconData icon, required String label}) {
+  Widget _buildNavItem({
+    required int index,
+    required IconData icon,
+    required String label,
+  }) {
     final bool isSelected = _selectedNavIndex == index;
+
     return GestureDetector(
       onTap: () => setState(() => _selectedNavIndex = index),
+
       behavior: HitTestBehavior.opaque,
+
       child: SizedBox(
         width: 72,
+
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+
           children: [
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               curve: Curves.easeInOut,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+
+              padding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 8,
+              ),
+
               decoration: BoxDecoration(
-                color: isSelected ? primaryOrange : Colors.transparent,
+                color:
+                    isSelected ? primaryOrange : Colors.transparent,
+
                 borderRadius: BorderRadius.circular(30),
               ),
+
               child: Icon(
                 icon,
                 size: 22,
-                color: isSelected ? Colors.white : navIconColor,
+                color:
+                    isSelected ? Colors.white : navIconColor,
               ),
             ),
+
             const SizedBox(height: 2),
+
             AnimatedDefaultTextStyle(
               duration: const Duration(milliseconds: 200),
+
               style: TextStyle(
                 fontSize: 11,
-                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                color: isSelected ? Colors.black87 : navIconColor,
+                fontWeight: isSelected
+                    ? FontWeight.w700
+                    : FontWeight.w500,
+                color:
+                    isSelected ? Colors.black87 : navIconColor,
               ),
+
               child: Text(label),
             ),
           ],
