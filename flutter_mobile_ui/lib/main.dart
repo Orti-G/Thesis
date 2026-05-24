@@ -2,13 +2,14 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_database/firebase_database.dart'; // <-- ADDED THIS IMPORT
+import 'package:firebase_database/firebase_database.dart';
 
 // ── IMPORT YOUR ACTUAL FILES HERE ─────────────────────────────────────────
 import 'dashboard.dart';
 import 'billing.dart' as billing;
 import 'alert.dart';
 import 'settings.dart';
+import 'onboarding_screen.dart'; // <-- Added the import for your new layout
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -42,15 +43,12 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage>
     with SingleTickerProviderStateMixin {
   late AnimationController _lottieController;
-
   bool _showButton = false;
 
   @override
   void initState() {
     super.initState();
-
     _lottieController = AnimationController(vsync: this);
-
     _lottieController.addStatusListener((status) {
       if (status == AnimationStatus.completed) {
         setState(() {
@@ -87,19 +85,44 @@ class _HomePageState extends State<HomePage>
                 },
               ),
             ),
+            
+            // ── NEW ANIMATED TEXT ADDED HERE ──
             AnimatedOpacity(
               opacity: _showButton ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 500),
+              duration: const Duration(milliseconds: 600),
+              child: AnimatedSlide(
+                offset: _showButton ? Offset.zero : const Offset(0, 0.5),
+                duration: const Duration(milliseconds: 600),
+                curve: Curves.easeOutCubic,
+                child: const Padding(
+                  padding: EdgeInsets.only(bottom: 24.0),
+                  child: Text(
+                    'Kuryente Usage & Residential Observation',
+                    style: TextStyle(
+                      fontSize: 15, // Small
+                      fontWeight: FontWeight.bold, // Bold
+                      color: Colors.grey, // Gray color
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // ── EXISTING BUTTON ──
+            AnimatedOpacity(
+              opacity: _showButton ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 800), // Slightly delayed after text
               child: SizedBox(
                 width: 220,
                 height: 45,
                 child: ElevatedButton(
                   onPressed: _showButton
                       ? () {
+                          // ROUTE TO ONBOARDING INSTEAD OF MAINSCREEN DIRECTLY
                           Navigator.pushReplacement(
                             context,
                             MaterialPageRoute(
-                              builder: (context) => const MainScreen(),
+                              builder: (context) => const OnboardingScreen(),
                             ),
                           );
                         }
@@ -143,9 +166,8 @@ class _MainScreenState extends State<MainScreen> {
 
   final Color primaryOrange = const Color(0xFFF26E22);
   final Color navIconColor = const Color(0xFF8C6B5E);
-  final Color badgeRed = const Color(0xFFE53935); // Added color for the red dot
+  final Color badgeRed = const Color(0xFFE53935);
 
-  // Firebase reference for the alert dot
   final DatabaseReference _anomalyRef =
       FirebaseDatabase.instance.ref().child('anomaly_alert');
 
@@ -188,7 +210,7 @@ class _MainScreenState extends State<MainScreen> {
               borderRadius: BorderRadius.circular(navBorderRadius),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.10),
+                  color: Colors.black.withOpacity(0.10), // Note: Changed to withOpacity for broad Flutter compatibility
                   blurRadius: 24,
                   offset: const Offset(0, 6),
                 ),
@@ -202,7 +224,7 @@ class _MainScreenState extends State<MainScreen> {
               child: Container(
                 height: navHeight,
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.80),
+                  color: Colors.white.withOpacity(0.80), // Note: Changed to withOpacity
                   borderRadius: BorderRadius.circular(navBorderRadius),
                 ),
                 child: Row(
@@ -218,27 +240,22 @@ class _MainScreenState extends State<MainScreen> {
                       icon: Icons.receipt_long_outlined,
                       label: 'Billing',
                     ),
-                    
-                    // ── FIREBASE STREAM FOR ALERTS ICON BADGE ─────────────────
                     StreamBuilder<DatabaseEvent>(
                       stream: _anomalyRef.onValue,
                       builder: (context, snapshot) {
                         bool showRedDot = false;
-                        
                         if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
                           final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
                           showRedDot = data['is_anomaly'] ?? false;
                         }
-
                         return _buildNavItem(
                           index: 2,
                           icon: Icons.notifications_outlined,
                           label: 'Alerts',
-                          showBadge: showRedDot, // Pass the boolean state here
+                          showBadge: showRedDot,
                         );
                       },
                     ),
-
                     _buildNavItem(
                       index: 3,
                       icon: Icons.settings_outlined,
@@ -258,7 +275,7 @@ class _MainScreenState extends State<MainScreen> {
     required int index,
     required IconData icon,
     required String label,
-    bool showBadge = false, // <-- Added badge parameter
+    bool showBadge = false,
   }) {
     final bool isSelected = _selectedNavIndex == index;
 
@@ -289,8 +306,6 @@ class _MainScreenState extends State<MainScreen> {
                     size: 22,
                     color: isSelected ? Colors.white : navIconColor,
                   ),
-                  
-                  // ── THE RED DOT BADGE ───────────────────────────────────────
                   if (showBadge)
                     Positioned(
                       top: -2,

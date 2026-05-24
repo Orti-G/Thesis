@@ -19,7 +19,6 @@ class BillingScreen extends StatelessWidget {
   Future<void> _handleRefresh() async {
     final url = Uri.parse('http://35.209.250.46:8000/forecast');
     try {
-      // CHANGED: Using http.post instead of http.get to resolve the 405 error
       final response = await http.post(url); 
       if (response.statusCode == 200) {
         debugPrint('Forecast successfully refreshed via API.');
@@ -40,17 +39,20 @@ class BillingScreen extends StatelessWidget {
         builder: (context, snapshot) {
           
           // Default fallback values
-          double forecast = 0.0;
+          double estimatedMonthEnd = 0.0;
+          double predictedDayTotal = 0.0;
           double cumulativeEnergy = 0.0;
 
           // Safely extract data if it exists
           if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
             final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
             
-            // Case-sensitive lookup for predicted_day_total_kWh
             final forecastData = data['forecast'] as Map<dynamic, dynamic>?;
             if (forecastData != null) {
-              forecast = (forecastData['predicted_day_total_kWh'] ?? forecastData['predicted_day_total_kwh'] ?? 0).toDouble();
+              // Mapped to estimated_month_end_kWh
+              estimatedMonthEnd = (forecastData['estimated_month_end_kWh'] ?? forecastData['estimated_month_end_kwh'] ?? 0).toDouble();
+              // Mapped to predicted_day_total_kWh
+              predictedDayTotal = (forecastData['predicted_day_total_kWh'] ?? forecastData['predicted_day_total_kwh'] ?? 0).toDouble();
             }
             
             // Defensive check for cumul_kWh casing as well
@@ -64,7 +66,6 @@ class BillingScreen extends StatelessWidget {
           final double percentage = (cumulativeEnergy / 200).clamp(0.0, 1.0);
           final double remaining = (200 - cumulativeEnergy).clamp(0.0, 200.0);
 
-          // ── REPLACED DEFAULT REFRESH INDICATOR WITH CUSTOM LOTTIE INDICATOR ──
           return CustomMaterialIndicator(
             onRefresh: _handleRefresh,
             backgroundColor: Colors.white,
@@ -73,7 +74,6 @@ class BillingScreen extends StatelessWidget {
                 padding: const EdgeInsets.all(6.0),
                 child: Lottie.asset(
                   'assets/spark loading.json',
-                  // Kept small to fit nicely inside the standard pull-to-refresh circle
                   width: 30, 
                   height: 30,
                   fit: BoxFit.contain,
@@ -125,7 +125,7 @@ class BillingScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                'ESTIMATED END OF THE DAY BILL:',
+                                'ESTIMATED END OF THE MONTH:', // Changed label here
                                 style: TextStyle(
                                   color: brandOrangeText.withValues(alpha: 0.9),
                                   fontSize: 13,
@@ -143,9 +143,9 @@ class BillingScreen extends StatelessWidget {
                                 ),
                               ),
                               const SizedBox(height: 12),
-                              // Displays mapped forecast value dynamically
+                              // Displays mapped month end forecast value dynamically (replaced ₱ with kWh)
                               Text(
-                                '₱${forecast.toStringAsFixed(2)}',
+                                '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
                                 style: TextStyle(
                                   color: brandOrangeText,
                                   fontSize: 44,
@@ -173,7 +173,7 @@ class BillingScreen extends StatelessWidget {
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
-                                  'Current Consumption',
+                                  'End of the day consumption', // Changed label here
                                   style: TextStyle(
                                     color: Colors.white.withValues(alpha: 0.95),
                                     fontSize: 12,
@@ -184,7 +184,7 @@ class BillingScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              '${cumulativeEnergy.toStringAsFixed(2)} kWh',
+                              '${predictedDayTotal.toStringAsFixed(2)} kWh', // Mapped to predicted_day_total_kWh
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 19,
