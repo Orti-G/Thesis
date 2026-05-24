@@ -19,7 +19,8 @@ class BillingScreen extends StatelessWidget {
   Future<void> _handleRefresh() async {
     final url = Uri.parse('http://35.209.250.46:8000/forecast');
     try {
-      final response = await http.get(url);
+      // CHANGED: Using http.post instead of http.get to resolve the 405 error
+      final response = await http.post(url); 
       if (response.statusCode == 200) {
         debugPrint('Forecast successfully refreshed via API.');
       } else {
