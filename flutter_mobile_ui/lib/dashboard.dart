@@ -23,8 +23,7 @@ class Dashboard extends StatefulWidget {
 }
 
 class _DashboardState extends State<Dashboard> {
-  // Timer & Firebase Subscription
-  Timer? _timer;
+  // Firebase Subscription
   StreamSubscription<DatabaseEvent>? _dbSubscription;
 
   // State for collapsible Advanced Metrics
@@ -48,7 +47,6 @@ class _DashboardState extends State<Dashboard> {
   // Colors matching your system design
   final Color primaryOrange = const Color(0xFFF26E22);
   final Color topCardColor = const Color(0xFFFA8B39);
-  final Color darkButtonColor = const Color(0xFF3B150F);
   final Color bgColor = const Color(0xFFFAFAFA);
   final Color cardColor = Colors.white;
 
@@ -62,9 +60,7 @@ class _DashboardState extends State<Dashboard> {
     _wattsHistory = List.generate(
       maxDataPoints,
       (i) => ChartDataPoint(
-        timestamp: now.subtract(
-          Duration(seconds: (maxDataPoints - i) * 2),
-        ),
+        timestamp: now.subtract(Duration(seconds: (maxDataPoints - i) * 2)),
         value: 0.0,
       ),
       growable: true,
@@ -73,9 +69,7 @@ class _DashboardState extends State<Dashboard> {
     _ampsHistory = List.generate(
       maxDataPoints,
       (i) => ChartDataPoint(
-        timestamp: now.subtract(
-          Duration(seconds: (maxDataPoints - i) * 2),
-        ),
+        timestamp: now.subtract(Duration(seconds: (maxDataPoints - i) * 2)),
         value: 0.0,
       ),
       growable: true,
@@ -84,33 +78,13 @@ class _DashboardState extends State<Dashboard> {
     _voltageHistory = List.generate(
       maxDataPoints,
       (i) => ChartDataPoint(
-        timestamp: now.subtract(
-          Duration(seconds: (maxDataPoints - i) * 2),
-        ),
+        timestamp: now.subtract(Duration(seconds: (maxDataPoints - i) * 2)),
         value: 0.0,
       ),
       growable: true,
     );
 
     _setupFirebaseListener();
-
-    // Timer running every 2 seconds appending data CONSTANTLY ONLY for the main Watts chart
-    _timer = Timer.periodic(
-      const Duration(seconds: 2),
-      (timer) {
-        setState(() {
-          if (_wattsHistory.length >= maxDataPoints) {
-            _wattsHistory.removeAt(0);
-          }
-          _wattsHistory.add(
-            ChartDataPoint(
-              timestamp: DateTime.now(),
-              value: _currentWatts,
-            ),
-          );
-        });
-      },
-    );
   }
 
   void _setupFirebaseListener() {
@@ -133,7 +107,12 @@ class _DashboardState extends State<Dashboard> {
 
             final timestamp = DateTime.now();
 
-            // Append new points to the smaller charts ONLY when Firebase pushes new data
+            // Append new points to the small charts
+            // --- WATTS ---
+            if (_wattsHistory.length >= maxDataPoints) {
+              _wattsHistory.removeAt(0);
+            }
+            _wattsHistory.add(ChartDataPoint(timestamp: timestamp, value: _currentWatts));
 
             // --- AMPS ---
             if (_ampsHistory.length >= maxDataPoints) {
@@ -148,7 +127,7 @@ class _DashboardState extends State<Dashboard> {
             _voltageHistory.add(ChartDataPoint(timestamp: timestamp, value: _currentVoltage));
           });
         } catch (e) {
-          print("🔴 ERROR PARSING DATA: $e");
+          debugPrint("🔴 ERROR PARSING DATA: $e");
         }
       }
     });
@@ -156,15 +135,12 @@ class _DashboardState extends State<Dashboard> {
 
   @override
   void dispose() {
-    _timer?.cancel();
     _dbSubscription?.cancel();
     super.dispose();
   }
 
   // Generates FlSpots mapping list indexes on X axis against read values on Y axis
-  List<FlSpot> _generateChartSpots(
-    List<ChartDataPoint> history,
-  ) {
+  List<FlSpot> _generateChartSpots(List<ChartDataPoint> history) {
     return history.asMap().entries.map((e) {
       return FlSpot(
         e.key.toDouble(),
@@ -173,68 +149,86 @@ class _DashboardState extends State<Dashboard> {
     }).toList();
   }
 
-  // MIN/MAX Helpers that work explicitly with our ChartDataPoint structures
   double _getMinY(List<ChartDataPoint> history) {
     if (history.isEmpty) return 0;
-
-    double min = history
-        .map((e) => e.value)
-        .reduce((a, b) => a < b ? a : b);
-
+    double min = history.map((e) => e.value).reduce((a, b) => a < b ? a : b);
     return (min * 0.8).clamp(0, double.infinity);
   }
 
   double _getMaxY(List<ChartDataPoint> history) {
     if (history.isEmpty) return 1;
-
-    double max = history
-        .map((e) => e.value)
-        .reduce((a, b) => a > b ? a : b);
-
+    double max = history.map((e) => e.value).reduce((a, b) => a > b ? a : b);
     return max == 0 ? 1.0 : max * 1.2;
   }
 
   String _formatWithCommas(double value) {
-    RegExp reg = RegExp(
-      r'(\d{1,3})(?=(\d{3})+(?!\d))',
-    );
-
+    RegExp reg = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
     String mathFunc(Match match) => '${match[1]},';
+    return value.toStringAsFixed(1).replaceAllMapped(reg, mathFunc);
+  }
 
-    return value.toStringAsFixed(2).replaceAllMapped(reg, mathFunc);
+  // Single dataset mock data
+  List<FlSpot> _getMockChartData() {
+    return const [
+      FlSpot(0, 0.5), FlSpot(1, 0.8), FlSpot(2, 0.4), FlSpot(3, 0.6), FlSpot(4, 0.5),
+      FlSpot(5, 0.8), FlSpot(6, 0.4), FlSpot(7, 1.2), FlSpot(17, 1.0), FlSpot(17.5, 0.8),
+      FlSpot(18, 0.5), FlSpot(18.5, 14), FlSpot(19, 13.5), FlSpot(19.5, 13.8),
+      FlSpot(20, 13), FlSpot(20.5, 1), FlSpot(21, 0.5), FlSpot(22, 0.8), FlSpot(23, 0.4), FlSpot(24, 0),
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
+    String todayDate = DateFormat('EEE MMM d').format(DateTime.now());
+    
+    // Get total screen height for our 70% calculation
+    final screenHeight = MediaQuery.of(context).size.height;
+
     return Scaffold(
       backgroundColor: bgColor,
       body: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // --- HEADER SECTION WITH MAIN ZOOMABLE TIMED CHART ---
+            // --- HEADER SECTION ---
             Container(
+              height: screenHeight * 0.70, // Takes up 70% of the screen
               width: double.infinity,
-              color: topCardColor,
+              color: topCardColor, // The Big Orange Section
               child: SafeArea(
                 bottom: false,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Header text
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 16, 20, 10),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                todayDate,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
                           Text(
-                            'TOTAL ENERGY CONSUMPTION',
+                            'Total Used',
                             style: TextStyle(
-                              fontSize: 16,
+                              fontSize: 14,
                               color: Colors.white.withValues(alpha: 0.9),
                               fontWeight: FontWeight.w500,
                             ),
                           ),
-                          const SizedBox(height: 8),
+                          const SizedBox(height: 4),
                           Row(
                             crossAxisAlignment: CrossAxisAlignment.baseline,
                             textBaseline: TextBaseline.alphabetic,
@@ -242,62 +236,19 @@ class _DashboardState extends State<Dashboard> {
                               Text(
                                 _formatWithCommas(_cumulativeEnergy),
                                 style: const TextStyle(
-                                  fontSize: 48,
+                                  fontSize: 36,
                                   fontWeight: FontWeight.w700,
                                   letterSpacing: -1,
                                   color: Colors.white,
                                 ),
                               ),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: 6),
                               const Text(
                                 'kWh',
                                 style: TextStyle(
-                                  fontSize: 20,
+                                  fontSize: 16,
                                   color: Colors.white,
                                   fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Icon(
-                                Icons.visibility_off_outlined,
-                                size: 20,
-                                color: Colors.white.withValues(alpha: 0.8),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              // --- Custom Green Glowing Circle Widget ---
-                              Container(
-                                width: 16, // Original icon space
-                                height: 16,
-                                alignment: Alignment.center,
-                                child: Container(
-                                  width: 8, // Inner solid dot
-                                  height: 8,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF00E676), // Bright Green
-                                    shape: BoxShape.circle,
-                                    boxShadow: [
-                                      // Bloom effects
-                             
-                                      BoxShadow(
-                                        color: const Color(0xFF00E676).withOpacity(0.3),
-                                        blurRadius: 6.0,
-                                        spreadRadius: 1.0,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                'Live Power: ${_currentWatts.toStringAsFixed(0)} W',
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w400,
                                 ),
                               ),
                             ],
@@ -306,115 +257,143 @@ class _DashboardState extends State<Dashboard> {
                       ),
                     ),
                     const SizedBox(height: 10),
-                    // INTERACTIVE VIEW BOX FOR PAN & PINCH ZOOM
-                    SizedBox(
-                      height: 210,
-                      width: double.infinity,
-                      child: InteractiveViewer(
-                        clipBehavior: Clip.none,
-                        alignment: Alignment.center,
-                        minScale: 1.0,
-                        maxScale: 5.0,
-                        scaleEnabled: true,
-                        panEnabled: true,
-                        child: Padding(
-                          padding: const EdgeInsets.only(
-                            right: 24.0,
-                            left: 10.0,
-                          ),
-                          child: LineChart(
-                            LineChartData(
-                              gridData: const FlGridData(
-                                show: false,
-                              ),
-                              borderData: FlBorderData(show: false),
-                              minY: _getMinY(_wattsHistory),
-                              maxY: _getMaxY(_wattsHistory),
-                              titlesData: FlTitlesData(
-                                topTitles: const AxisTitles(
-                                  sideTitles: SideTitles(
-                                    showTitles: false,
+
+                    // DAILY CHART WITH SUBTLE GLOW EFFECT
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: Padding(
+                            padding: const EdgeInsets.only(
+                              top: 24.0,
+                              bottom: 0.0
+                            ),
+                            child: LineChart(
+                              LineChartData(
+                                minX: 0,
+                                maxX: 24,
+                                minY: 0,
+                                maxY: 15,
+                                gridData: FlGridData(
+                                  show: true,
+                                  drawVerticalLine: true,
+                                  horizontalInterval: 7,
+                                  verticalInterval: 6,
+                                  getDrawingHorizontalLine: (value) => FlLine(
+                                    color: Colors.white.withValues(alpha: 0.2),
+                                    strokeWidth: 1,
+                                  ),
+                                  getDrawingVerticalLine: (value) => FlLine(
+                                    color: Colors.white.withValues(alpha: 0.2),
+                                    strokeWidth: 1,
                                   ),
                                 ),
-                                rightTitles: const AxisTitles(
-                                  sideTitles: SideTitles(
-                                    showTitles: false,
-                                  ),
+                                borderData: FlBorderData(show: false),
+                                
+                                extraLinesData: ExtraLinesData(
+                                  horizontalLines: [
+                                    HorizontalLine(
+                                      y: 7,
+                                      color: Colors.transparent,
+                                      label: HorizontalLineLabel(
+                                        show: true,
+                                        alignment: Alignment.bottomRight,
+                                        padding: const EdgeInsets.only(right: 4, bottom: 4),
+                                        style: TextStyle(
+                                          color: Colors.white.withValues(alpha: 0.8),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                        labelResolver: (line) => '7',
+                                      ),
+                                    ),
+                                    HorizontalLine(
+                                      y: 14,
+                                      color: Colors.transparent,
+                                      label: HorizontalLineLabel(
+                                        show: true,
+                                        alignment: Alignment.bottomRight,
+                                        padding: const EdgeInsets.only(right: 4, bottom: 4),
+                                        style: TextStyle(
+                                          color: Colors.white.withValues(alpha: 0.8),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                        labelResolver: (line) => '14 kW',
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                leftTitles: const AxisTitles(
-                                  sideTitles: SideTitles(
-                                    showTitles: false,
-                                  ),
-                                ),
-                                bottomTitles: AxisTitles(
-                                  sideTitles: SideTitles(
-                                    showTitles: true,
-                                    reservedSize: 28,
-                                    interval: 4,
-                                    getTitlesWidget: (value, meta) {
-                                      int index = value.toInt();
 
-                                      if (index >= 0 &&
-                                          index < _wattsHistory.length) {
-                                        DateTime time =
-                                            _wattsHistory[index].timestamp;
-
-                                        String formattedTime = DateFormat(
-                                          'HH:mm:ss',
-                                        ).format(time);
-
+                                titlesData: FlTitlesData(
+                                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                  leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                  bottomTitles: AxisTitles(
+                                    sideTitles: SideTitles(
+                                      showTitles: true,
+                                      reservedSize: 24,
+                                      interval: 6,
+                                      getTitlesWidget: (value, meta) {
+                                        String label = '';
+                                        if (value == 6) label = '6 AM';
+                                        if (value == 12) label = '12 PM';
+                                        if (value == 18) label = '6 PM';
+                                        
                                         return SideTitleWidget(
                                           meta: meta,
                                           space: 8,
                                           child: Text(
-                                            formattedTime,
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 9,
+                                            label,
+                                            style: TextStyle(
+                                              color: Colors.white.withValues(alpha: 0.8),
+                                              fontSize: 10,
                                               fontWeight: FontWeight.bold,
                                             ),
                                           ),
                                         );
-                                      }
-
-                                      return const SizedBox.shrink();
-                                    },
+                                      },
+                                    ),
                                   ),
                                 ),
+                                lineBarsData: [
+                                  LineChartBarData(
+                                    spots: _getMockChartData(),
+                                    isCurved: false, 
+                                    color: Colors.white, 
+                                    barWidth: 2.0, 
+                                    isStrokeCapRound: true,
+                                    dotData: const FlDotData(show: false),
+                                    // Softened neon line aura
+                                    shadow: Shadow(
+                                      blurRadius: 4,
+                                      color: Colors.white.withValues(alpha: 0.25),
+                                      offset: Offset.zero,
+                                    ),
+                                    // Much lighter, cleaner fade underneath the bar
+                                    belowBarData: BarAreaData(
+                                      show: true,
+                                      gradient: LinearGradient(
+                                        colors: [
+                                          Colors.white.withValues(alpha: 0.20),
+                                          Colors.white.withValues(alpha: 0.05),
+                                          Colors.white.withValues(alpha: 0.0),
+                                        ],
+                                        stops: const [0.0, 0.5, 1.0],
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
-                              lineBarsData: [
-                                LineChartBarData(
-                                  spots: _generateChartSpots(
-                                    _wattsHistory,
-                                  ),
-                                  isCurved: true,
-                                  color: Colors.white,
-                                  barWidth: 3,
-                                  isStrokeCapRound: true,
-                                  dotData: FlDotData(
-                                    show: true,
-                                    checkToShowDot: (spot, barData) {
-                                      return spot.x == barData.spots.last.x;
-                                    },
-                                    getDotPainter: (spot, percent, barData, index) {
-                                      return FlDotCirclePainter(
-                                        radius: 5,
-                                        color: Colors.white,
-                                        strokeWidth: 0,
-                                      );
-                                    },
-                                  ),
-                                  belowBarData: BarAreaData(
-                                    show: false,
-                                  ),
-                                ),
-                              ],
                             ),
                           ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 0),
                   ],
                 ),
               ),
@@ -447,6 +426,17 @@ class _DashboardState extends State<Dashboard> {
                     ],
                   ),
                   const SizedBox(height: 16),
+                  
+                  _buildLiveFeedCard(
+                    title: 'Power',
+                    value: _currentWatts.toStringAsFixed(0),
+                    unit: 'W',
+                    subtitle: 'Live Power',
+                    spots: _generateChartSpots(_wattsHistory),
+                    history: _wattsHistory,
+                  ),
+                  const SizedBox(height: 12),
+
                   _buildLiveFeedCard(
                     title: 'Current',
                     value: _currentAmps.toStringAsFixed(2),
@@ -456,6 +446,7 @@ class _DashboardState extends State<Dashboard> {
                     history: _ampsHistory,
                   ),
                   const SizedBox(height: 12),
+
                   _buildLiveFeedCard(
                     title: 'Voltage',
                     value: _currentVoltage.toStringAsFixed(1),
@@ -465,10 +456,11 @@ class _DashboardState extends State<Dashboard> {
                     history: _voltageHistory,
                   ),
                   const SizedBox(height: 30),
+
+                  // Advanced Metrics Toggle
                   GestureDetector(
                     onTap: () => setState(
-                      () => _isAdvancedMetricsExpanded =
-                          !_isAdvancedMetricsExpanded,
+                      () => _isAdvancedMetricsExpanded = !_isAdvancedMetricsExpanded,
                     ),
                     child: Container(
                       color: Colors.transparent,
@@ -528,7 +520,7 @@ class _DashboardState extends State<Dashboard> {
                           )
                         : const SizedBox.shrink(),
                   ),
-                  const SizedBox(height: 120),
+                  const SizedBox(height: 80),
                 ],
               ),
             ),
@@ -623,15 +615,24 @@ class _DashboardState extends State<Dashboard> {
                     spots: spots,
                     isCurved: true,
                     color: primaryOrange,
-                    barWidth: 2,
+                    barWidth: 2.0,
                     dotData: const FlDotData(show: false),
+                    // Tamed line edge glow
+                    shadow: Shadow(
+                      blurRadius: 3,
+                      color: primaryOrange.withValues(alpha: 0.2),
+                      offset: Offset.zero,
+                    ),
+                    // Clean, minimal gradient fade for feed cards
                     belowBarData: BarAreaData(
                       show: true,
                       gradient: LinearGradient(
                         colors: [
-                          primaryOrange.withValues(alpha: 0.2),
-                          primaryOrange.withValues(alpha: 0.0),
+                          primaryOrange.withValues(alpha: 0.15),
+                          primaryOrange.withValues(alpha: 0.02),
+                          Colors.transparent,
                         ],
+                        stops: const [0.0, 0.6, 1.0],
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
                       ),
@@ -673,8 +674,8 @@ class _DashboardState extends State<Dashboard> {
               fontSize: 13,
               color: Colors.grey[800],
               fontWeight: FontWeight.w600,
-            ),
-          ),
+                ),
+              ),
           const SizedBox(height: 12),
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -682,7 +683,7 @@ class _DashboardState extends State<Dashboard> {
             children: [
               Text(
                 value,
-                style: const TextStyle(
+                style: const TextStyle( 
                   fontSize: 24,
                   fontWeight: FontWeight.w700,
                   letterSpacing: -0.5,

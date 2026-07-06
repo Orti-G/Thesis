@@ -49,22 +49,47 @@ class BillingScreen extends StatelessWidget {
             
             final forecastData = data['forecast'] as Map<dynamic, dynamic>?;
             if (forecastData != null) {
-              // Mapped to estimated_month_end_kWh
               estimatedMonthEnd = (forecastData['estimated_month_end_kWh'] ?? forecastData['estimated_month_end_kwh'] ?? 0).toDouble();
-              // Mapped to predicted_day_total_kWh
               predictedDayTotal = (forecastData['predicted_day_total_kWh'] ?? forecastData['predicted_day_total_kwh'] ?? 0).toDouble();
             }
             
-            // Defensive check for cumul_kWh casing as well
             final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
             if (liveReading != null) {
               cumulativeEnergy = (liveReading['cumul_kWh'] ?? liveReading['cumul_kwh'] ?? 0).toDouble();
             }
           }
 
-          // Calculate dynamic tier values based on a 200 kWh limit
-          final double percentage = (cumulativeEnergy / 200).clamp(0.0, 1.0);
-          final double remaining = (200 - cumulativeEnergy).clamp(0.0, 200.0);
+          // ── DYNAMIC TIER CALCULATION BLOCK ───────────────────────────────
+          String currentTierTitle = 'TIER 1 STATUS';
+          String currentTierRate = '₱0.9803/kWh';
+          double currentTierMax = 200.0;
+          String remainingText = '';
+
+          if (cumulativeEnergy <= 200) {
+            currentTierTitle = 'TIER 1 STATUS';
+            currentTierRate = '₱0.9803/kWh';
+            currentTierMax = 200.0;
+            double remaining = (200.0 - cumulativeEnergy).clamp(0.0, 200.0);
+            remainingText = '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
+          } else if (cumulativeEnergy <= 300) {
+            currentTierTitle = 'TIER 2 STATUS';
+            currentTierRate = '₱1.2908/kWh';
+            currentTierMax = 300.0;
+            double remaining = (300.0 - cumulativeEnergy).clamp(0.0, 100.0);
+            remainingText = '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
+          } else {
+            currentTierTitle = 'TIER 3 STATUS';
+            currentTierRate = '₱1.5837/kWh';
+            currentTierMax = 400.0; // Dynamic cap for progress tracking
+            double remaining = (400.0 - cumulativeEnergy).clamp(0.0, 100.0);
+            if (cumulativeEnergy >= 400.0) {
+              remainingText = 'Maximum tier bracket fully reached';
+            } else {
+              remainingText = '${remaining.toStringAsFixed(2)} kWh remaining before capping threshold';
+            }
+          }
+
+          final double percentage = (cumulativeEnergy / currentTierMax).clamp(0.0, 1.0);
 
           return CustomMaterialIndicator(
             onRefresh: _handleRefresh,
@@ -103,7 +128,6 @@ class BillingScreen extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const SizedBox(height: 5),
-                              // Subtle pull to refresh text hint
                               Row(
                                 children: [
                                   Icon(
@@ -125,7 +149,7 @@ class BillingScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                'ESTIMATED END OF THE MONTH:', // Changed label here
+                                'ESTIMATED END OF THE MONTH:',
                                 style: TextStyle(
                                   color: brandOrangeText.withValues(alpha: 0.9),
                                   fontSize: 13,
@@ -143,7 +167,6 @@ class BillingScreen extends StatelessWidget {
                                 ),
                               ),
                               const SizedBox(height: 12),
-                              // Displays mapped month end forecast value dynamically (replaced ₱ with kWh)
                               Text(
                                 '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
                                 style: TextStyle(
@@ -173,7 +196,7 @@ class BillingScreen extends StatelessWidget {
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
-                                  'End of the day consumption', // Changed label here
+                                  'End of the day consumption',
                                   style: TextStyle(
                                     color: Colors.white.withValues(alpha: 0.95),
                                     fontSize: 12,
@@ -184,7 +207,7 @@ class BillingScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              '${predictedDayTotal.toStringAsFixed(2)} kWh', // Mapped to predicted_day_total_kWh
+                              '${predictedDayTotal.toStringAsFixed(2)} kWh',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 19,
@@ -229,9 +252,9 @@ class BillingScreen extends StatelessWidget {
                                     Row(
                                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                       children: [
-                                        const Text(
-                                          'TIER 1 STATUS',
-                                          style: TextStyle(
+                                        Text(
+                                          currentTierTitle, // Updated dynamically
+                                          style: const TextStyle(
                                             color: Colors.white,
                                             fontSize: 15,
                                             fontWeight: FontWeight.w800,
@@ -239,9 +262,9 @@ class BillingScreen extends StatelessWidget {
                                           ),
                                         ),
                                         Text(
-                                          '₱0.9803/kWh',
+                                          currentTierRate, // Updated dynamically
                                           style: TextStyle(
-                                            color: Colors.white.withValues(alpha: 0.9),
+                                            color: Colors.white.withValues(alpha: 0.95),
                                             fontSize: 12,
                                             fontWeight: FontWeight.w600,
                                           ),
@@ -262,9 +285,9 @@ class BillingScreen extends StatelessWidget {
                                                 text: '${cumulativeEnergy.toStringAsFixed(2)} ',
                                                 style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
                                               ),
-                                              const TextSpan(
-                                                text: '/ 200',
-                                                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w500),
+                                              TextSpan(
+                                                text: '/ ${currentTierMax.toStringAsFixed(0)}', // Updated dynamically
+                                                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w500),
                                               ),
                                             ],
                                           ),
@@ -293,7 +316,7 @@ class BillingScreen extends StatelessWidget {
                                     ClipRRect(
                                       borderRadius: BorderRadius.circular(10),
                                       child: LinearProgressIndicator(
-                                        value: percentage, 
+                                        value: percentage, // Updated dynamically
                                         backgroundColor: Colors.white.withValues(alpha: 0.25),
                                         valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
                                         minHeight: 7,
@@ -310,7 +333,7 @@ class BillingScreen extends StatelessWidget {
                                         const SizedBox(width: 6),
                                         Expanded(
                                           child: Text(
-                                            '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation',
+                                            remainingText, // Updated dynamically
                                             style: TextStyle(
                                               color: Colors.white.withValues(alpha: 0.95),
                                               fontSize: 11,
@@ -327,7 +350,6 @@ class BillingScreen extends StatelessWidget {
                           ),
                         ),
                         
-                        // Subtle visual divider
                         Padding(
                           padding: const EdgeInsets.symmetric(vertical: 24.0),
                           child: Divider(
@@ -448,8 +470,8 @@ class BillingScreen extends StatelessWidget {
               color: isActive ? activeTextColor : textDark,
               fontSize: 19,
               fontWeight: FontWeight.w800,
-            ),
-          ),
+                ),
+              ),
           const SizedBox(height: 12),
           Text(
             'RATE',

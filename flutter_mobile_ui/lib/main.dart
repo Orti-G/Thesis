@@ -1,15 +1,14 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:lottie/lottie.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 
-// ── IMPORT YOUR ACTUAL FILES HERE ─────────────────────────────────────────
+// ── IMPORTS FOR YOUR ACTUAL FILES ─────────────────────────────────────────
 import 'dashboard.dart';
 import 'billing.dart' as billing;
 import 'alert.dart';
 import 'settings.dart';
-import 'onboarding_screen.dart'; // <-- Added the import for your new layout
+import 'onboarding_screen.dart'; // <-- Your separate splash layout file
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,156 +24,13 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return const MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: HomePage(),
+      // Setting this to OnboardingScreen makes it the first thing that opens
+      home: OnboardingScreen(), 
     );
   }
 }
 
-// ── 1. WELCOME SCREEN WITH LOTTIE ─────────────────────────────────────────
-class HomePage extends StatefulWidget {
-  const HomePage({super.key});
-
-  static const Color accentColor = Color(0xFFFA8B39);
-
-  @override
-  State<HomePage> createState() => _HomePageState();
-}
-
-class _HomePageState extends State<HomePage>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _lottieController;
-  bool _showButton = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _lottieController = AnimationController(vsync: this);
-    _lottieController.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        setState(() {
-          _showButton = true;
-        });
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _lottieController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Center(
-              child: Lottie.asset(
-                'assets/Comp 1.json',
-                controller: _lottieController,
-                width: 300,
-                height: 300,
-                onLoaded: (composition) {
-                  _lottieController
-                    ..duration = composition.duration
-                    ..forward();
-                },
-              ),
-            ),
-            
-            // ── NEW ANIMATED TEXT ADDED HERE ──
-            AnimatedOpacity(
-              opacity: _showButton ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 600),
-              child: AnimatedSlide(
-                offset: _showButton ? Offset.zero : const Offset(0, 0.5),
-                duration: const Duration(milliseconds: 600),
-                curve: Curves.easeOutCubic,
-                child: const Padding(
-                  padding: EdgeInsets.only(bottom: 24.0),
-                  child: Text(
-                    'Kuryente Usage & Residential Observation',
-                    style: TextStyle(
-                      fontSize: 15, // Small
-                      fontWeight: FontWeight.bold, // Bold
-                      color: Colors.grey, // Gray color
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            // ── NEW GLASS-EFFECT BUTTON ──
-            AnimatedOpacity(
-              opacity: _showButton ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 800), // Slightly delayed after text
-              child: Container(
-                width: 220,
-                height: 48,
-                decoration: BoxDecoration(
-                  boxShadow: [
-                    BoxShadow(
-                      color: HomePage.accentColor.withOpacity(0.15),
-                      blurRadius: 16,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(40),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
-                    child: TextButton(
-                      onPressed: _showButton
-                          ? () {
-                              // ROUTE TO ONBOARDING INSTEAD OF MAINSCREEN DIRECTLY
-                              Navigator.pushReplacement(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (context) => const OnboardingScreen(),
-                                ),
-                              );
-                            }
-                          : null,
-                      style: TextButton.styleFrom(
-                        // Semi-transparent base to create the glass tint
-                        backgroundColor: HomePage.accentColor.withOpacity(0.18),
-                        foregroundColor: HomePage.accentColor,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(40),
-                          // The crisp fine border makes the glass look defined
-                          side: BorderSide(
-                            color: HomePage.accentColor.withOpacity(0.4),
-                            width: 1.5,
-                          ),
-                        ),
-                      ),
-                      child: const Text(
-                        'TRY BETA NOW',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ── 2. MAIN APP NAVIGATION WRAPPER ─────────────────────────────────────────
+// ── MAIN APP NAVIGATION WRAPPER ─────────────────────────────────────────
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
