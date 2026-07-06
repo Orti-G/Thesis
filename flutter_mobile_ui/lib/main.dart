@@ -76,8 +76,8 @@ class _HomePageState extends State<HomePage>
               child: Lottie.asset(
                 'assets/Comp 1.json',
                 controller: _lottieController,
-                width: 500,
-                height: 500,
+                width: 300,
+                height: 300,
                 onLoaded: (composition) {
                   _lottieController
                     ..duration = composition.duration
@@ -108,38 +108,59 @@ class _HomePageState extends State<HomePage>
               ),
             ),
 
-            // ── EXISTING BUTTON ──
+            // ── NEW GLASS-EFFECT BUTTON ──
             AnimatedOpacity(
               opacity: _showButton ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 800), // Slightly delayed after text
-              child: SizedBox(
+              child: Container(
                 width: 220,
-                height: 45,
-                child: ElevatedButton(
-                  onPressed: _showButton
-                      ? () {
-                          // ROUTE TO ONBOARDING INSTEAD OF MAINSCREEN DIRECTLY
-                          Navigator.pushReplacement(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const OnboardingScreen(),
-                            ),
-                          );
-                        }
-                      : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: HomePage.accentColor,
-                    foregroundColor: Colors.white,
-                    elevation: 3,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(40),
+                height: 48,
+                decoration: BoxDecoration(
+                  boxShadow: [
+                    BoxShadow(
+                      color: HomePage.accentColor.withOpacity(0.15),
+                      blurRadius: 16,
+                      offset: const Offset(0, 6),
                     ),
-                  ),
-                  child: const Text(
-                    'TRY BETA NOW',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(40),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
+                    child: TextButton(
+                      onPressed: _showButton
+                          ? () {
+                              // ROUTE TO ONBOARDING INSTEAD OF MAINSCREEN DIRECTLY
+                              Navigator.pushReplacement(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const OnboardingScreen(),
+                                ),
+                              );
+                            }
+                          : null,
+                      style: TextButton.styleFrom(
+                        // Semi-transparent base to create the glass tint
+                        backgroundColor: HomePage.accentColor.withOpacity(0.18),
+                        foregroundColor: HomePage.accentColor,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(40),
+                          // The crisp fine border makes the glass look defined
+                          side: BorderSide(
+                            color: HomePage.accentColor.withOpacity(0.4),
+                            width: 1.5,
+                          ),
+                        ),
+                      ),
+                      child: const Text(
+                        'TRY BETA NOW',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -210,7 +231,7 @@ class _MainScreenState extends State<MainScreen> {
               borderRadius: BorderRadius.circular(navBorderRadius),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.10), // Note: Changed to withOpacity for broad Flutter compatibility
+                  color: Colors.black.withOpacity(0.10),
                   blurRadius: 24,
                   offset: const Offset(0, 6),
                 ),
@@ -224,7 +245,7 @@ class _MainScreenState extends State<MainScreen> {
               child: Container(
                 height: navHeight,
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.80), // Note: Changed to withOpacity
+                  color: Colors.white.withOpacity(0.80),
                   borderRadius: BorderRadius.circular(navBorderRadius),
                 ),
                 child: Row(
