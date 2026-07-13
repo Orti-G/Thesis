@@ -1,25 +1,25 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart'; 
-import 'package:http/http.dart' as http; 
+import 'package:firebase_database/firebase_database.dart';
+import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
 import 'package:custom_refresh_indicator/custom_refresh_indicator.dart';
 
 class BillingScreen extends StatelessWidget {
   BillingScreen({super.key});
 
-  final Color primaryOrange = const Color(0xFFF26E22);
+  final Color primaryOrange = const Color(0xFFFCB775); // Jaffa 300 — main fill
+  final Color tierCardBorder = const Color(0xFFFA8B39);
   final Color creamBg = const Color(0xFFFFFDF9);
   final Color textDark = const Color(0xFF1E1E1E);
   final Color brandOrangeText = const Color(0xFFE25319);
+  final Color tierTextColor = const Color(0xFF7A3712); // Jaffa 700
 
-  // Reference to the root of your Realtime Database
   final DatabaseReference _dbRef = FirebaseDatabase.instance.ref();
 
-  // HTTP trigger function to calculate new forecasts
   Future<void> _handleRefresh() async {
     final url = Uri.parse('http://35.209.250.46:8000/forecast');
     try {
-      final response = await http.post(url); 
+      final response = await http.post(url);
       if (response.statusCode == 200) {
         debugPrint('Forecast successfully refreshed via API.');
       } else {
@@ -37,29 +37,35 @@ class BillingScreen extends StatelessWidget {
       body: StreamBuilder<DatabaseEvent>(
         stream: _dbRef.onValue,
         builder: (context, snapshot) {
-          
-          // Default fallback values
           double estimatedMonthEnd = 0.0;
           double predictedDayTotal = 0.0;
           double cumulativeEnergy = 0.0;
 
-          // Safely extract data if it exists
           if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
             final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
-            
+
             final forecastData = data['forecast'] as Map<dynamic, dynamic>?;
             if (forecastData != null) {
-              estimatedMonthEnd = (forecastData['estimated_month_end_kWh'] ?? forecastData['estimated_month_end_kwh'] ?? 0).toDouble();
-              predictedDayTotal = (forecastData['predicted_day_total_kWh'] ?? forecastData['predicted_day_total_kwh'] ?? 0).toDouble();
+              estimatedMonthEnd =
+                  (forecastData['estimated_month_end_kWh'] ??
+                          forecastData['estimated_month_end_kwh'] ??
+                          0)
+                      .toDouble();
+              predictedDayTotal =
+                  (forecastData['predicted_day_total_kWh'] ??
+                          forecastData['predicted_day_total_kwh'] ??
+                          0)
+                      .toDouble();
             }
-            
+
             final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
             if (liveReading != null) {
-              cumulativeEnergy = (liveReading['cumul_kWh'] ?? liveReading['cumul_kwh'] ?? 0).toDouble();
+              cumulativeEnergy =
+                  (liveReading['cumul_kWh'] ?? liveReading['cumul_kwh'] ?? 0)
+                      .toDouble();
             }
           }
 
-          // ── DYNAMIC TIER CALCULATION BLOCK ───────────────────────────────
           String currentTierTitle = 'TIER 1 STATUS';
           String currentTierRate = '₱0.9803/kWh';
           double currentTierMax = 200.0;
@@ -70,26 +76,32 @@ class BillingScreen extends StatelessWidget {
             currentTierRate = '₱0.9803/kWh';
             currentTierMax = 200.0;
             double remaining = (200.0 - cumulativeEnergy).clamp(0.0, 200.0);
-            remainingText = '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
+            remainingText =
+                '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
           } else if (cumulativeEnergy <= 300) {
             currentTierTitle = 'TIER 2 STATUS';
             currentTierRate = '₱1.2908/kWh';
             currentTierMax = 300.0;
             double remaining = (300.0 - cumulativeEnergy).clamp(0.0, 100.0);
-            remainingText = '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
+            remainingText =
+                '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
           } else {
             currentTierTitle = 'TIER 3 STATUS';
             currentTierRate = '₱1.5837/kWh';
-            currentTierMax = 400.0; // Dynamic cap for progress tracking
+            currentTierMax = 400.0;
             double remaining = (400.0 - cumulativeEnergy).clamp(0.0, 100.0);
             if (cumulativeEnergy >= 400.0) {
               remainingText = 'Maximum tier bracket fully reached';
             } else {
-              remainingText = '${remaining.toStringAsFixed(2)} kWh remaining before capping threshold';
+              remainingText =
+                  '${remaining.toStringAsFixed(2)} kWh remaining before capping threshold';
             }
           }
 
-          final double percentage = (cumulativeEnergy / currentTierMax).clamp(0.0, 1.0);
+          final double percentage = (cumulativeEnergy / currentTierMax).clamp(
+            0.0,
+            1.0,
+          );
 
           return CustomMaterialIndicator(
             onRefresh: _handleRefresh,
@@ -99,7 +111,7 @@ class BillingScreen extends StatelessWidget {
                 padding: const EdgeInsets.all(6.0),
                 child: Lottie.asset(
                   'assets/spark loading.json',
-                  width: 30, 
+                  width: 30,
                   height: 30,
                   fit: BoxFit.contain,
                 ),
@@ -112,61 +124,103 @@ class BillingScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ── TOP HERO SECTION WITH PNG BACKGROUND ─────────────────────────
                   Stack(
                     children: [
                       Image.asset(
-                        'assets/billingbg.png', 
+                        'assets/billingbg.png',
                         width: double.infinity,
                         fit: BoxFit.fitWidth,
                       ),
                       SafeArea(
                         bottom: false,
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24.0,
+                            vertical: 20.0,
+                          ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const SizedBox(height: 5),
                               Row(
                                 children: [
-                                  Icon(
-                                    Icons.refresh_rounded, 
-                                    size: 12, 
-                                    color: brandOrangeText.withValues(alpha: 0.5),
-                                  ),
-                                  const SizedBox(width: 4),
                                   Text(
-                                    'PULL DOWN TO REFRESH FORECAST',
+                                    'ESTIMATED END OF MONTH',
                                     style: TextStyle(
-                                      color: brandOrangeText.withValues(alpha: 0.5),
-                                      fontSize: 10,
+                                      color: brandOrangeText.withValues(
+                                        alpha: 0.85,
+                                      ),
+                                      fontSize: 12,
                                       fontWeight: FontWeight.w700,
-                                      letterSpacing: 0.5,
+                                      letterSpacing: 0.6,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  GestureDetector(
+                                    onTap: () {
+                                      showModalBottomSheet(
+                                        context: context,
+                                        backgroundColor: Colors.white,
+                                        shape: const RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.vertical(
+                                            top: Radius.circular(20),
+                                          ),
+                                        ),
+                                        builder: (context) => Padding(
+                                          padding: const EdgeInsets.all(24.0),
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                children: [
+                                                  Icon(
+                                                    Icons.refresh_rounded,
+                                                    color: brandOrangeText,
+                                                    size: 18,
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Text(
+                                                    'Refresh forecast',
+                                                    style: TextStyle(
+                                                      color: textDark,
+                                                      fontSize: 16,
+                                                      fontWeight:
+                                                          FontWeight.w800,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 10),
+                                              Text(
+                                                'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
+                                                style: TextStyle(
+                                                  color: textDark.withValues(
+                                                    alpha: 0.7,
+                                                  ),
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w500,
+                                                  height: 1.4,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 12),
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                    child: Icon(
+                                      Icons.info_outline_rounded,
+                                      size: 14,
+                                      color: brandOrangeText.withValues(
+                                        alpha: 0.5,
+                                      ),
                                     ),
                                   ),
                                 ],
                               ),
-                              const SizedBox(height: 12),
-                              Text(
-                                'ESTIMATED END OF THE MONTH:',
-                                style: TextStyle(
-                                  color: brandOrangeText.withValues(alpha: 0.9),
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 0.5,
-                                ),
-                              ),
                               const SizedBox(height: 2),
-                              Text(
-                                '(Based on current consumption trajectory)',
-                                style: TextStyle(
-                                  color: const Color(0xFFBA7A5F).withValues(alpha: 0.8),
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              const SizedBox(height: 12),
                               Text(
                                 '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
                                 style: TextStyle(
@@ -219,8 +273,6 @@ class BillingScreen extends StatelessWidget {
                       ),
                     ],
                   ),
-
-                  // ── MAIN CONTENT BODY ────────────────────────────────────────────
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 24.0),
                     child: Column(
@@ -243,28 +295,31 @@ class BillingScreen extends StatelessWidget {
                             width: double.infinity,
                             color: primaryOrange,
                             child: CustomPaint(
-                              painter: CardWavePainter(),
+                              painter: CardCirclePainter(),
                               child: Padding(
                                 padding: const EdgeInsets.all(22),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
                                       children: [
                                         Text(
-                                          currentTierTitle, // Updated dynamically
-                                          style: const TextStyle(
-                                            color: Colors.white,
+                                          currentTierTitle,
+                                          style: TextStyle(
+                                            color: tierTextColor,
                                             fontSize: 15,
                                             fontWeight: FontWeight.w800,
                                             letterSpacing: 0.5,
                                           ),
                                         ),
                                         Text(
-                                          currentTierRate, // Updated dynamically
+                                          currentTierRate,
                                           style: TextStyle(
-                                            color: Colors.white.withValues(alpha: 0.95),
+                                            color: tierTextColor.withValues(
+                                              alpha: 0.95,
+                                            ),
                                             fontSize: 12,
                                             fontWeight: FontWeight.w600,
                                           ),
@@ -273,29 +328,41 @@ class BillingScreen extends StatelessWidget {
                                     ),
                                     const SizedBox(height: 20),
                                     Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.baseline,
                                       textBaseline: TextBaseline.alphabetic,
                                       children: [
                                         RichText(
                                           text: TextSpan(
-                                            style: const TextStyle(color: Colors.white),
+                                            style: TextStyle(
+                                              color: tierTextColor,
+                                            ),
                                             children: [
                                               TextSpan(
-                                                text: '${cumulativeEnergy.toStringAsFixed(2)} ',
-                                                style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800),
+                                                text:
+                                                    '${cumulativeEnergy.toStringAsFixed(2)} ',
+                                                style: const TextStyle(
+                                                  fontSize: 26,
+                                                  fontWeight: FontWeight.w800,
+                                                ),
                                               ),
                                               TextSpan(
-                                                text: '/ ${currentTierMax.toStringAsFixed(0)}', // Updated dynamically
-                                                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w500),
+                                                text:
+                                                    '/ ${currentTierMax.toStringAsFixed(0)}',
+                                                style: const TextStyle(
+                                                  fontSize: 20,
+                                                  fontWeight: FontWeight.w500,
+                                                ),
                                               ),
                                             ],
                                           ),
                                         ),
                                         Text(
                                           '${(percentage * 100).toStringAsFixed(1)}%',
-                                          style: const TextStyle(
-                                            color: Colors.white,
+                                          style: TextStyle(
+                                            color: tierTextColor,
                                             fontSize: 15,
                                             fontWeight: FontWeight.bold,
                                           ),
@@ -306,7 +373,9 @@ class BillingScreen extends StatelessWidget {
                                     Text(
                                       'TOTAL KWH CONSUMPTION',
                                       style: TextStyle(
-                                        color: Colors.white.withValues(alpha: 0.75),
+                                        color: tierTextColor.withValues(
+                                          alpha: 0.75,
+                                        ),
                                         fontSize: 10,
                                         fontWeight: FontWeight.w700,
                                         letterSpacing: 0.5,
@@ -316,26 +385,32 @@ class BillingScreen extends StatelessWidget {
                                     ClipRRect(
                                       borderRadius: BorderRadius.circular(10),
                                       child: LinearProgressIndicator(
-                                        value: percentage, // Updated dynamically
-                                        backgroundColor: Colors.white.withValues(alpha: 0.25),
-                                        valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                                        value: percentage,
+                                        backgroundColor: Colors.white
+                                            .withValues(alpha: 0.4),
+                                        valueColor:
+                                            const AlwaysStoppedAnimation<Color>(
+                                              Colors.white,
+                                            ),
                                         minHeight: 7,
                                       ),
                                     ),
                                     const SizedBox(height: 16),
                                     Row(
                                       children: [
-                                        const Icon(
+                                        Icon(
                                           Icons.info_outline_rounded,
-                                          color: Colors.white,
+                                          color: tierTextColor,
                                           size: 15,
                                         ),
                                         const SizedBox(width: 6),
                                         Expanded(
                                           child: Text(
-                                            remainingText, // Updated dynamically
+                                            remainingText,
                                             style: TextStyle(
-                                              color: Colors.white.withValues(alpha: 0.95),
+                                              color: tierTextColor.withValues(
+                                                alpha: 0.95,
+                                              ),
                                               fontSize: 11,
                                               fontWeight: FontWeight.w500,
                                             ),
@@ -349,7 +424,6 @@ class BillingScreen extends StatelessWidget {
                             ),
                           ),
                         ),
-                        
                         Padding(
                           padding: const EdgeInsets.symmetric(vertical: 24.0),
                           child: Divider(
@@ -358,7 +432,6 @@ class BillingScreen extends StatelessWidget {
                             height: 1,
                           ),
                         ),
-
                         Text(
                           'RATE BRACKETS',
                           style: TextStyle(
@@ -373,7 +446,7 @@ class BillingScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 12),
                   SizedBox(
-                    height: 155,
+                    height: 170,
                     child: ListView(
                       scrollDirection: Axis.horizontal,
                       padding: const EdgeInsets.symmetric(horizontal: 18.0),
@@ -383,19 +456,20 @@ class BillingScreen extends StatelessWidget {
                           tierTitle: 'TIER 1',
                           range: 'Up to 200 kWh',
                           rate: '₱0.9803/kWh',
-                          isActive: cumulativeEnergy <= 200, 
+                          isActive: cumulativeEnergy <= 200,
                         ),
                         _buildRateCard(
                           tierTitle: 'TIER 2',
                           range: '201 - 300 kWh',
                           rate: '₱1.2908/kWh',
-                          isActive: cumulativeEnergy > 200 && cumulativeEnergy <= 300, 
+                          isActive:
+                              cumulativeEnergy > 200 && cumulativeEnergy <= 300,
                         ),
                         _buildRateCard(
                           tierTitle: 'TIER 3',
                           range: '301 - 400 kWh',
                           rate: '₱1.5837/kWh',
-                          isActive: cumulativeEnergy > 300, 
+                          isActive: cumulativeEnergy > 300,
                         ),
                       ],
                     ),
@@ -405,7 +479,7 @@ class BillingScreen extends StatelessWidget {
               ),
             ),
           );
-        }
+        },
       ),
     );
   }
@@ -416,18 +490,28 @@ class BillingScreen extends StatelessWidget {
     required String rate,
     required bool isActive,
   }) {
-    final Color activeCardColor = const Color(0xFFFDB482);
-    final Color inactiveCardColor = const Color(0xFFF6EDE2);
-    final Color activeTextColor = const Color(0xFF432511);
-    final Color inactiveTextColor = const Color(0xFF7A726A);
+    final Color activeCardColor = const Color(0xFFFA8B39); // Jaffa 400
+    final Color inactiveCardColor = const Color(0xFFFAEEDA); // soft cream
+    final Color activeTextColor = Colors.white;
+    final Color activeSubTextColor = Colors.white.withValues(alpha: 0.85);
+    final Color inactiveTextColor = const Color(0xFF7A3712); // Jaffa 700
+    final Color inactiveSubTextColor = const Color(
+      0xFF7A3712,
+    ).withValues(alpha: 0.55);
 
     return Container(
-      width: 215,
+      width: 200,
       margin: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 4.0),
-      padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 16.0),
+      padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 18.0),
       decoration: BoxDecoration(
         color: isActive ? activeCardColor : inactiveCardColor,
         borderRadius: BorderRadius.circular(20),
+        border: isActive
+            ? null
+            : Border.all(
+                color: const Color(0xFFFA8B39).withValues(alpha: 0.15),
+                width: 1,
+              ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -439,54 +523,60 @@ class BillingScreen extends StatelessWidget {
               Text(
                 tierTitle,
                 style: TextStyle(
-                  color: isActive ? activeTextColor.withValues(alpha: 0.8) : inactiveTextColor,
+                  color: isActive ? activeSubTextColor : inactiveSubTextColor,
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
                 ),
               ),
               if (isActive)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: Colors.transparent,
-                    border: Border.all(color: activeTextColor.withValues(alpha: 0.4), width: 1),
-                    borderRadius: BorderRadius.circular(6),
+                  width: 20,
+                  height: 20,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
                   ),
-                  child: Text(
-                    '[ ACTIVE ]',
-                    style: TextStyle(
-                      color: activeTextColor,
-                      fontSize: 9,
-                      fontWeight: FontWeight.w900,
-                    ),
+                  child: Icon(
+                    Icons.bolt_rounded,
+                    size: 13,
+                    color: activeCardColor,
                   ),
                 ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 10),
           Text(
             range,
             style: TextStyle(
-              color: isActive ? activeTextColor : textDark,
-              fontSize: 19,
+              color: isActive ? activeTextColor : inactiveTextColor,
+              fontSize: 18,
               fontWeight: FontWeight.w800,
-                ),
-              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            height: 1,
+            color: isActive
+                ? Colors.white.withValues(alpha: 0.25)
+                : const Color(0xFFFA8B39).withValues(alpha: 0.15),
+          ),
           const SizedBox(height: 12),
           Text(
             'RATE',
             style: TextStyle(
-              color: isActive ? activeTextColor.withValues(alpha: 0.6) : inactiveTextColor.withValues(alpha: 0.8),
+              color: isActive ? activeSubTextColor : inactiveSubTextColor,
               fontSize: 9,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.5,
             ),
           ),
+          const SizedBox(height: 2),
           Text(
             rate,
             style: TextStyle(
-              color: isActive ? activeTextColor : textDark,
-              fontSize: 19,
+              color: isActive ? activeTextColor : inactiveTextColor,
+              fontSize: 18,
               fontWeight: FontWeight.w900,
             ),
           ),
@@ -496,31 +586,23 @@ class BillingScreen extends StatelessWidget {
   }
 }
 
-class CardWavePainter extends CustomPainter {
+class CardCirclePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.06)
+      ..color = const Color(0xFFFA8B39).withValues(alpha: 0.5)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 28.0;
+      ..strokeWidth = 1.5;
 
-    final path1 = Path();
-    path1.moveTo(-size.width * 0.2, size.height * 0.4);
-    path1.cubicTo(
-      size.width * 0.2, size.height * 0.2,
-      size.width * 0.4, size.height * 0.8,
-      size.width * 1.2, size.height * 0.7,
-    );
-    canvas.drawPath(path1, paint);
+    final center1 = Offset(size.width * 1.05, size.height * 1.15);
+    for (double radius in [50, 85, 120, 155, 190]) {
+      canvas.drawCircle(center1, radius, paint);
+    }
 
-    final path2 = Path();
-    path2.moveTo(-size.width * 0.1, size.height * 0.6);
-    path2.cubicTo(
-      size.width * 0.3, size.height * 0.4,
-      size.width * 0.5, size.height * 1.1,
-      size.width * 1.3, size.height * 0.9,
-    );
-    canvas.drawPath(path2, paint);
+    final center2 = Offset(size.width * -0.1, size.height * -0.2);
+    for (double radius in [40, 70, 100, 130]) {
+      canvas.drawCircle(center2, radius, paint);
+    }
   }
 
   @override
