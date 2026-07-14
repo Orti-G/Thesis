@@ -34,6 +34,7 @@ class _DashboardState extends State<Dashboard> {
   bool _isLoadingHistory = false;
   String? _historyError;
   StreamSubscription<DatabaseEvent>? _historySubscription;
+  DateTime? _lastHistoryUpdateTime;
 
   bool get _isTodaySelected {
     final now = DateTime.now();
@@ -218,6 +219,7 @@ class _DashboardState extends State<Dashboard> {
           _hourlyKwh = parsed;
           _isLoadingHistory = false;
           _historyError = null;
+          _lastHistoryUpdateTime = DateTime.now();
         });
       } catch (e) {
         debugPrint("🔴 ERROR PARSING HOURLY HISTORY: $e");
@@ -601,25 +603,57 @@ class _DashboardState extends State<Dashboard> {
                                     borderData: FlBorderData(show: false),
 
                                     // --- Tooltip: shows hour (12-hr + AM/PM) and kWh on touch ---
-lineTouchData: LineTouchData(
-  enabled: true,
-  touchTooltipData: LineTouchTooltipData(
-    fitInsideHorizontally: true,
-    fitInsideVertically: true,
-    getTooltipItems: (touchedSpots) {
-      return touchedSpots.map((spot) {
-        return LineTooltipItem(
-          '${_formatHourLabel(spot.x)}\n${spot.y.toStringAsFixed(2)} kWh',
-          const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 12,
-          ),
-        );
-      }).toList();
-    },
-  ),
-),
+                                    lineTouchData: LineTouchData(
+                                      enabled: true,
+                                      touchTooltipData: LineTouchTooltipData(
+                                        fitInsideHorizontally: true,
+                                        fitInsideVertically: true,
+                                        getTooltipItems: (touchedSpots) {
+                                          final latestHour =
+                                              _hourlyKwh.keys.isEmpty
+                                              ? null
+                                              : _hourlyKwh.keys.reduce(
+                                                  (a, b) => a > b ? a : b,
+                                                );
+
+                                          return touchedSpots.map((spot) {
+                                            final hour = spot.x.round();
+                                            final isLatestHour =
+                                                _isTodaySelected &&
+                                                latestHour != null &&
+                                                hour == latestHour;
+
+                                            if (isLatestHour &&
+                                                _lastHistoryUpdateTime !=
+                                                    null) {
+                                              final timeStr =
+                                                  DateFormat('h:mma')
+                                                      .format(
+                                                        _lastHistoryUpdateTime!,
+                                                      )
+                                                      .toLowerCase();
+                                              return LineTooltipItem(
+                                                'As of $timeStr\n${spot.y.toStringAsFixed(3)}kWh',
+                                                const TextStyle(
+                                                  color: Colors.white,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 12,
+                                                ),
+                                              );
+                                            }
+
+                                            return LineTooltipItem(
+                                              '${_formatHourLabel(spot.x)}\n${spot.y.toStringAsFixed(2)} kWh',
+                                              const TextStyle(
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 12,
+                                              ),
+                                            );
+                                          }).toList();
+                                        },
+                                      ),
+                                    ),
 
                                     extraLinesData: ExtraLinesData(
                                       horizontalLines: [
