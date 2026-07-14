@@ -41,21 +41,32 @@ class BillingScreen extends StatelessWidget {
           double predictedDayTotal = 0.0;
           double cumulativeEnergy = 0.0;
 
+          // New forecast-node fields (not yet wired into the UI, available if needed):
+          // double accumulatedPast = 0.0;
+          // double avgDaily = 0.0;
+          // String billingCycleStart = '';
+          // double combinedKWh = 0.0;
+          // int daysRemaining = 0;
+          // int daysSoFar = 0;
+          // String forecastStatus = '';
+
           if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
             final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
 
             final forecastData = data['forecast'] as Map<dynamic, dynamic>?;
             if (forecastData != null) {
               estimatedMonthEnd =
-                  (forecastData['estimated_month_end_kWh'] ??
-                          forecastData['estimated_month_end_kwh'] ??
-                          0)
-                      .toDouble();
+                  (forecastData['projected_eom_kWh'] ?? 0).toDouble();
               predictedDayTotal =
-                  (forecastData['predicted_day_total_kWh'] ??
-                          forecastData['predicted_day_total_kwh'] ??
-                          0)
-                      .toDouble();
+                  (forecastData['predicted_day_total_kWh'] ?? 0).toDouble();
+
+              // accumulatedPast = (forecastData['accumulated_past_kWh'] ?? 0).toDouble();
+              // avgDaily = (forecastData['avg_daily_kWh'] ?? 0).toDouble();
+              // billingCycleStart = forecastData['billing_cycle_start'] ?? '';
+              // combinedKWh = (forecastData['combined_kWh'] ?? 0).toDouble();
+              // daysRemaining = (forecastData['days_remaining'] ?? 0).toInt();
+              // daysSoFar = (forecastData['days_so_far'] ?? 0).toInt();
+              // forecastStatus = forecastData['status'] ?? '';
             }
 
             final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
@@ -145,7 +156,7 @@ class BillingScreen extends StatelessWidget {
                               Row(
                                 children: [
                                   Text(
-                                    'ESTIMATED END OF MONTH',
+                                    'END OF DAY CONSUMPTION',
                                     style: TextStyle(
                                       color: brandOrangeText.withValues(
                                         alpha: 0.85,
@@ -222,7 +233,7 @@ class BillingScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
+                                '${predictedDayTotal.toStringAsFixed(2)} kWh',
                                 style: TextStyle(
                                   color: brandOrangeText,
                                   fontSize: 44,
@@ -250,10 +261,10 @@ class BillingScreen extends StatelessWidget {
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
-                                  'End of the day consumption',
+                                  'PROJECTED END OF MONTH',
                                   style: TextStyle(
                                     color: Colors.white.withValues(alpha: 0.95),
-                                    fontSize: 12,
+                                    fontSize: 10,
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
@@ -261,7 +272,7 @@ class BillingScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              '${predictedDayTotal.toStringAsFixed(2)} kWh',
+                              '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 19,

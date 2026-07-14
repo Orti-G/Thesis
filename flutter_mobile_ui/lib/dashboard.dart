@@ -11,10 +11,7 @@ class ChartDataPoint {
   final DateTime timestamp;
   final double value;
 
-  ChartDataPoint({
-    required this.timestamp,
-    required this.value,
-  });
+  ChartDataPoint({required this.timestamp, required this.value});
 }
 
 class Dashboard extends StatefulWidget {
@@ -73,35 +70,9 @@ class _DashboardState extends State<Dashboard> {
   void initState() {
     super.initState();
 
-    // Seed history structures with initial mock timestamps
-    DateTime now = DateTime.now();
-
-    _wattsHistory = List.generate(
-      maxDataPoints,
-      (i) => ChartDataPoint(
-        timestamp: now.subtract(Duration(seconds: (maxDataPoints - i) * 2)),
-        value: 0.0,
-      ),
-      growable: true,
-    );
-
-    _ampsHistory = List.generate(
-      maxDataPoints,
-      (i) => ChartDataPoint(
-        timestamp: now.subtract(Duration(seconds: (maxDataPoints - i) * 2)),
-        value: 0.0,
-      ),
-      growable: true,
-    );
-
-    _voltageHistory = List.generate(
-      maxDataPoints,
-      (i) => ChartDataPoint(
-        timestamp: now.subtract(Duration(seconds: (maxDataPoints - i) * 2)),
-        value: 0.0,
-      ),
-      growable: true,
-    );
+    _wattsHistory = <ChartDataPoint>[];
+    _ampsHistory = <ChartDataPoint>[];
+    _voltageHistory = <ChartDataPoint>[];
 
     _setupFirebaseListener();
 
@@ -115,38 +86,81 @@ class _DashboardState extends State<Dashboard> {
     _dbSubscription = ref.onValue.listen((event) {
       if (event.snapshot.value != null) {
         try {
-          final data = Map<String, dynamic>.from(
-            event.snapshot.value as Map,
-          );
+          final data = Map<String, dynamic>.from(event.snapshot.value as Map);
 
           setState(() {
             _currentWatts = double.tryParse(data['power'].toString()) ?? 0.0;
-            _cumulativeEnergy = double.tryParse(data['cumul_kwh'].toString()) ?? 0.0;
+            _cumulativeEnergy =
+                double.tryParse(data['cumul_kwh'].toString()) ?? 0.0;
             _currentAmps = double.tryParse(data['current'].toString()) ?? 0.0;
             _frequency = double.tryParse(data['frequency'].toString()) ?? 0.0;
-            _powerFactor = double.tryParse(data['power_factor'].toString()) ?? 0.0;
-            _currentVoltage = double.tryParse(data['voltage'].toString()) ?? 0.0;
+            _powerFactor =
+                double.tryParse(data['power_factor'].toString()) ?? 0.0;
+            _currentVoltage =
+                double.tryParse(data['voltage'].toString()) ?? 0.0;
 
             final timestamp = DateTime.now();
 
-            // Append new points to the small charts
-            // --- WATTS ---
-            if (_wattsHistory.length >= maxDataPoints) {
-              _wattsHistory.removeAt(0);
-            }
-            _wattsHistory.add(ChartDataPoint(timestamp: timestamp, value: _currentWatts));
+            // Round to match display precision so "no visible change"
+            // actually means "no chart update" — prevents the chart from
+            // moving on invisible sub-decimal fluctuations.
+            final roundedWatts = double.parse(_currentWatts.toStringAsFixed(0));
+            final roundedAmps = double.parse(_currentAmps.toStringAsFixed(2));
+            final roundedVoltage = double.parse(
+              _currentVoltage.toStringAsFixed(1),
+            );
 
-            // --- AMPS ---
-            if (_ampsHistory.length >= maxDataPoints) {
-              _ampsHistory.removeAt(0);
+            // --- WATTS: only append if rounded value actually changed ---
+            if (_wattsHistory.isEmpty) {
+              // Seed with 2 identical points so a flat line renders immediately
+              _wattsHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedWatts),
+              );
+              _wattsHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedWatts),
+              );
+            } else if (_wattsHistory.last.value != roundedWatts) {
+              if (_wattsHistory.length >= maxDataPoints) {
+                _wattsHistory.removeAt(0);
+              }
+              _wattsHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedWatts),
+              );
             }
-            _ampsHistory.add(ChartDataPoint(timestamp: timestamp, value: _currentAmps));
 
-            // --- VOLTAGE ---
-            if (_voltageHistory.length >= maxDataPoints) {
-              _voltageHistory.removeAt(0);
+            // --- AMPS: only append if rounded value actually changed ---
+            if (_ampsHistory.isEmpty) {
+              _ampsHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedAmps),
+              );
+              _ampsHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedAmps),
+              );
+            } else if (_ampsHistory.last.value != roundedAmps) {
+              if (_ampsHistory.length >= maxDataPoints) {
+                _ampsHistory.removeAt(0);
+              }
+              _ampsHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedAmps),
+              );
             }
-            _voltageHistory.add(ChartDataPoint(timestamp: timestamp, value: _currentVoltage));
+
+            // --- VOLTAGE: only append if rounded value actually changed ---
+            if (_voltageHistory.isEmpty) {
+              _voltageHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedVoltage),
+              );
+              _voltageHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedVoltage),
+              );
+            } else if (_voltageHistory.last.value != roundedVoltage) {
+              if (_voltageHistory.length >= maxDataPoints) {
+                _voltageHistory.removeAt(0);
+              }
+              _voltageHistory.add(
+                ChartDataPoint(timestamp: timestamp, value: roundedVoltage),
+              );
+            }
           });
         } catch (e) {
           debugPrint("🔴 ERROR PARSING DATA: $e");
@@ -182,12 +196,22 @@ class _DashboardState extends State<Dashboard> {
 
         if (hourlyRaw is Map) {
           hourlyRaw.forEach((key, value) {
+            if (value == null) return; // skip nulls just in case
             final hour = int.tryParse(key.toString());
             final kwh = double.tryParse(value.toString());
             if (hour != null && kwh != null) {
               parsed[hour] = kwh;
             }
           });
+        } else if (hourlyRaw is List) {
+          for (int i = 0; i < hourlyRaw.length; i++) {
+            final value = hourlyRaw[i];
+            if (value == null) continue; // RTDB pads missing hours with null
+            final kwh = double.tryParse(value.toString());
+            if (kwh != null) {
+              parsed[i] = kwh;
+            }
+          }
         }
 
         setState(() {
@@ -204,7 +228,8 @@ class _DashboardState extends State<Dashboard> {
 
   // --- HOURLY CHART: PAST DATES via FastAPI GET /history/{date} ---
   Future<void> _fetchHistoryForDate(DateTime date) async {
-    _historySubscription?.cancel(); // stop live updates while viewing a past date
+    _historySubscription
+        ?.cancel(); // stop live updates while viewing a past date
 
     setState(() {
       _isLoadingHistory = true;
@@ -265,9 +290,9 @@ class _DashboardState extends State<Dashboard> {
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
-            colorScheme: Theme.of(context).colorScheme.copyWith(
-                  primary: primaryOrange,
-                ),
+            colorScheme: Theme.of(
+              context,
+            ).colorScheme.copyWith(primary: primaryOrange),
           ),
           child: child!,
         );
@@ -279,7 +304,8 @@ class _DashboardState extends State<Dashboard> {
     setState(() => _selectedDate = picked);
 
     final now = DateTime.now();
-    final isPickedToday = picked.year == now.year &&
+    final isPickedToday =
+        picked.year == now.year &&
         picked.month == now.month &&
         picked.day == now.day;
 
@@ -298,7 +324,8 @@ class _DashboardState extends State<Dashboard> {
     setState(() => _selectedDate = newDate);
 
     final now = DateTime.now();
-    final isNewDateToday = newDate.year == now.year &&
+    final isNewDateToday =
+        newDate.year == now.year &&
         newDate.month == now.month &&
         newDate.day == now.day;
 
@@ -331,23 +358,59 @@ class _DashboardState extends State<Dashboard> {
   // Generates FlSpots mapping list indexes on X axis against read values on Y axis
   List<FlSpot> _generateChartSpots(List<ChartDataPoint> history) {
     return history.asMap().entries.map((e) {
-      return FlSpot(
-        e.key.toDouble(),
-        e.value.value,
-      );
+      return FlSpot(e.key.toDouble(), e.value.value);
     }).toList();
   }
 
-  double _getMinY(List<ChartDataPoint> history) {
+  // minRange = the smallest allowed span between minY and maxY.
+  // This is what keeps small, real fluctuations from being stretched
+  // into dramatic-looking spikes — the chart won't zoom in tighter
+  // than this floor, no matter how flat the actual data is.
+  double _getMinY(List<ChartDataPoint> history, {double minRange = 0}) {
     if (history.isEmpty) return 0;
-    double min = history.map((e) => e.value).reduce((a, b) => a < b ? a : b);
-    return (min * 0.8).clamp(0, double.infinity);
+    final values = history.map((e) => e.value);
+    double min = values.reduce((a, b) => a < b ? a : b);
+    double max = values.reduce((a, b) => a > b ? a : b);
+    double range = max - min;
+
+    if (range < minRange) {
+      double mid = (min + max) / 2;
+      min = mid - minRange / 2;
+      max = mid + minRange / 2;
+      range = minRange;
+    }
+
+    double padding = range * 0.1;
+    return (min - padding).clamp(0, double.infinity);
   }
 
-  double _getMaxY(List<ChartDataPoint> history) {
+  double _getMaxY(List<ChartDataPoint> history, {double minRange = 0}) {
     if (history.isEmpty) return 1;
-    double max = history.map((e) => e.value).reduce((a, b) => a > b ? a : b);
-    return max == 0 ? 1.0 : max * 1.2;
+    final values = history.map((e) => e.value);
+    double min = values.reduce((a, b) => a < b ? a : b);
+    double max = values.reduce((a, b) => a > b ? a : b);
+    double range = max - min;
+
+    if (range < minRange) {
+      double mid = (min + max) / 2;
+      min = mid - minRange / 2;
+      max = mid + minRange / 2;
+      range = minRange;
+    }
+
+    double padding = range * 0.1;
+    return max + padding;
+  }
+
+  // Used only by the main hourly chart's tooltip — converts an x-value
+  // (0-24, representing hour of day) into a readable "3 AM" style label.
+  String _formatHourLabel(double xValue) {
+    int hour = xValue.round();
+    if (hour == 24) hour = 0; // wrap midnight edge case
+    final period = hour < 12 ? 'AM' : 'PM';
+    int displayHour = hour % 12;
+    if (displayHour == 0) displayHour = 12;
+    return '$displayHour $period';
   }
 
   String _formatWithCommas(double value) {
@@ -406,7 +469,9 @@ class _DashboardState extends State<Dashboard> {
                                     child: Text(
                                       _isTodaySelected
                                           ? 'Today'
-                                          : DateFormat('EEE MMM d').format(_selectedDate),
+                                          : DateFormat(
+                                              'EEE MMM d',
+                                            ).format(_selectedDate),
                                       style: const TextStyle(
                                         fontSize: 16,
                                         color: Colors.white,
@@ -416,7 +481,9 @@ class _DashboardState extends State<Dashboard> {
                                   ),
                                   const SizedBox(width: 2),
                                   GestureDetector(
-                                    onTap: _isTodaySelected ? null : () => _changeDate(1),
+                                    onTap: _isTodaySelected
+                                        ? null
+                                        : () => _changeDate(1),
                                     child: Icon(
                                       Icons.chevron_right,
                                       color: Colors.white.withValues(
@@ -500,31 +567,59 @@ class _DashboardState extends State<Dashboard> {
                           child: Padding(
                             padding: const EdgeInsets.only(
                               top: 24.0,
-                              bottom: 0.0
+                              bottom: 0.0,
                             ),
                             child: Stack(
                               children: [
                                 LineChart(
                                   LineChartData(
-                                    minX: 0,
-                                    maxX: 24,
+                                    minX: -2,
+                                    maxX: 26,
                                     minY: 0,
                                     maxY: chartMaxY,
                                     gridData: FlGridData(
                                       show: true,
                                       drawVerticalLine: true,
-                                      horizontalInterval: chartMidY == 0 ? 1 : chartMidY,
+                                      horizontalInterval: chartMidY == 0
+                                          ? 1
+                                          : chartMidY,
                                       verticalInterval: 6,
-                                      getDrawingHorizontalLine: (value) => FlLine(
-                                        color: Colors.white.withValues(alpha: 0.2),
-                                        strokeWidth: 1,
-                                      ),
+                                      getDrawingHorizontalLine: (value) =>
+                                          FlLine(
+                                            color: Colors.white.withValues(
+                                              alpha: 0.2,
+                                            ),
+                                            strokeWidth: 1,
+                                          ),
                                       getDrawingVerticalLine: (value) => FlLine(
-                                        color: Colors.white.withValues(alpha: 0.2),
+                                        color: Colors.white.withValues(
+                                          alpha: 0.2,
+                                        ),
                                         strokeWidth: 1,
                                       ),
                                     ),
                                     borderData: FlBorderData(show: false),
+
+                                    // --- Tooltip: shows hour (12-hr + AM/PM) and kWh on touch ---
+lineTouchData: LineTouchData(
+  enabled: true,
+  touchTooltipData: LineTouchTooltipData(
+    fitInsideHorizontally: true,
+    fitInsideVertically: true,
+    getTooltipItems: (touchedSpots) {
+      return touchedSpots.map((spot) {
+        return LineTooltipItem(
+          '${_formatHourLabel(spot.x)}\n${spot.y.toStringAsFixed(2)} kWh',
+          const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+            fontSize: 12,
+          ),
+        );
+      }).toList();
+    },
+  ),
+),
 
                                     extraLinesData: ExtraLinesData(
                                       horizontalLines: [
@@ -534,13 +629,19 @@ class _DashboardState extends State<Dashboard> {
                                           label: HorizontalLineLabel(
                                             show: true,
                                             alignment: Alignment.bottomRight,
-                                            padding: const EdgeInsets.only(right: 4, bottom: 4),
+                                            padding: const EdgeInsets.only(
+                                              right: 4,
+                                              bottom: 4,
+                                            ),
                                             style: TextStyle(
-                                              color: Colors.white.withValues(alpha: 0.8),
+                                              color: Colors.white.withValues(
+                                                alpha: 0.8,
+                                              ),
                                               fontSize: 10,
                                               fontWeight: FontWeight.w600,
                                             ),
-                                            labelResolver: (line) => chartMidY.toStringAsFixed(2),
+                                            labelResolver: (line) =>
+                                                chartMidY.toStringAsFixed(2),
                                           ),
                                         ),
                                         HorizontalLine(
@@ -549,9 +650,14 @@ class _DashboardState extends State<Dashboard> {
                                           label: HorizontalLineLabel(
                                             show: true,
                                             alignment: Alignment.bottomRight,
-                                            padding: const EdgeInsets.only(right: 4, bottom: 4),
+                                            padding: const EdgeInsets.only(
+                                              right: 4,
+                                              bottom: 4,
+                                            ),
                                             style: TextStyle(
-                                              color: Colors.white.withValues(alpha: 0.8),
+                                              color: Colors.white.withValues(
+                                                alpha: 0.8,
+                                              ),
                                               fontSize: 10,
                                               fontWeight: FontWeight.w600,
                                             ),
@@ -563,9 +669,21 @@ class _DashboardState extends State<Dashboard> {
                                     ),
 
                                     titlesData: FlTitlesData(
-                                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                                      leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                      topTitles: const AxisTitles(
+                                        sideTitles: SideTitles(
+                                          showTitles: false,
+                                        ),
+                                      ),
+                                      leftTitles: const AxisTitles(
+                                        sideTitles: SideTitles(
+                                          showTitles: false,
+                                        ),
+                                      ),
+                                      rightTitles: const AxisTitles(
+                                        sideTitles: SideTitles(
+                                          showTitles: false,
+                                        ),
+                                      ),
                                       bottomTitles: AxisTitles(
                                         sideTitles: SideTitles(
                                           showTitles: true,
@@ -586,7 +704,9 @@ class _DashboardState extends State<Dashboard> {
                                             final textWidget = Text(
                                               label,
                                               style: TextStyle(
-                                                color: Colors.white.withValues(alpha: 0.8),
+                                                color: Colors.white.withValues(
+                                                  alpha: 0.8,
+                                                ),
                                                 fontSize: 10,
                                                 fontWeight: FontWeight.bold,
                                               ),
@@ -639,7 +759,9 @@ class _DashboardState extends State<Dashboard> {
                                         // Softened neon line aura
                                         shadow: Shadow(
                                           blurRadius: 4,
-                                          color: Colors.white.withValues(alpha: 0.25),
+                                          color: Colors.white.withValues(
+                                            alpha: 0.25,
+                                          ),
                                           offset: Offset.zero,
                                         ),
                                         // Much lighter, cleaner fade underneath the bar
@@ -647,9 +769,15 @@ class _DashboardState extends State<Dashboard> {
                                           show: true,
                                           gradient: LinearGradient(
                                             colors: [
-                                              Colors.white.withValues(alpha: 0.20),
-                                              Colors.white.withValues(alpha: 0.05),
-                                              Colors.white.withValues(alpha: 0.0),
+                                              Colors.white.withValues(
+                                                alpha: 0.20,
+                                              ),
+                                              Colors.white.withValues(
+                                                alpha: 0.05,
+                                              ),
+                                              Colors.white.withValues(
+                                                alpha: 0.0,
+                                              ),
                                             ],
                                             stops: const [0.0, 0.5, 1.0],
                                             begin: Alignment.topCenter,
@@ -681,7 +809,9 @@ class _DashboardState extends State<Dashboard> {
                                       child: Text(
                                         _historyError ?? 'No data yet',
                                         style: TextStyle(
-                                          color: Colors.white.withValues(alpha: 0.8),
+                                          color: Colors.white.withValues(
+                                            alpha: 0.8,
+                                          ),
                                           fontSize: 12,
                                           fontWeight: FontWeight.w500,
                                         ),
@@ -720,10 +850,7 @@ class _DashboardState extends State<Dashboard> {
                           letterSpacing: 0.5,
                         ),
                       ),
-                      Icon(
-                        Icons.menu,
-                        color: Colors.grey[800],
-                      ),
+                      Icon(Icons.menu, color: Colors.grey[800]),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -735,6 +862,7 @@ class _DashboardState extends State<Dashboard> {
                     subtitle: 'Live Power',
                     spots: _generateChartSpots(_wattsHistory),
                     history: _wattsHistory,
+                    minRange: 50, // won't zoom tighter than a 50W window
                   ),
                   const SizedBox(height: 12),
 
@@ -745,6 +873,7 @@ class _DashboardState extends State<Dashboard> {
                     subtitle: 'Live Amperage',
                     spots: _generateChartSpots(_ampsHistory),
                     history: _ampsHistory,
+                    minRange: 0.3, // won't zoom tighter than a 0.3A window
                   ),
                   const SizedBox(height: 12),
 
@@ -755,13 +884,15 @@ class _DashboardState extends State<Dashboard> {
                     subtitle: 'Mains Voltage',
                     spots: _generateChartSpots(_voltageHistory),
                     history: _voltageHistory,
+                    minRange: 4, // won't zoom tighter than a 4V window
                   ),
                   const SizedBox(height: 30),
 
                   // Advanced Metrics Toggle
                   GestureDetector(
                     onTap: () => setState(
-                      () => _isAdvancedMetricsExpanded = !_isAdvancedMetricsExpanded,
+                      () => _isAdvancedMetricsExpanded =
+                          !_isAdvancedMetricsExpanded,
                     ),
                     child: Container(
                       color: Colors.transparent,
@@ -846,6 +977,7 @@ class _DashboardState extends State<Dashboard> {
     required String subtitle,
     required List<FlSpot> spots,
     required List<ChartDataPoint> history,
+    double minRange = 0,
   }) {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -922,9 +1054,25 @@ class _DashboardState extends State<Dashboard> {
                 gridData: const FlGridData(show: false),
                 titlesData: const FlTitlesData(show: false),
                 borderData: FlBorderData(show: false),
-                minY: _getMinY(history),
-                maxY: _getMaxY(history),
-                lineTouchData: const LineTouchData(enabled: false),
+                minY: _getMinY(history, minRange: minRange),
+                maxY: _getMaxY(history, minRange: minRange),
+                lineTouchData: LineTouchData(
+                  enabled: true,
+                  touchTooltipData: LineTouchTooltipData(
+                    getTooltipItems: (touchedSpots) {
+                      return touchedSpots.map((spot) {
+                        return LineTooltipItem(
+                          '${spot.y.toStringAsFixed(1)} $unit',
+                          const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        );
+                      }).toList();
+                    },
+                  ),
+                ),
                 lineBarsData: [
                   LineChartBarData(
                     spots: spots,
@@ -949,6 +1097,7 @@ class _DashboardState extends State<Dashboard> {
                   ),
                 ],
               ),
+              duration: Duration.zero,
             ),
           ),
         ],
@@ -956,16 +1105,16 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  Widget _buildMetricCard(
-    String title,
-    String value,
-    String unit,
-  ) {
+  Widget _buildMetricCard(String title, String value, String unit) {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: cardColor,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.grey.withValues(alpha: 0.35),
+          width: 1,
+        ),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.02),
