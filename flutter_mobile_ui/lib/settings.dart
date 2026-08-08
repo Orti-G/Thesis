@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'main.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -8,152 +10,278 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  // Theme styling mirroring billing.dart & dashboard.dart
   final Color primaryOrange = const Color(0xFFF26E22);
-  final Color creamBg = const Color(0xFFFFFDF9);
+  final Color bgColor = const Color(0xFFFAFAFA);
   final Color textDark = const Color(0xFF1E1E1E);
 
-  // Hardcoded Initial states mimicking current application values
-  final TextEditingController _serverController =
-      TextEditingController(text: 'http://35.209.250.46:8000/forecast');
-  final TextEditingController _tierCapController =
-      TextEditingController(text: '200');
-  
-  double _graphRefreshRate = 2.0; // Current timer loop is 2s
-  double _maxDataPoints = 20.0;   // Current limit is 20
-  
-  bool _anomalyNotifications = true;
-  bool _tierCrossingAlerts = true;
+  static const int _tapsToUnlock = 5;
+
+  late final TextEditingController _nicknameController;
+  bool _testMode = false;
+  String _nickname = 'My Home';
+
+  int _aboutTapCount = 0;
+  bool _devModeUnlocked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nickname = nicknameNotifier.value;
+    _nicknameController = TextEditingController(text: _nickname);
+    _testMode = testModeNotifier.value;
+  }
 
   @override
   void dispose() {
-    _serverController.dispose();
-    _tierCapController.dispose();
+    _nicknameController.dispose();
     super.dispose();
+  }
+
+  Future<void> _saveNickname(String value) async {
+    final nickname = value.trim().isEmpty ? 'My Home' : value.trim();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('nickname', nickname);
+    nicknameNotifier.value = nickname;
+    setState(() => _nickname = nickname);
+  }
+
+  Future<void> _editNickname() async {
+    _nicknameController.text = _nickname;
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => Theme(
+        data: Theme.of(context).copyWith(
+          colorScheme: Theme.of(context).colorScheme.copyWith(
+                primary: primaryOrange,
+              ),
+        ),
+        child: AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Text('Household Nickname', style: TextStyle(color: textDark)),
+          content: TextField(
+            controller: _nicknameController,
+            autofocus: true,
+            cursorColor: primaryOrange,
+            style: TextStyle(color: textDark),
+            decoration: InputDecoration(
+              hintText: "e.g. Lyndon's Home",
+              enabledBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Colors.grey[400]!),
+              ),
+              focusedBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: primaryOrange, width: 2),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text('Cancel', style: TextStyle(color: Colors.grey[600])),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, _nicknameController.text),
+              child: Text('Save', style: TextStyle(color: primaryOrange, fontWeight: FontWeight.w700)),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != null) {
+      await _saveNickname(result);
+    }
+  }
+
+  Future<void> _onTestModeChanged(bool val) async {
+    setState(() => _testMode = val);
+    testModeNotifier.value = val;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('test_mode', val);
+  }
+
+  void _handleAboutTap() {
+    _showAboutSheet();
+  }
+
+  void _handleLockedTestModeTap() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Locked — tap "About" a few times to unlock')),
+    );
+  }
+
+  void _showAboutSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'About',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: textDark),
+            ),
+            const SizedBox(height: 16),
+            _buildAboutRow(
+              icon: Icons.bolt_outlined,
+              label: 'KURO',
+              value: 'Kuryente Usage and Residential Observation',
+            ),
+            const Divider(height: 24),
+            _buildAboutRow(
+              icon: Icons.dashboard_outlined,
+              label: 'What it does',
+              value: 'Smart Household Electrical Monitoring System',
+            ),
+            const Divider(height: 24),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _handleVersionTap,
+              child: _buildAboutRow(
+                icon: Icons.info_outline,
+                label: 'Version',
+                value: '1.0.0 (Thesis Prototype)',
+              ),
+            ),
+            const Divider(height: 24),
+            _buildAboutRow(
+              icon: Icons.people_outline,
+              label: 'Developers',
+              value: 'Eddh Delapeña, Lyndon Salcedo, Mark Ortigueras',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAboutRow({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 22, color: primaryOrange),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: textDark)),
+              const SizedBox(height: 2),
+              Text(value, style: TextStyle(fontSize: 14, color: Colors.grey[600])),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _handleVersionTap() {
+    if (_devModeUnlocked) return;
+
+    setState(() => _aboutTapCount++);
+
+    final remaining = _tapsToUnlock - _aboutTapCount;
+
+    if (remaining <= 0) {
+      setState(() => _devModeUnlocked = true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Diagnostic mode unlocked')),
+      );
+      return;
+    }
+
+    if (_aboutTapCount >= 3) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$remaining more tap${remaining == 1 ? '' : 's'} to unlock diagnostic mode')),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: creamBg,
+      backgroundColor: bgColor,
       body: SafeArea(
-        child: SingleChildScrollView(
-          // FIXED: Adjusted bottom padding to 70.0 to fix the massive white gap under the button
-          padding: const EdgeInsets.only(top: 24.0, left: 20.0, right: 20.0, bottom: 70.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 16.0),
+                children: [
+                  _buildTile(
+                    icon: Icons.home_outlined,
+                    label: _nickname,
+                    onTap: _editNickname,
+                    trailing: Icon(Icons.chevron_right, size: 24, color: Colors.grey[400]),
+                  ),
+                  _buildTile(
+                    icon: Icons.info_outline,
+                    label: 'About',
+                    onTap: _handleAboutTap,
+                    trailing: Icon(Icons.chevron_right, size: 24, color: Colors.grey[400]),
+                  ),
+                  _buildTestModeTile(),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTestModeTile() {
+    final locked = !_devModeUnlocked;
+
+    return Opacity(
+      opacity: locked ? 0.4 : 1.0,
+      child: InkWell(
+        onTap: locked ? _handleLockedTestModeTap : null,
+        borderRadius: BorderRadius.circular(12),
+        splashColor: Colors.transparent,
+        highlightColor: Colors.grey.withValues(alpha: 0.05),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 16.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildSectionHeader('Billing & Rates'),
-              _buildSettingsCard(
-                child: Column(
-                  children: [
-                    _buildTextFieldTile(
-                      label: 'Monthly Tier Cap (kWh)',
-                      subtitle: 'Used to calculate percentage thresholds',
-                      controller: _tierCapController,
-                      keyboardType: TextInputType.number,
-                      icon: Icons.flash_on,
-                    ),
-                    const Divider(height: 24),
-                    _buildReadOnlyTile(
-                      label: 'System Currency',
-                      value: 'Philippine Peso (₱)',
-                      icon: Icons.payments_outlined,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-
-              _buildSectionHeader('API & Server Connectivity'),
-              _buildSettingsCard(
-                child: _buildTextFieldTile(
-                  label: 'Forecast Backend Server',
-                  subtitle: 'Endpoint IP for predictive analytics tracking',
-                  controller: _serverController,
-                  keyboardType: TextInputType.url,
-                  icon: Icons.dns_outlined,
-                  obscureText: true,
-                ),
-              ),
-              const SizedBox(height: 24),
-
-              _buildSectionHeader('Dashboard Analytics Graph'),
-              _buildSettingsCard(
-                child: Column(
-                  children: [
-                    _buildSliderTile(
-                      label: 'Live Refresh Speed',
-                      subtitle: '${_graphRefreshRate.toStringAsFixed(1)} seconds',
-                      value: _graphRefreshRate,
-                      min: 1.0,
-                      max: 10.0,
-                      divisions: 9,
-                      icon: Icons.timer_outlined,
-                      onChanged: (val) => setState(() => _graphRefreshRate = val),
-                    ),
-                    const Divider(height: 24),
-                    _buildSliderTile(
-                      label: 'Max Display Data Points',
-                      subtitle: '${_maxDataPoints.round()} entries visible',
-                      value: _maxDataPoints,
-                      min: 10.0,
-                      max: 50.0,
-                      divisions: 8,
-                      icon: Icons.auto_graph,
-                      onChanged: (val) => setState(() => _maxDataPoints = val),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-
-              _buildSectionHeader('Alert Preferences'),
-              _buildSettingsCard(
-                child: Column(
-                  children: [
-                    _buildSwitchTile(
-                      label: 'Anomaly Safety Alerts',
-                      subtitle: 'Logs real-time system variance markers',
-                      value: _anomalyNotifications,
-                      icon: Icons.warning_amber_rounded,
-                      onChanged: (val) => setState(() => _anomalyNotifications = val),
-                    ),
-                    const Divider(height: 24),
-                    _buildSwitchTile(
-                      label: 'Tier Escalation Warning',
-                      subtitle: 'Warn when energy crosses threshold points',
-                      value: _tierCrossingAlerts,
-                      icon: Icons.notification_important_outlined,
-                      onChanged: (val) => setState(() => _tierCrossingAlerts = val),
-                    ),
-                  ],
-                ),
-              ),
-              // FIXED: Reduced spacing step right above the button from 40 to 20
-              const SizedBox(height: 20),
-              
-              // Static Safe Changes Indicator Button
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: ElevatedButton(
-                  onPressed: () {}, 
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: primaryOrange,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
+              Row(
+                children: [
+                  Icon(locked ? Icons.lock_outline : Icons.science_outlined,
+                      size: 24, color: primaryOrange),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      'Test Mode',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textDark),
                     ),
                   ),
-                  child: const Text(
-                    'Save Configurations',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
+                  IgnorePointer(
+                    ignoring: locked,
+                    child: Switch.adaptive(
+                      value: _testMode,
+                      activeColor: primaryOrange,
+                      onChanged: locked ? null : _onTestModeChanged,
                     ),
                   ),
+                ],
+              ),
+              Padding(
+                padding: const EdgeInsets.only(left: 40, top: 4),
+                child: Text(
+                  'This setting is for developers only',
+                  style: TextStyle(fontSize: 13, color: Colors.grey[600]),
                 ),
               ),
             ],
@@ -163,212 +291,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ── REUSABLE COMPONENT BUILDERS MATCHING APPLICATION THEME ──
-
-  Widget _buildSectionHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(left: 4, bottom: 10),
-      child: Text(
-        title.toUpperCase(),
-        style: TextStyle(
-          fontSize: 14,
-          color: textDark.withValues(alpha: 0.6),
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.5,
+  Widget _buildTile({
+    required IconData icon,
+    required String label,
+    Widget? trailing,
+    VoidCallback? onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      splashColor: Colors.transparent,
+      highlightColor: Colors.grey.withValues(alpha: 0.05),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 16.0),
+        child: Row(
+          children: [
+            Icon(icon, size: 24, color: primaryOrange),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textDark),
+              ),
+            ),
+            if (trailing != null) trailing,
+          ],
         ),
       ),
-    );
-  }
-
-  Widget _buildSettingsCard({required Widget child}) {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: child,
-    );
-  }
-
-  Widget _buildTextFieldTile({
-    required String label,
-    required String subtitle,
-    required TextEditingController controller,
-    required TextInputType keyboardType,
-    required IconData icon,
-    bool obscureText = false,
-  }) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        CircleAvatar(
-          backgroundColor: primaryOrange.withValues(alpha: 0.1),
-          child: Icon(icon, color: primaryOrange, size: 20),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyle(color: textDark, fontWeight: FontWeight.w700, fontSize: 14),
-              ),
-              Text(
-                subtitle,
-                style: TextStyle(color: Colors.grey[500], fontSize: 12),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 44,
-                child: TextField(
-                  controller: controller,
-                  keyboardType: keyboardType,
-                  obscureText: obscureText,
-                  style: TextStyle(fontSize: 14, color: textDark, fontWeight: FontWeight.w600),
-                  decoration: InputDecoration(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                    filled: true,
-                    fillColor: creamBg,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide.none,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSliderTile({
-    required String label,
-    required String subtitle,
-    required double value,
-    required double min,
-    required double max,
-    required int divisions,
-    required IconData icon,
-    required ValueChanged<double> onChanged,
-  }) {
-    return Row(
-      children: [
-        CircleAvatar(
-          backgroundColor: primaryOrange.withValues(alpha: 0.1),
-          child: Icon(icon, color: primaryOrange, size: 20),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyle(color: textDark, fontWeight: FontWeight.w700, fontSize: 14),
-              ),
-              Text(
-                subtitle,
-                style: TextStyle(color: primaryOrange, fontWeight: FontWeight.w600, fontSize: 12),
-              ),
-              SliderTheme(
-                data: SliderThemeData(
-                  activeTrackColor: primaryOrange,
-                  inactiveTrackColor: primaryOrange.withValues(alpha: 0.1),
-                  thumbColor: primaryOrange,
-                  overlayColor: primaryOrange.withValues(alpha: 0.12),
-                ),
-                child: Slider(
-                  value: value,
-                  min: min,
-                  max: max,
-                  divisions: divisions,
-                  onChanged: onChanged,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSwitchTile({
-    required String label,
-    required String subtitle,
-    required bool value,
-    required IconData icon,
-    required ValueChanged<bool> onChanged,
-  }) {
-    return Row(
-      children: [
-        CircleAvatar(
-          backgroundColor: primaryOrange.withValues(alpha: 0.1),
-          child: Icon(icon, color: primaryOrange, size: 20),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyle(color: textDark, fontWeight: FontWeight.w700, fontSize: 14),
-              ),
-              Text(
-                subtitle,
-                style: TextStyle(color: Colors.grey[500], fontSize: 12),
-              ),
-            ],
-          ),
-        ),
-        Switch.adaptive(
-          value: value,
-          activeColor: primaryOrange,
-          onChanged: onChanged,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildReadOnlyTile({
-    required String label,
-    required String value,
-    required IconData icon,
-  }) {
-    return Row(
-      children: [
-        CircleAvatar(
-          backgroundColor: primaryOrange.withValues(alpha: 0.1),
-          child: Icon(icon, color: primaryOrange, size: 20),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyle(color: textDark, fontWeight: FontWeight.w700, fontSize: 14),
-              ),
-              Text(
-                value,
-                style: TextStyle(color: textDark, fontWeight: FontWeight.w500, fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      ],
     );
   }
 }

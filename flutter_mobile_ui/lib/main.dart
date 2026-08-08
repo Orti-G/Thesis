@@ -8,11 +8,19 @@ import 'dashboard.dart';
 import 'billing.dart' as billing;
 import 'alert.dart';
 import 'settings.dart';
-import 'onboarding_screen.dart'; // <-- Your separate splash layout file
+import 'onboarding_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+final ValueNotifier<bool> testModeNotifier = ValueNotifier(false);
+final ValueNotifier<String> nicknameNotifier = ValueNotifier('My Home'); // <-- Your separate splash layout file
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+
+  final prefs = await SharedPreferences.getInstance();
+  testModeNotifier.value = prefs.getBool('test_mode') ?? false;
+  nicknameNotifier.value = prefs.getString('nickname') ?? 'My Home';
 
   runApp(const MyApp());
 }

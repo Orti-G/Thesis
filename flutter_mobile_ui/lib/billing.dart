@@ -88,25 +88,26 @@ class BillingScreen extends StatelessWidget {
             currentTierMax = 200.0;
             double remaining = (200.0 - cumulativeEnergy).clamp(0.0, 200.0);
             remainingText =
-                '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
+                '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
           } else if (cumulativeEnergy <= 300) {
             currentTierTitle = 'TIER 2 STATUS';
             currentTierRate = '₱1.2908/kWh';
             currentTierMax = 300.0;
             double remaining = (300.0 - cumulativeEnergy).clamp(0.0, 100.0);
             remainingText =
-                '${remaining.toStringAsFixed(2)} kWh remaining before tier escalation';
-          } else {
+                '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
+          } else if (cumulativeEnergy <= 400) {
             currentTierTitle = 'TIER 3 STATUS';
             currentTierRate = '₱1.5837/kWh';
             currentTierMax = 400.0;
             double remaining = (400.0 - cumulativeEnergy).clamp(0.0, 100.0);
-            if (cumulativeEnergy >= 400.0) {
-              remainingText = 'Maximum tier bracket fully reached';
-            } else {
-              remainingText =
-                  '${remaining.toStringAsFixed(2)} kWh remaining before capping threshold';
-            }
+            remainingText =
+                '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
+          } else {
+            currentTierTitle = 'TIER 4 STATUS';
+            currentTierRate = '₱2.0941/kWh';
+            currentTierMax = 400.0;
+            remainingText = 'Naabot na ang pinakamataas na tier';
           }
 
           final double percentage = (cumulativeEnergy / currentTierMax).clamp(
@@ -401,8 +402,8 @@ class BillingScreen extends StatelessWidget {
                                             .withValues(alpha: 0.4),
                                         valueColor:
                                             const AlwaysStoppedAnimation<Color>(
-                                              Colors.white,
-                                            ),
+                                          Colors.white,
+                                        ),
                                         minHeight: 7,
                                       ),
                                     ),
@@ -480,7 +481,14 @@ class BillingScreen extends StatelessWidget {
                           tierTitle: 'TIER 3',
                           range: '301 - 400 kWh',
                           rate: '₱1.5837/kWh',
-                          isActive: cumulativeEnergy > 300,
+                          isActive:
+                              cumulativeEnergy > 300 && cumulativeEnergy <= 400,
+                        ),
+                        _buildRateCard(
+                          tierTitle: 'TIER 4',
+                          range: 'Over 400 kWh',
+                          rate: '₱2.0941/kWh',
+                          isActive: cumulativeEnergy > 400,
                         ),
                       ],
                     ),

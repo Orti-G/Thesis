@@ -5,6 +5,8 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'dart:math';
+import 'main.dart';
 
 // Wrapper class to store both the telemetry reading and its exact reception time
 class ChartDataPoint {
@@ -35,6 +37,9 @@ class _DashboardState extends State<Dashboard> {
   String? _historyError;
   StreamSubscription<DatabaseEvent>? _historySubscription;
   DateTime? _lastHistoryUpdateTime;
+  Timer? _demoTimer;
+  bool _isTestMode = false;
+  String _nickname = 'My Home';
 
   bool get _isTodaySelected {
     final now = DateTime.now();
@@ -75,10 +80,101 @@ class _DashboardState extends State<Dashboard> {
     _ampsHistory = <ChartDataPoint>[];
     _voltageHistory = <ChartDataPoint>[];
 
-    _setupFirebaseListener();
+    _isTestMode = testModeNotifier.value;
+    _nickname = nicknameNotifier.value;
 
-    // Hourly chart defaults to today -> live Firebase listener
-    _attachTodayHistoryListener();
+    testModeNotifier.addListener(_onTestModeChanged);
+    nicknameNotifier.addListener(_onNicknameChanged);
+
+    if (_isTestMode) {
+      _startDemoMode();
+    } else {
+      _setupFirebaseListener();
+      _attachTodayHistoryListener();
+    }
+  }
+
+  void _onNicknameChanged() {
+    if (!mounted) return;
+    setState(() => _nickname = nicknameNotifier.value);
+  }
+
+  void _onTestModeChanged() {
+    if (!mounted) return;
+    final newValue = testModeNotifier.value;
+    if (newValue == _isTestMode) return;
+
+    setState(() => _isTestMode = newValue);
+
+    if (_isTestMode) {
+      _dbSubscription?.cancel();
+      _historySubscription?.cancel();
+      _startDemoMode();
+    } else {
+      _demoTimer?.cancel();
+      _setupFirebaseListener();
+      _attachTodayHistoryListener();
+    }
+  }
+
+  void _startDemoMode() {
+    final rand = Random();
+
+    final now = DateTime.now();
+    final Map<int, double> fakeHourly = {};
+    for (int h = 0; h <= now.hour; h++) {
+      fakeHourly[h] = double.parse(
+        (0.1 + rand.nextDouble() * 0.5).toStringAsFixed(3),
+      );
+    }
+
+    setState(() {
+      _hourlyKwh = fakeHourly;
+      _isLoadingHistory = false;
+      _historyError = null;
+      _lastHistoryUpdateTime = DateTime.now();
+      _cumulativeEnergy = 145.0;
+    });
+
+    _demoTimer?.cancel();
+    _demoTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!mounted) return;
+      setState(() {
+        _currentWatts = 800 + rand.nextInt(400).toDouble();
+        _currentAmps = double.parse((_currentWatts / 220).toStringAsFixed(2));
+        _currentVoltage = double.parse(
+          (218 + rand.nextDouble() * 4).toStringAsFixed(1),
+        );
+        _frequency = 59.8 + rand.nextDouble() * 0.4;
+        _powerFactor = 0.9 + rand.nextDouble() * 0.1;
+        _cumulativeEnergy += 0.005;
+
+        final timestamp = DateTime.now();
+
+        if (_wattsHistory.length >= maxDataPoints) _wattsHistory.removeAt(0);
+        _wattsHistory.add(
+          ChartDataPoint(
+            timestamp: timestamp,
+            value: double.parse(_currentWatts.toStringAsFixed(0)),
+          ),
+        );
+
+        if (_ampsHistory.length >= maxDataPoints) _ampsHistory.removeAt(0);
+        _ampsHistory.add(
+          ChartDataPoint(timestamp: timestamp, value: _currentAmps),
+        );
+
+        if (_voltageHistory.length >= maxDataPoints)
+          _voltageHistory.removeAt(0);
+        _voltageHistory.add(
+          ChartDataPoint(timestamp: timestamp, value: _currentVoltage),
+        );
+
+        final currentHour = DateTime.now().hour;
+        _hourlyKwh[currentHour] = (_hourlyKwh[currentHour] ?? 0.1) + 0.002;
+        _lastHistoryUpdateTime = DateTime.now();
+      });
+    });
   }
 
   void _setupFirebaseListener() {
@@ -354,6 +450,9 @@ class _DashboardState extends State<Dashboard> {
   void dispose() {
     _dbSubscription?.cancel();
     _historySubscription?.cancel();
+    _demoTimer?.cancel();
+    testModeNotifier.removeListener(_onTestModeChanged);
+    nicknameNotifier.removeListener(_onNicknameChanged);
     super.dispose();
   }
 
@@ -508,9 +607,9 @@ class _DashboardState extends State<Dashboard> {
                                       ),
                                     ),
                                     const SizedBox(width: 4),
-                                    const Text(
-                                      'LIVE',
-                                      style: TextStyle(
+                                    Text(
+                                      _isTestMode ? 'DEMO' : 'LIVE',
+                                      style: const TextStyle(
                                         fontSize: 11,
                                         color: Colors.white,
                                         fontWeight: FontWeight.w700,
@@ -522,6 +621,16 @@ class _DashboardState extends State<Dashboard> {
                             ],
                           ),
                           const SizedBox(height: 16),
+                          Text(
+                            _nickname,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.white.withValues(alpha: 0.75),
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
                           Text(
                             'Total Used',
                             style: TextStyle(

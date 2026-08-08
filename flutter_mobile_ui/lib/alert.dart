@@ -158,17 +158,17 @@ class AlertsScreen extends StatelessWidget {
                           ),
                           _buildNotificationItem(
                             icon: Icons.trending_up_rounded,
-                            title: 'Tier-Crossing Warning',
-                            timestamp: '1 hr ago',
+                            title: 'Babala sa Pagtaas ng Tier',
+                            timestamp: '5m',
                             description:
-                                'You are approaching Tier 2 escalation based on current trajectory.',
+                                'Papalapit ka na sa Tier 2 batay sa kasalukuyang paggamit.',
                           ),
                           _buildNotificationItem(
                             icon: Icons.eco_outlined,
-                            title: 'Daily Report',
-                            timestamp: 'Yesterday',
+                            title: 'Araw-araw na Ulat',
+                            timestamp: 'Kahapon',
                             description:
-                                'Your energy efficiency improved by 5% yesterday compared to the weekly average.',
+                                'Bumuti ng 5% ang iyong energy efficiency kahapon kumpara sa lingguhang average.',
                           ),
                           Divider(
                               color: Colors.grey[100],
