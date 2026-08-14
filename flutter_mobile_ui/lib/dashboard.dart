@@ -48,6 +48,14 @@ class _DashboardState extends State<Dashboard> {
         _selectedDate.day == now.day;
   }
 
+  // Total kWh for whatever day is currently selected: live cumulative
+  // reading for "today", otherwise the sum of that day's hourly buckets.
+  double get _displayedTotal {
+    if (_isTodaySelected) return _cumulativeEnergy;
+    if (_hourlyKwh.isEmpty) return 0.0;
+    return _hourlyKwh.values.fold(0.0, (sum, v) => sum + v);
+  }
+
   // State for collapsible Advanced Metrics
   bool _isAdvancedMetricsExpanded = false;
 
@@ -632,7 +640,7 @@ class _DashboardState extends State<Dashboard> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            'Total Used',
+                            _isTodaySelected ? 'Total Used' : 'Total for This Day',
                             style: TextStyle(
                               fontSize: 14,
                               color: Colors.white.withValues(alpha: 0.9),
@@ -645,7 +653,7 @@ class _DashboardState extends State<Dashboard> {
                             textBaseline: TextBaseline.alphabetic,
                             children: [
                               Text(
-                                _formatWithCommas(_cumulativeEnergy),
+                                _formatWithCommas(_displayedTotal),
                                 style: const TextStyle(
                                   fontSize: 36,
                                   fontWeight: FontWeight.w700,

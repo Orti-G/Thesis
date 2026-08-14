@@ -9,6 +9,7 @@ import 'billing.dart' as billing;
 import 'alert.dart';
 import 'settings.dart';
 import 'onboarding_screen.dart';
+import 'advisories.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 final ValueNotifier<bool> testModeNotifier = ValueNotifier(false);
@@ -61,9 +62,7 @@ class _MainScreenState extends State<MainScreen> {
     billing.BillingScreen(),
     AlertsScreen(),
     const SettingsScreen(),
-    const Center(
-      child: Text("Settings"),
-    ),
+    AdvisoriesScreen(),
   ];
 
   @override
@@ -81,7 +80,7 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildFloatingNavBar() {
     const double navHeight = 72.0;
     const double navBorderRadius = 40.0;
-    const EdgeInsets navPadding = EdgeInsets.only(left: 24, right: 24, bottom: 28);
+    const EdgeInsets navPadding = EdgeInsets.only(left: 12, right: 12, bottom: 28);
 
     return Padding(
       padding: navPadding,
@@ -146,6 +145,11 @@ class _MainScreenState extends State<MainScreen> {
                       icon: Icons.settings_outlined,
                       label: 'Settings',
                     ),
+                    _buildNavItem(
+                      index: 4,
+                      icon: Icons.bar_chart_rounded,
+                      label: 'Advisories',
+                    ),
                   ],
                 ),
               ),
@@ -168,7 +172,7 @@ class _MainScreenState extends State<MainScreen> {
       onTap: () => setState(() => _selectedNavIndex = index),
       behavior: HitTestBehavior.opaque,
       child: SizedBox(
-        width: 72,
+        width: 58,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -176,7 +180,7 @@ class _MainScreenState extends State<MainScreen> {
               duration: const Duration(milliseconds: 200),
               curve: Curves.easeInOut,
               padding: const EdgeInsets.symmetric(
-                horizontal: 16,
+                horizontal: 10,
                 vertical: 8,
               ),
               decoration: BoxDecoration(
@@ -188,7 +192,7 @@ class _MainScreenState extends State<MainScreen> {
                 children: [
                   Icon(
                     icon,
-                    size: 22,
+                    size: 20,
                     color: isSelected ? Colors.white : navIconColor,
                   ),
                   if (showBadge)
@@ -215,7 +219,7 @@ class _MainScreenState extends State<MainScreen> {
             AnimatedDefaultTextStyle(
               duration: const Duration(milliseconds: 200),
               style: TextStyle(
-                fontSize: 11,
+                fontSize: 10,
                 fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
                 color: isSelected ? Colors.black87 : navIconColor,
               ),
