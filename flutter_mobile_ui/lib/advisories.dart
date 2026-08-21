@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 
-class AdvisoriesScreen extends StatelessWidget {
-  AdvisoriesScreen({super.key});
+class AdvisoriesScreen extends StatefulWidget {
+  const AdvisoriesScreen({super.key});
 
+  @override
+  State<AdvisoriesScreen> createState() => _AdvisoriesScreenState();
+}
+
+class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
   final Color primaryOrange = const Color(0xFFF26E22);
   final Color lightOrangeBg = const Color(0xFFFA8B39);
   final Color creamBg = const Color(0xFFFFFDF9);
@@ -21,6 +26,46 @@ class AdvisoriesScreen extends StatelessWidget {
     'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'
   ];
 
+  // ── PLACEHOLDER: LOGS, shown as a real news feed (featured + list) ──────
+  // 'image' is a placeholder network image until a real source/CDN is wired
+  // up — swap for the actual advisory/report photo URL from the backend.
+  // First entry is the "Breaking"-style featured item; the rest are the list.
+  final List<Map<String, dynamic>> _logEntries = const [
+    {
+      'image': 'https://picsum.photos/seed/tier-warning/900/700',
+      'category': 'Babala',
+      'categoryColor': Color(0xFFE53935),
+      'title': 'Papalapit ka na sa Tier 2 batay sa kasalukuyang paggamit',
+      'source': 'EnergyWatch PH',
+      'timestamp': '5m ago',
+      'featured': true,
+    },
+    {
+      'image': 'https://picsum.photos/seed/efficiency-report/500/500',
+      'category': 'Ulat',
+      'categoryColor': Color(0xFF2E7D32),
+      'title': 'Bumuti ng 5% ang energy efficiency mo kahapon',
+      'source': 'EnergyWatch PH',
+      'timestamp': 'Kahapon',
+    },
+    {
+      'image': 'https://picsum.photos/seed/unplug-tip/500/500',
+      'category': 'Tip',
+      'categoryColor': Color(0xFFF26E22),
+      'title': 'I-unplug ang mga aparatong idle para makatipid',
+      'source': 'EnergyWatch PH',
+      'timestamp': 'Aug 12, 2026',
+    },
+    {
+      'image': 'https://picsum.photos/seed/night-usage/500/500',
+      'category': 'Babala',
+      'categoryColor': Color(0xFFE53935),
+      'title': 'Hindi pangkaraniwang paggamit noong gabi',
+      'source': 'EnergyWatch PH',
+      'timestamp': 'Aug 10, 2026',
+    },
+  ];
+
   double get _thisWeekTotal => _thisWeek.reduce((a, b) => a + b);
   double get _lastWeekTotal => _lastWeek.reduce((a, b) => a + b);
   double get _dailyAverage => _thisWeekTotal / _thisWeek.length;
@@ -30,6 +75,12 @@ class AdvisoriesScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUp = _pctChange >= 0;
+    final featured = _logEntries.firstWhere(
+      (e) => e['featured'] == true,
+      orElse: () => _logEntries.first,
+    );
+    final restLogs =
+        _logEntries.where((e) => e != featured).toList(growable: false);
 
     return Scaffold(
       backgroundColor: creamBg,
@@ -168,6 +219,50 @@ class AdvisoriesScreen extends StatelessWidget {
                     ),
                   ),
 
+                  // ── LOGS: header ──────────────────────────────────────────
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24.0, 16.0, 24.0, 12.0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Logs',
+                          style: TextStyle(
+                            color: textDark,
+                            fontSize: 20,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          'Tingnan Lahat',
+                          style: TextStyle(
+                            color: primaryOrange,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // ── LOGS: featured card ──────────────────────────────────
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    child: _buildFeaturedLogCard(featured),
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  // ── LOGS: article-style list ─────────────────────────────
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    child: Column(
+                      children: [
+                        for (final entry in restLogs) _buildLogListItem(entry),
+                      ],
+                    ),
+                  ),
+
                   const SizedBox(height: 120),
                 ],
               ),
@@ -294,6 +389,281 @@ class AdvisoriesScreen extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Shared network-image loader with a spinner + graceful fallback ──────
+  // url is nullable: real log entries may not have a photo yet, so a null
+  // or empty url renders the same fallback tile instead of throwing.
+  Widget _networkImage(String? url, {required double? width, required double? height, BoxFit fit = BoxFit.cover}) {
+    if (url == null || url.isEmpty) {
+      return Container(
+        width: width,
+        height: height,
+        color: const Color(0xFFF4F5F7),
+        child: const Center(
+          child: Icon(Icons.image_outlined, color: Color(0xFFBDBDBD), size: 22),
+        ),
+      );
+    }
+    return Image.network(
+      url,
+      width: width,
+      height: height,
+      fit: fit,
+      loadingBuilder: (context, child, progress) {
+        if (progress == null) return child;
+        return Container(
+          width: width,
+          height: height,
+          color: const Color(0xFFF4F5F7),
+          child: const Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        );
+      },
+      errorBuilder: (context, error, stack) {
+        return Container(
+          width: width,
+          height: height,
+          color: const Color(0xFFF4F5F7),
+          child: const Center(
+            child: Icon(Icons.image_not_supported_outlined,
+                color: Color(0xFFBDBDBD), size: 22),
+          ),
+        );
+      },
+    );
+  }
+
+  // ── LOGS: "Breaking"-style featured card with a real photo background ───
+  Widget _buildFeaturedLogCard(Map<String, dynamic> entry) {
+    final categoryColor = entry['categoryColor'] as Color? ?? primaryOrange;
+    final category = entry['category'] as String? ?? 'Log';
+    final title = entry['title'] as String? ?? 'Walang pamagat';
+    final source = entry['source'] as String? ?? 'EnergyWatch PH';
+    final timestamp = entry['timestamp'] as String? ?? '';
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(24),
+      child: Stack(
+        children: [
+          _networkImage(
+            entry['image'] as String?,
+            width: double.infinity,
+            height: 220,
+          ),
+          // Bottom gradient scrim so the white text stays legible.
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Colors.black.withValues(alpha: 0.0),
+                    Colors.black.withValues(alpha: 0.75),
+                  ],
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  stops: const [0.3, 1.0],
+                ),
+              ),
+            ),
+          ),
+          // Category chip, top-left.
+          Positioned(
+            top: 14,
+            left: 14,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration:
+                        BoxDecoration(color: categoryColor, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    category,
+                    style: TextStyle(
+                      color: textDark,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Title + byline, bottom-left.
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 16,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    height: 1.25,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _buildByline(
+                  source: source,
+                  timestamp: timestamp,
+                  light: true,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Small circular source badge + name + verified check + timestamp ─────
+  Widget _buildByline({
+    required String source,
+    required String timestamp,
+    bool light = false,
+  }) {
+    final textColor = light ? Colors.white : textDark;
+    final mutedColor =
+        light ? Colors.white.withValues(alpha: 0.75) : Colors.grey[500]!;
+
+    return Row(
+      children: [
+        Container(
+          width: 18,
+          height: 18,
+          decoration: BoxDecoration(
+            color: primaryOrange,
+            shape: BoxShape.circle,
+          ),
+          child: const Icon(Icons.bolt_rounded, color: Colors.white, size: 12),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          source,
+          style: TextStyle(
+            color: textColor,
+            fontSize: 11.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(width: 3),
+        Icon(Icons.verified_rounded,
+            color: light ? Colors.white : primaryOrange, size: 13),
+        const SizedBox(width: 6),
+        Text('·', style: TextStyle(color: mutedColor, fontSize: 11)),
+        const SizedBox(width: 6),
+        Text(
+          timestamp,
+          style: TextStyle(
+            color: mutedColor,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── LOGS: article row — square photo, category tag, title, byline ───────
+  Widget _buildLogListItem(Map<String, dynamic> entry) {
+    final categoryColor = entry['categoryColor'] as Color? ?? primaryOrange;
+    final category = entry['category'] as String? ?? 'Log';
+    final title = entry['title'] as String? ?? 'Walang pamagat';
+    final source = entry['source'] as String? ?? 'EnergyWatch PH';
+    final timestamp = entry['timestamp'] as String? ?? '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14.0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: _networkImage(
+              entry['image'] as String?,
+              width: 72,
+              height: 72,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: categoryColor.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    category.toUpperCase(),
+                    style: TextStyle(
+                      color: categoryColor,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: textDark,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _buildByline(
+                  source: source,
+                  timestamp: timestamp,
+                ),
+              ],
+            ),
           ),
         ],
       ),

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:ui'; // Added for BackdropFilter
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -12,40 +13,22 @@ class AlertsScreen extends StatefulWidget {
 }
 
 class _AlertsScreenState extends State<AlertsScreen> {
+  // Brand Colors — kept in sync with Dashboard's palette so both screens
+  // read as one app.
   final Color primaryOrange = const Color(0xFFF26E22);
-  final Color lightOrangeBg = const Color(0xFFFA8B39);
-  final Color creamBg = const Color(0xFFFFFDF9);
-  final Color textDark = const Color(0xFF1E1E1E);
-  final Color criticalText = const Color(0xFFE53935);
-  final Color criticalBg = const Color(0xFFFFEBEE);
-  final Color safeText = const Color(0xFF2E7D32);
-  final Color safeBg = const Color(0xFFE8F5E9);
+  final Color topCardColor = const Color(0xFFFA8B39);
+  final Color bgColor = const Color(0xFFFAFAFA);
+  final Color cardColor = Colors.white;
+  final Color textDark = const Color(0xFF111418);
+  final Color criticalText = const Color(0xFFD32F2F);
 
-  // ── ANOMALIES: now sourced from GET /anomaly-logs/pending ───────────────
+  // (HITL steps now share one uniform orange tint — see _buildHitlNode —
+  // instead of a different hue per step.)
+
   List<Map<String, dynamic>> _anomalyEntries = [];
   bool _loadingAnomalies = true;
   String? _anomalyError;
-
-  // Which log id is currently mid-acknowledge (disables its buttons/shows spinner).
   int? _acknowledgingId;
-
-  // ── PLACEHOLDER: GENERAL NOTIFICATIONS LOG (no endpoint given yet) ──────
-  final List<Map<String, dynamic>> _logEntries = const [
-    {
-      'icon': Icons.trending_up_rounded,
-      'title': 'Babala sa Pagtaas ng Tier',
-      'timestamp': '5m',
-      'description':
-          'Papalapit ka na sa Tier 2 batay sa kasalukuyang paggamit.',
-    },
-    {
-      'icon': Icons.eco_outlined,
-      'title': 'Araw-araw na Ulat',
-      'timestamp': 'Kahapon',
-      'description':
-          'Bumuti ng 5% ang iyong energy efficiency kahapon kumpara sa lingguhang average.',
-    },
-  ];
 
   @override
   void initState() {
@@ -83,8 +66,6 @@ class _AlertsScreenState extends State<AlertsScreen> {
     }
   }
 
-  /// acknowledged = true  -> real anomaly ("No, investigate")
-  /// acknowledged = false -> false alarm  ("Yes, it was me")
   Future<void> _acknowledgeAnomaly(int logId, bool acknowledged) async {
     setState(() => _acknowledgingId = logId);
 
@@ -101,16 +82,20 @@ class _AlertsScreenState extends State<AlertsScreen> {
         throw Exception('Server returned ${res.statusCode}');
       }
 
-      // Acknowledged rows drop out of the /pending list, so remove locally.
       setState(() {
         _anomalyEntries.removeWhere((e) => e['id'] == logId);
         _acknowledgingId = null;
       });
 
       if (mounted) {
-        Navigator.of(context).pop(); // close the modal sheet
+        Navigator.of(context).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
+            backgroundColor: textDark,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
             content: Text(
               acknowledged
                   ? 'Marked as a real anomaly.'
@@ -158,395 +143,592 @@ class _AlertsScreenState extends State<AlertsScreen> {
       final hh = parsed.hour.toString().padLeft(2, '0');
       final mm = parsed.minute.toString().padLeft(2, '0');
       if (sameDay) return '$hh:$mm';
-      final sameYear = parsed.year == now.year;
-      final month = _monthNames[parsed.month - 1];
-      return sameYear
-          ? '$month ${parsed.day}'
-          : '$month ${parsed.day}, ${parsed.year}';
+      return '${_monthNames[parsed.month - 1]} ${parsed.day}';
     } catch (_) {
       return raw.toString();
     }
   }
 
+  // Shared card look, matching Dashboard's _buildLiveFeedCard /
+  // _buildMetricCard decoration exactly.
+  BoxDecoration get _cardDecoration => BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.grey.withValues(alpha: 0.35),
+          width: 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      );
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: creamBg,
+      backgroundColor: bgColor,
       body: Stack(
         children: [
-          // ── FIXED BACKGROUND GRADIENT LAYER ─────────────────────────────
+          // Layered radial glow — two soft, off-center blobs in the same
+          // orange family, blending into the neutral background. Reads as
+          // a premium ambient wash rather than a flat tint.
           Positioned.fill(
+            child: Container(color: bgColor),
+          ),
+          Positioned(
+            top: -140,
+            right: -100,
             child: Container(
+              width: 420,
+              height: 420,
               decoration: BoxDecoration(
-                gradient: LinearGradient(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
                   colors: [
-                    lightOrangeBg,
-                    lightOrangeBg.withValues(alpha: 0.6),
-                    creamBg,
+                    topCardColor.withValues(alpha: 0.22),
+                    topCardColor.withValues(alpha: 0.0),
                   ],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  stops: const [0.0, 0.4, 1.0],
+                  stops: const [0.0, 1.0],
                 ),
               ),
             ),
           ),
-
-          // ── SCROLLABLE CONTENTS LAYER ───────────────────────────────────
+          Positioned(
+            top: 40,
+            left: -160,
+            child: Container(
+              width: 360,
+              height: 360,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: [
+                    primaryOrange.withValues(alpha: 0.14),
+                    primaryOrange.withValues(alpha: 0.0),
+                  ],
+                  stops: const [0.0, 1.0],
+                ),
+              ),
+            ),
+          ),
           Positioned.fill(
-            child: RefreshIndicator(
-              onRefresh: _fetchPendingAnomalies,
-              child: SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(
-                    parent: BouncingScrollPhysics()),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // ── TOP HERO SECTION ──────
-                    SizedBox(
-                      width: double.infinity,
-                      child: SafeArea(
-                        bottom: false,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 24.0, vertical: 20.0),
+            child: SafeArea(
+              bottom: false,
+              child: RefreshIndicator(
+                onRefresh: _fetchPendingAnomalies,
+                color: primaryOrange,
+                backgroundColor: Colors.white,
+                child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(
+              parent: BouncingScrollPhysics(),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // ── HEADER ──
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
+                  child: SizedBox.shrink(),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+                  child: Text(
+                    'Alerts & Anomalies',
+                    style: TextStyle(
+                      color: textDark,
+                      fontSize: 30,
+                      height: 1.1,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -1.0,
+                    ),
+                  ),
+                ),
+
+                // ── SUMMARY CARD (mirrors Dashboard's orange header block) ──
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: topCardColor,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: topCardColor.withValues(alpha: 0.25),
+                          blurRadius: 16,
+                          offset: const Offset(0, 6),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: const Icon(
+                            Icons.notifications_active_rounded,
+                            color: Colors.white,
+                            size: 24,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const SizedBox(height: 10),
-                              const Text(
-                                'Alerts & Anomalies',
-                                style: TextStyle(
+                              Text(
+                                '${_anomalyEntries.length} Pending',
+                                style: const TextStyle(
                                   color: Colors.white,
-                                  fontSize: 28,
-                                  fontWeight: FontWeight.w900,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w700,
                                   letterSpacing: -0.5,
                                 ),
                               ),
-                              const SizedBox(height: 4),
+                              const SizedBox(height: 2),
                               Text(
-                                'Real-time system deviations',
+                                'anomalies awaiting your review',
                                 style: TextStyle(
                                   color: Colors.white.withValues(alpha: 0.85),
-                                  fontSize: 14,
+                                  fontSize: 13,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
-                              const SizedBox(height: 8),
                             ],
                           ),
                         ),
-                      ),
+                        if (_loadingAnomalies)
+                          const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          ),
+                      ],
                     ),
-
-                    // ── ANOMALIES LOG SECTION ────────────────────────────────
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 24.0, vertical: 8.0),
-                      child: Container(
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(24),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.03),
-                              blurRadius: 16,
-                              offset: const Offset(0, 6),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                  left: 20.0,
-                                  right: 20.0,
-                                  top: 22.0,
-                                  bottom: 6.0),
-                              child: Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(
-                                    'Anomalies',
-                                    style: TextStyle(
-                                      color: textDark,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                  if (_loadingAnomalies)
-                                    SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: primaryOrange,
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            if (_anomalyError != null)
-                              Padding(
-                                padding:
-                                    const EdgeInsets.fromLTRB(20, 8, 20, 22),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        _anomalyError!,
-                                        style: TextStyle(
-                                          color: criticalText,
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ),
-                                    TextButton(
-                                      onPressed: _fetchPendingAnomalies,
-                                      child: const Text('Retry'),
-                                    ),
-                                  ],
-                                ),
-                              )
-                            else if (!_loadingAnomalies &&
-                                _anomalyEntries.isEmpty)
-                              Padding(
-                                padding:
-                                    const EdgeInsets.fromLTRB(20, 8, 20, 22),
-                                child: Text(
-                                  'No anomalies detected yet.',
-                                  style: TextStyle(
-                                    color: Colors.grey[500],
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              )
-                            else
-                              for (final entry in _anomalyEntries)
-                                _buildAnomalyItem(context, entry: entry),
-                            const SizedBox(height: 6),
-                          ],
-                        ),
-                      ),
-                    ),
-
-                    // ── GENERAL LOGS SECTION ─────────────────────────────────
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 24.0, vertical: 8.0),
-                      child: Container(
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(24),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.03),
-                              blurRadius: 16,
-                              offset: const Offset(0, 6),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                  left: 20.0,
-                                  right: 20.0,
-                                  top: 22.0,
-                                  bottom: 6.0),
-                              child: Text(
-                                'Logs',
-                                style: TextStyle(
-                                  color: textDark,
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                            ),
-                            for (final entry in _logEntries)
-                              _buildLogItem(entry: entry),
-                            Divider(
-                                color: Colors.grey[100],
-                                height: 1,
-                                thickness: 1),
-                            InkWell(
-                              onTap: () {},
-                              borderRadius: const BorderRadius.only(
-                                bottomLeft: Radius.circular(24),
-                                bottomRight: Radius.circular(24),
-                              ),
-                              child: Container(
-                                width: double.infinity,
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 18),
-                                alignment: Alignment.center,
-                                child: Text(
-                                  'View All Logs',
-                                  style: TextStyle(
-                                    color: textDark,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-
-                    const SizedBox(height: 120),
-                  ],
+                  ),
                 ),
-              ),
+
+                const SizedBox(height: 28),
+
+                // ── ANOMALIES FEED ──
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'PENDING LOGS',
+                        style: TextStyle(
+                          color: Colors.grey[600],
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      if (!_loadingAnomalies && _anomalyEntries.isNotEmpty)
+                        Text(
+                          '${_anomalyEntries.length}',
+                          style: TextStyle(
+                            color: Colors.grey[500],
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 300),
+                    child: _buildAnomaliesListContent(),
+                  ),
+                ),
+
+                const SizedBox(height: 32),
+
+                const SizedBox(height: 20),
+
+                // ── ANATOMY INFOGRAPHIC ──
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(24),
+                    decoration: _cardDecoration,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Anatomy of an Anomaly',
+                          style: TextStyle(
+                            color: textDark,
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.6,
+                          ),
+                        ),
+                        const SizedBox(height: 28),
+                        SizedBox(
+                          height: 110,
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              _buildBar(38, false),
+                              _buildBar(52, false),
+                              _buildBar(33, false),
+                              _buildBar(42, false),
+                              _buildBar(100, true), // the anomaly spike
+                              _buildBar(38, false),
+                              _buildBar(47, false),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          height: 2,
+                          margin: const EdgeInsets.only(top: 8),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [Colors.grey[300]!, Colors.transparent],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            _buildLegendDot(
+                              const Color(0xFFE2E8F0),
+                              'Normal Pattern',
+                            ),
+                            const Spacer(),
+                            _buildLegendDot(primaryOrange, 'Detected Spike'),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Divider(
+                          color: Colors.grey.withValues(alpha: 0.15),
+                          height: 40,
+                        ),
+                        _buildCauseRow(
+                          icon: Icons.bolt_rounded,
+                          title: 'Sudden Spike',
+                          description:
+                              'A large change in power draw over a short period.',
+                        ),
+                        _buildCauseRow(
+                          icon: Icons.schedule_rounded,
+                          title: 'Unusual Time',
+                          description:
+                              'Appliance use at a time that\'s not typical.',
+                        ),
+                        _buildCauseRow(
+                          icon: Icons.build_circle_rounded,
+                          title: 'Faulty Appliance',
+                          description:
+                              'Sustained high consumption signaling a malfunction.',
+                          isLast: true,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 100),
+              ],
             ),
           ),
-        ],
+        ),
       ),
-    );
+    ),
+          ],
+        ),
+      );
   }
 
-  // ── ANOMALIES LOG ITEM (tappable → opens modal) ──────────────────────────
+  // ── HELPER WIDGETS ──
+
+  Widget _buildAnomaliesListContent() {
+    if (_anomalyError != null) {
+      return Container(
+        key: const ValueKey('error'),
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: _cardDecoration,
+        child: Row(
+          children: [
+            Icon(Icons.error_outline_rounded, color: criticalText, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                _anomalyError!,
+                style: TextStyle(color: criticalText, fontSize: 14),
+              ),
+            ),
+          ],
+        ),
+      );
+    } else if (!_loadingAnomalies && _anomalyEntries.isEmpty) {
+      return Container(
+        key: const ValueKey('empty'),
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 36),
+        decoration: _cardDecoration,
+        child: Column(
+          children: [
+            Icon(
+              Icons.check_circle_outline_rounded,
+              color: Colors.grey[350],
+              size: 32,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'No deviations currently detected.',
+              style: TextStyle(
+                color: Colors.grey[500],
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      );
+    } else {
+      return Column(
+        key: const ValueKey('list'),
+        children: _anomalyEntries
+            .map((entry) => _buildAnomalyItem(context, entry: entry))
+            .toList(),
+      );
+    }
+  }
+
   Widget _buildAnomalyItem(
     BuildContext context, {
     required Map<String, dynamic> entry,
   }) {
-    final title = (entry['title'] as String?) ?? 'Critical Anomaly Detected';
+    final title = (entry['title'] as String?) ?? 'Critical Deviation';
     final powerAvg = entry['power_avg'] ?? 0;
-    final score = (entry['score'] as num?) ?? 0.0;
 
-    return InkWell(
-      onTap: () => _showAnomalyDetail(context, entry),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 16.0),
-        decoration: const BoxDecoration(
-          border: Border(
-            top: BorderSide(color: Color(0xFFF8F9FA), width: 1.5),
-          ),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF3E0),
-                shape: BoxShape.circle,
-                border: Border.all(color: const Color(0xFFFFE0B2), width: 1),
-              ),
-              child: Icon(Icons.warning_amber_rounded,
-                  color: primaryOrange, size: 18),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        title,
-                        style: TextStyle(
-                          color: textDark,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      Text(
-                        _formatTimestamp(entry['timestamp']),
-                        style: TextStyle(
-                          color: Colors.grey[400],
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Power Avg: $powerAvg W  ·  Score: ${score.toStringAsFixed(2)}',
-                    style: TextStyle(
-                      color: Colors.grey[600],
-                      fontSize: 12.5,
-                      height: 1.4,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(Icons.chevron_right_rounded, color: Colors.grey[300], size: 20),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ── GENERAL LOG ITEM (non-anomaly notifications) ─────────────────────────
-  Widget _buildLogItem({
-    required Map<String, dynamic> entry,
-  }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 16.0),
-      decoration: const BoxDecoration(
-        border: Border(
-          top: BorderSide(color: Color(0xFFF8F9FA), width: 1.5),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: const BoxDecoration(
-              color: Color(0xFFF4F5F7),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(entry['icon'] as IconData,
-                color: const Color(0xFF5F6368), size: 18),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: _cardDecoration,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => _showAnomalyDetail(context, entry),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 16.0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: primaryOrange.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  Icons.bolt_rounded,
+                  color: primaryOrange,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      entry['title'] as String,
+                      title,
                       style: TextStyle(
                         color: textDark,
-                        fontSize: 14,
+                        fontSize: 16,
                         fontWeight: FontWeight.w700,
+                        letterSpacing: -0.3,
                       ),
                     ),
+                    const SizedBox(height: 4),
                     Text(
-                      entry['timestamp'] as String,
+                      'Avg: $powerAvg W  ·  ${_formatTimestamp(entry['timestamp'])}',
                       style: TextStyle(
-                        color: Colors.grey[400],
-                        fontSize: 11,
+                        color: Colors.grey[600],
+                        fontSize: 13,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
                   ],
                 ),
+              ),
+              Icon(
+                Icons.arrow_forward_ios_rounded,
+                color: Colors.grey[300],
+                size: 15,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBar(double height, bool isAnomaly) {
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6.0),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 500),
+          height: height,
+          decoration: BoxDecoration(
+            color: isAnomaly ? primaryOrange : const Color(0xFFE2E8F0),
+            borderRadius: BorderRadius.circular(100),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLegendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.grey[600],
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHitlNode({
+    required IconData icon,
+    required String label,
+    required int step,
+  }) {
+    return Column(
+      children: [
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                color: primaryOrange.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Colors.white,
+                  width: 3,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: primaryOrange.withValues(alpha: 0.08),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: Icon(icon, color: primaryOrange, size: 24),
+            ),
+            Positioned(
+              right: -2,
+              top: -2,
+              child: Container(
+                width: 18,
+                height: 18,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: textDark,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                ),
+                child: Text(
+                  '$step',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Text(
+          label,
+          style: TextStyle(
+            color: textDark,
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCauseRow({
+    required IconData icon,
+    required String title,
+    required String description,
+    bool isLast = false,
+  }) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: isLast ? 0 : 20.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF1F5F9),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: const Color(0xFF94A3B8), size: 20),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: textDark,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
                 const SizedBox(height: 4),
                 Text(
-                  entry['description'] as String,
+                  description,
                   style: TextStyle(
                     color: Colors.grey[600],
-                    fontSize: 12.5,
-                    height: 1.4,
-                    fontWeight: FontWeight.w500,
+                    fontSize: 13.5,
+                    height: 1.5,
                   ),
                 ),
               ],
@@ -557,223 +739,221 @@ class _AlertsScreenState extends State<AlertsScreen> {
     );
   }
 
-  // ── MODAL BOTTOM SHEET: shows the tapped anomaly's detail card ──────────
+  // ── GLASSMORPHIC MODAL ──
   void _showAnomalyDetail(BuildContext context, Map<String, dynamic> entry) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.25),
       builder: (sheetContext) {
-        return StatefulBuilder(
-          builder: (sheetContext, setSheetState) {
-            return Padding(
-              padding: EdgeInsets.only(
-                bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+        return BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+          child: Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+            ),
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.92),
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(28),
+                ),
+                border: Border(
+                  top: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.5),
+                    width: 1.5,
+                  ),
+                ),
               ),
               child: DraggableScrollableSheet(
-                initialChildSize: 0.55,
-                minChildSize: 0.35,
+                initialChildSize: 0.6,
+                minChildSize: 0.4,
                 maxChildSize: 0.9,
                 expand: false,
                 builder: (context, scrollController) {
                   return SingleChildScrollView(
                     controller: scrollController,
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                    padding: const EdgeInsets.fromLTRB(28, 16, 28, 36),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Drag handle
-                        Container(
-                          width: 40,
-                          height: 4,
-                          margin: const EdgeInsets.only(bottom: 16),
-                          decoration: BoxDecoration(
-                            color: Colors.grey[300],
-                            borderRadius: BorderRadius.circular(4),
+                        Center(
+                          child: Container(
+                            width: 40,
+                            height: 4,
+                            margin: const EdgeInsets.only(bottom: 28),
+                            decoration: BoxDecoration(
+                              color: Colors.grey[300],
+                              borderRadius: BorderRadius.circular(10),
+                            ),
                           ),
                         ),
-                        _buildCriticalCard(entry),
+                        _buildActionPanel(entry),
                       ],
                     ),
                   );
                 },
               ),
-            );
-          },
+            ),
+          ),
         );
       },
     );
   }
 
-  // ── CRITICAL ANOMALY WIDGET (used inside the modal) ─────────────────────
-  Widget _buildCriticalCard(Map<String, dynamic> data) {
+  Widget _buildActionPanel(Map<String, dynamic> data) {
     final logId = data['id'] as int?;
     final powerAvg = data['power_avg'] ?? 0;
     final score = (data['score'] as num?) ?? 0.0;
-    final timeString = _formatFullDateTime(data['timestamp']);
     final isBusy = logId != null && _acknowledgingId == logId;
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFF3E0),
-              shape: BoxShape.circle,
-              border: Border.all(color: const Color(0xFFFFE0B2), width: 1),
-            ),
-            child: Icon(
-              Icons.warning_amber_rounded,
-              color: primaryOrange,
-              size: 24,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: criticalBg,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'CRITICAL',
-                  style: TextStyle(
-                    color: criticalText,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 0.5,
-                  ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: criticalText.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                'CRITICAL ALERT',
+                style: TextStyle(
+                  color: criticalText,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.2,
                 ),
               ),
-              const SizedBox(width: 10),
-              Text(
-                timeString,
-                style: TextStyle(
-                  color: Colors.grey[500],
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Text(
+          _formatFullDateTime(data['timestamp']),
+          style: TextStyle(
+            color: Colors.grey[500],
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 20),
+        Text(
+          'Unusual Pattern\nDetected',
+          style: TextStyle(
+            color: textDark,
+            fontSize: 32,
+            height: 1.15,
+            fontWeight: FontWeight.w900,
+            letterSpacing: -1.0,
+          ),
+        ),
+        const SizedBox(height: 20),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8F8F6),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Power Avg',
+                      style: TextStyle(color: Colors.grey[500], fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '$powerAvg W',
+                      style: TextStyle(color: textDark, fontSize: 18, fontWeight: FontWeight.w700),
+                    ),
+                  ],
+                ),
+              ),
+              Container(width: 1, height: 32, color: Colors.grey.withValues(alpha: 0.25)),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Anomaly Score',
+                      style: TextStyle(color: Colors.grey[500], fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      score.toStringAsFixed(2),
+                      style: TextStyle(color: textDark, fontSize: 18, fontWeight: FontWeight.w700),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          Text(
-            'Critical Anomaly Detected',
-            style: TextStyle(
-              color: textDark,
-              fontSize: 20,
-              fontWeight: FontWeight.w800,
+        ),
+        const SizedBox(height: 36),
+        Text(
+          'Was this expected behavior?',
+          style: TextStyle(color: textDark, fontSize: 16, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          height: 58,
+          child: FilledButton(
+            onPressed: (logId == null || isBusy)
+                ? null
+                : () => _acknowledgeAnomaly(logId, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: textDark,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(100),
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'A deviation has been detected outside typical operating patterns.\nPower Avg: $powerAvg W\nAnomaly Score: ${score.toStringAsFixed(2)}',
-            style: TextStyle(
-              color: Colors.grey[600],
-              fontSize: 14,
-              height: 1.4,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(height: 20),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF8F9FA),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Was this expected?',
-                  style: TextStyle(
-                    color: textDark,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  height: 44,
-                  child: ElevatedButton.icon(
-                    onPressed: (logId == null || isBusy)
-                        ? null
-                        : () => _acknowledgeAnomaly(logId, true),
-                    icon: isBusy
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.search_rounded, size: 18),
-                    label: const Text('No, investigate'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: primaryOrange,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      textStyle: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
+            child: isBusy
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
                     ),
+                  )
+                : const Text(
+                    'No, Investigate',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                   ),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  height: 44,
-                  child: OutlinedButton.icon(
-                    onPressed: (logId == null || isBusy)
-                        ? null
-                        : () => _acknowledgeAnomaly(logId, false),
-                    icon: const Icon(Icons.check_circle_outline_rounded,
-                        size: 18),
-                    label: const Text('Yes, it was me'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: textDark,
-                      side: BorderSide(color: Colors.grey[300]!, width: 1.5),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      backgroundColor: Colors.white,
-                      textStyle: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          height: 58,
+          child: OutlinedButton(
+            onPressed: (logId == null || isBusy)
+                ? null
+                : () => _acknowledgeAnomaly(logId, false),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: textDark,
+              side: BorderSide(color: Colors.grey[300]!, width: 1.5),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(100),
+              ),
+            ),
+            child: const Text(
+              'Yes, It Was Me',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

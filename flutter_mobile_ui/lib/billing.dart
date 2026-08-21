@@ -41,6 +41,9 @@ class BillingScreen extends StatelessWidget {
           double predictedDayTotal = 0.0;
           double cumulativeEnergy = 0.0;
 
+          // NEW: Placeholder for peso billing
+          double estimatedBillPeso = 0.0;
+
           // New forecast-node fields (not yet wired into the UI, available if needed):
           // double accumulatedPast = 0.0;
           // double avgDaily = 0.0;
@@ -248,37 +251,79 @@ class BillingScreen extends StatelessWidget {
                       ),
                       Positioned(
                         bottom: 10.0,
-                        right: 24.0,
-                        child: Column(
+                        left: 24.0, // Added left padding anchor
+                        right: 24.0, // Added right padding anchor
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
+                            // LEFT SIDE: PROJECTED END OF MONTH
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start, // Align to left
                               children: [
-                                const Icon(
-                                  Icons.trending_up_rounded,
-                                  color: Colors.greenAccent,
-                                  size: 15,
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.trending_up_rounded,
+                                      color: Colors.greenAccent,
+                                      size: 15,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'PROJECTED END OF MONTH',
+                                      style: TextStyle(
+                                        color: Colors.white.withValues(alpha: 0.95),
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                const SizedBox(width: 4),
+                                const SizedBox(height: 2),
                                 Text(
-                                  'PROJECTED END OF MONTH',
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: 0.95),
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600,
+                                  '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 19,
+                                    fontWeight: FontWeight.w800,
                                   ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 2),
-                            Text(
-                              '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 19,
-                                fontWeight: FontWeight.w800,
-                              ),
+                            // RIGHT SIDE: ESTIMATED BILL
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.end, // Align to right
+                              children: [
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.payments_rounded,
+                                      color: Colors.greenAccent,
+                                      size: 15,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'ESTIMATED BILL',
+                                      style: TextStyle(
+                                        color: Colors.white.withValues(alpha: 0.95),
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '₱${estimatedBillPeso.toStringAsFixed(2)}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 19,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -626,4 +671,4 @@ class CardCirclePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
+}    

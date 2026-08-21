@@ -34,7 +34,7 @@ class MyApp extends StatelessWidget {
     return const MaterialApp(
       debugShowCheckedModeBanner: false,
       // Setting this to OnboardingScreen makes it the first thing that opens
-      home: OnboardingScreen(), 
+      home: OnboardingScreen(),
     );
   }
 }
@@ -57,6 +57,11 @@ class _MainScreenState extends State<MainScreen> {
   final DatabaseReference _anomalyRef =
       FirebaseDatabase.instance.ref().child('anomaly_alert');
 
+  // Screens stay in their ORIGINAL index order (Settings = index 3,
+  // Advisories/Analytics = index 4) so nothing elsewhere in the app that
+  // references a tab by index breaks. Only the nav bar's *visual* order
+  // is changed below — Settings still reports index 3, it just renders
+  // in the last slot of the row.
   late final List<Widget> _screens = [
     const Dashboard(),
     billing.BillingScreen(),
@@ -141,14 +146,14 @@ class _MainScreenState extends State<MainScreen> {
                       },
                     ),
                     _buildNavItem(
+                      index: 4,
+                      icon: Icons.bar_chart_rounded,
+                      label: 'Analytics',
+                    ),
+                    _buildNavItem(
                       index: 3,
                       icon: Icons.settings_outlined,
                       label: 'Settings',
-                    ),
-                    _buildNavItem(
-                      index: 4,
-                      icon: Icons.bar_chart_rounded,
-                      label: 'Advisories',
                     ),
                   ],
                 ),
