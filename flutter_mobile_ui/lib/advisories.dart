@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart';
 
 class AdvisoriesScreen extends StatefulWidget {
   const AdvisoriesScreen({super.key});
@@ -18,13 +23,175 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
   final Color downText = const Color(0xFF2E7D32);
   final Color downBg = const Color(0xFFE8F5E9);
 
-  // TODO: replace with real per-day totals (Firebase / FastAPI), same
-  // pattern as Dashboard's _weeklyKwhPlaceholder. Last entry = today.
-  final List<double> _thisWeek = const [5.8, 6.4, 7.1, 5.2, 8.0, 9.0, 7.4];
-  final List<double> _lastWeek = const [6.0, 5.9, 6.5, 6.1, 7.0, 7.8, 6.9];
+  // Same FastAPI VM used by Dashboard for historical, non-today data.
+  static const String _apiBaseUrl = 'http://35.209.250.46:8000';
+
+  // ── CLIENT-SIDE CACHE for finalized past days ───────────────────────────
+  // 'static' so it survives navigating away from and back to this screen
+  // within the same app session (a new State object is created each time,
+  // but a static field is shared across all of them). Only ever populated
+  // with SUCCESSFUL fetches for days that are fully in the past — today's
+  // total is live and must never be cached, and a failed/404 fetch is
+  // deliberately NOT cached, so a transient network error doesn't
+  // permanently show 0 for that date for the rest of the session.
+  // Keyed by 'yyyy-MM-dd'. Resets on app restart (in-memory only).
+  static final Map<String, double> _dayTotalCache = {};
+
   final List<String> _weekDayLabels = const [
     'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'
   ];
+
+  // ── LIVE WEEKLY DATA STATE ────────────────────────────────────────────
+  // Index 0 = Monday ... 6 = Sunday, for both weeks.
+  List<double> _thisWeek = List<double>.filled(7, 0.0);
+  List<double> _lastWeek = List<double>.filled(7, 0.0);
+  bool _isLoadingWeekly = true;
+  String? _weeklyError;
+
+  StreamSubscription<DatabaseEvent>? _todaySubscription;
+  late DateTime _weekMonday; // Monday of the current week, midnight
+  int _todayIndex = 0; // 0=Mon ... 6=Sun
+
+  @override
+  void initState() {
+    super.initState();
+    _loadWeeklyData();
+  }
+
+  @override
+  void dispose() {
+    _todaySubscription?.cancel();
+    super.dispose();
+  }
+
+  // ── FETCH: whole week (this week's past days + all of last week) ───────
+  Future<void> _loadWeeklyData() async {
+    setState(() {
+      _isLoadingWeekly = true;
+      _weeklyError = null;
+    });
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    // DateTime.weekday: Mon=1 ... Sun=7, so this lines up with our 0-6 index.
+    _weekMonday = today.subtract(Duration(days: today.weekday - 1));
+    _todayIndex = today.weekday - 1;
+    final lastWeekMonday = _weekMonday.subtract(const Duration(days: 7));
+
+    try {
+      final thisWeekResults = await Future.wait(
+        List.generate(7, (i) {
+          final date = _weekMonday.add(Duration(days: i));
+          if (i == _todayIndex) {
+            // Handled live by _attachTodayListener; leave as 0 for now.
+            return Future.value(0.0);
+          }
+          if (date.isAfter(today)) {
+            // Hasn't happened yet.
+            return Future.value(0.0);
+          }
+          return _fetchDayTotal(date);
+        }),
+      );
+
+      final lastWeekResults = await Future.wait(
+        List.generate(
+          7,
+          (i) => _fetchDayTotal(lastWeekMonday.add(Duration(days: i))),
+        ),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _thisWeek = thisWeekResults;
+        _lastWeek = lastWeekResults;
+        _isLoadingWeekly = false;
+      });
+    } catch (e) {
+      debugPrint("🔴 ERROR LOADING WEEKLY DATA: $e");
+      if (!mounted) return;
+      setState(() {
+        _isLoadingWeekly = false;
+        _weeklyError = 'Failed to load weekly data';
+      });
+    }
+
+    _attachTodayListener();
+  }
+
+  // ── FETCH: a single past day's total via FastAPI, cache-aware ──────────
+  // Checks the static cache first; only writes to the cache on a confirmed
+  // successful response, so transient errors/404s are retried next time
+  // instead of being permanently remembered as 0.
+  Future<double> _fetchDayTotal(DateTime date) async {
+    final dateStr = DateFormat('yyyy-MM-dd').format(date);
+
+    final cached = _dayTotalCache[dateStr];
+    if (cached != null) {
+      return cached;
+    }
+
+    try {
+      final response = await http
+          .get(Uri.parse('$_apiBaseUrl/history/$dateStr'))
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        final List<dynamic> rows = body['data'] as List<dynamic>? ?? [];
+        double total = 0.0;
+        for (final row in rows) {
+          final kwh = (row['total_kwh'] as num?)?.toDouble();
+          if (kwh != null) total += kwh;
+        }
+        _dayTotalCache[dateStr] = total; // cache only on confirmed success
+        return total;
+      }
+    } catch (e) {
+      debugPrint("🔴 ERROR FETCHING DAY TOTAL for $dateStr: $e");
+    }
+    return 0.0; // 404 / no data / error → 0 for this call, but NOT cached
+  }
+
+  // ── LIVE: today's running total via Firebase `history/today`, same
+  // node Dashboard listens to for its hourly chart. ──────────────────────
+  void _attachTodayListener() {
+    _todaySubscription?.cancel();
+    final ref = FirebaseDatabase.instance.ref('history/today');
+    _todaySubscription = ref.onValue.listen((event) {
+      if (!mounted) return;
+      double total = 0.0;
+
+      if (event.snapshot.value != null) {
+        try {
+          final data = Map<String, dynamic>.from(event.snapshot.value as Map);
+          final hourlyRaw = data['hourly'];
+
+          if (hourlyRaw is Map) {
+            hourlyRaw.forEach((key, value) {
+              if (value == null) return;
+              final kwh = double.tryParse(value.toString());
+              if (kwh != null) total += kwh;
+            });
+          } else if (hourlyRaw is List) {
+            for (final value in hourlyRaw) {
+              if (value == null) continue;
+              final kwh = double.tryParse(value.toString());
+              if (kwh != null) total += kwh;
+            }
+          }
+        } catch (e) {
+          debugPrint("🔴 ERROR PARSING TODAY TOTAL: $e");
+        }
+      }
+
+      setState(() {
+        if (_todayIndex >= 0 && _todayIndex < _thisWeek.length) {
+          _thisWeek[_todayIndex] = total;
+        }
+      });
+    });
+  }
 
   // ── PLACEHOLDER: LOGS, shown as a real news feed (featured + list) ──────
   // 'image' is a placeholder network image until a real source/CDN is wired
@@ -66,11 +233,26 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
     },
   ];
 
-  double get _thisWeekTotal => _thisWeek.reduce((a, b) => a + b);
-  double get _lastWeekTotal => _lastWeek.reduce((a, b) => a + b);
-  double get _dailyAverage => _thisWeekTotal / _thisWeek.length;
-  double get _pctChange =>
-      _lastWeekTotal == 0 ? 0 : ((_thisWeekTotal - _lastWeekTotal) / _lastWeekTotal) * 100;
+  // ── DERIVED STATS ────────────────────────────────────────────────────
+  // Only count days that have actually elapsed this week (today included)
+  // — averaging in future zero-days would understate the daily average,
+  // and comparing a partial week to a full previous week would be unfair.
+  int get _daysElapsed => _todayIndex + 1;
+
+  double get _thisWeekElapsedTotal =>
+      _thisWeek.take(_daysElapsed).fold(0.0, (sum, v) => sum + v);
+
+  double get _lastWeekComparableTotal =>
+      _lastWeek.take(_daysElapsed).fold(0.0, (sum, v) => sum + v);
+
+  double get _dailyAverage =>
+      _daysElapsed == 0 ? 0 : _thisWeekElapsedTotal / _daysElapsed;
+
+  double get _pctChange => _lastWeekComparableTotal == 0
+      ? 0
+      : ((_thisWeekElapsedTotal - _lastWeekComparableTotal) /
+              _lastWeekComparableTotal) *
+          100;
 
   @override
   Widget build(BuildContext context) {
@@ -156,7 +338,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                         Expanded(
                           child: _buildStatTile(
                             label: 'Daily Average',
-                            value: '${_dailyAverage.toStringAsFixed(1)}',
+                            value: _dailyAverage.toStringAsFixed(1),
                             unit: 'kWh/day',
                           ),
                         ),
@@ -211,7 +393,36 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                           const SizedBox(height: 16),
                           SizedBox(
                             height: 180,
-                            child: _buildWeeklyBarChart(),
+                            child: Stack(
+                              children: [
+                                _buildWeeklyBarChart(),
+                                if (_isLoadingWeekly)
+                                  const Positioned.fill(
+                                    child: Center(
+                                      child: SizedBox(
+                                        height: 22,
+                                        width: 22,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                else if (_weeklyError != null)
+                                  Positioned.fill(
+                                    child: Center(
+                                      child: Text(
+                                        _weeklyError!,
+                                        style: TextStyle(
+                                          color: Colors.grey[500],
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
                           ),
                           const SizedBox(height: 8),
                         ],
@@ -670,12 +881,12 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
     );
   }
 
-  // ── WEEKLY BAR CHART (placeholder data) ─────────────────────────────────
+  // ── WEEKLY BAR CHART (now backed by real fetched data) ──────────────────
   Widget _buildWeeklyBarChart() {
-    final maxVal = _thisWeek.reduce((a, b) => a > b ? a : b);
+    final maxVal =
+        _thisWeek.isEmpty ? 0.0 : _thisWeek.reduce((a, b) => a > b ? a : b);
     final maxY = maxVal == 0 ? 1.0 : maxVal * 1.3;
     final midY = maxY / 2;
-    final todayIndex = _thisWeek.length - 1;
 
     return BarChart(
       BarChartData(
@@ -721,7 +932,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                 if (index < 0 || index >= _weekDayLabels.length) {
                   return const SizedBox.shrink();
                 }
-                final isToday = index == todayIndex;
+                final isToday = index == _todayIndex;
                 return SideTitleWidget(
                   meta: meta,
                   space: 8,
@@ -739,7 +950,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
           ),
         ),
         barGroups: List.generate(_thisWeek.length, (i) {
-          final isToday = i == todayIndex;
+          final isToday = i == _todayIndex;
           return BarChartGroupData(
             x: i,
             barRods: [
@@ -751,7 +962,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                   topLeft: Radius.circular(6),
                   topRight: Radius.circular(6),
                 ),
-              ),
+              ), 
             ],
           );
         }),

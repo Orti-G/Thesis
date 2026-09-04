@@ -805,7 +805,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
   Widget _buildActionPanel(Map<String, dynamic> data) {
     final logId = data['id'] as int?;
     final powerAvg = data['power_avg'] ?? 0;
-    final score = (data['score'] as num?) ?? 0.0;
+    final score = (data['anomaly_score'] as num?) ?? 0.0;
     final isBusy = logId != null && _acknowledgingId == logId;
 
     return Column(

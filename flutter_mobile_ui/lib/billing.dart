@@ -16,6 +16,18 @@ class BillingScreen extends StatelessWidget {
 
   final DatabaseReference _dbRef = FirebaseDatabase.instance.ref();
 
+  // ── FALLBACK RATES ───────────────────────────────────────────────────
+  // Used only if `meralco_rates/brackets` hasn't loaded yet (e.g. first
+  // frame before the stream emits, or the node is briefly missing) so the
+  // UI never flashes ₱0.0000/kWh. Once the DB value arrives, these are
+  // fully overridden — they are not a permanent rate source.
+  static const Map<String, double> _fallbackRates = {
+    '0-200': 0.9803,
+    '201-300': 1.2908,
+    '301-400': 1.5837,
+    'over 400': 2.0941,
+  };
+
   Future<void> _handleRefresh() async {
     final url = Uri.parse('http://35.209.250.46:8000/forecast');
     try {
@@ -30,6 +42,73 @@ class BillingScreen extends StatelessWidget {
     }
   }
 
+  // ── Parse `meralco_rates/brackets` into a clean rate map ────────────────
+  // Falls back per-key to _fallbackRates if a specific bracket is missing
+  // or unparsable, rather than failing the whole map.
+  Map<String, double> _parseRates(dynamic meralcoRatesNode) {
+    final Map<String, double> rates = Map.of(_fallbackRates);
+    if (meralcoRatesNode is Map) {
+      final bracketsRaw = meralcoRatesNode['brackets'];
+      if (bracketsRaw is Map) {
+        bracketsRaw.forEach((key, value) {
+          final parsed = double.tryParse(value.toString());
+          if (parsed != null) {
+            rates[key.toString()] = parsed;
+          }
+        });
+      }
+    }
+    return rates;
+  }
+
+  String _parseEffectivePeriod(dynamic meralcoRatesNode) {
+    if (meralcoRatesNode is Map) {
+      final period = meralcoRatesNode['effective_period'];
+      if (period != null && period.toString().isNotEmpty) {
+        return period.toString();
+      }
+    }
+    return '';
+  }
+
+  String _formatRate(Map<String, double> rates, String key) {
+    final value = rates[key] ?? _fallbackRates[key] ?? 0.0;
+    return '₱${value.toStringAsFixed(4)}/kWh';
+  }
+
+  // ── Tiered bill calculation using live bracket rates ────────────────────
+  // Applies each portion of `kwh` to its own bracket rate rather than a
+  // flat rate — e.g. 250 kWh is billed at the Tier-1 rate for the first
+  // 200 kWh and the Tier-2 rate for the remaining 50 kWh.
+  double _calculateBill(double kwh, Map<String, double> rates) {
+    if (kwh <= 0) return 0.0;
+
+    final r1 = rates['0-200'] ?? _fallbackRates['0-200']!;
+    final r2 = rates['201-300'] ?? _fallbackRates['201-300']!;
+    final r3 = rates['301-400'] ?? _fallbackRates['301-400']!;
+    final r4 = rates['over 400'] ?? _fallbackRates['over 400']!;
+
+    double bill = 0.0;
+
+    final tier1Kwh = kwh > 200 ? 200 : kwh;
+    bill += tier1Kwh * r1;
+
+    if (kwh > 200) {
+      final tier2Kwh = (kwh > 300 ? 300 : kwh) - 200;
+      bill += tier2Kwh * r2;
+    }
+    if (kwh > 300) {
+      final tier3Kwh = (kwh > 400 ? 400 : kwh) - 300;
+      bill += tier3Kwh * r3;
+    }
+    if (kwh > 400) {
+      final tier4Kwh = kwh - 400;
+      bill += tier4Kwh * r4;
+    }
+
+    return bill;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -41,8 +120,8 @@ class BillingScreen extends StatelessWidget {
           double predictedDayTotal = 0.0;
           double cumulativeEnergy = 0.0;
 
-          // NEW: Placeholder for peso billing
-          double estimatedBillPeso = 0.0;
+          Map<String, double> rates = Map.of(_fallbackRates);
+          String effectivePeriod = '';
 
           // New forecast-node fields (not yet wired into the UI, available if needed):
           // double accumulatedPast = 0.0;
@@ -78,37 +157,45 @@ class BillingScreen extends StatelessWidget {
                   (liveReading['cumul_kWh'] ?? liveReading['cumul_kwh'] ?? 0)
                       .toDouble();
             }
+
+            rates = _parseRates(data['meralco_rates']);
+            effectivePeriod = _parseEffectivePeriod(data['meralco_rates']);
           }
 
+          // ── ESTIMATED BILL: tiered calculation on the projected
+          // end-of-month kWh, using the live bracket rates above. ─────────
+          final double estimatedBillPeso =
+              _calculateBill(estimatedMonthEnd, rates);
+
           String currentTierTitle = 'TIER 1 STATUS';
-          String currentTierRate = '₱0.9803/kWh';
+          String currentTierRate = _formatRate(rates, '0-200');
           double currentTierMax = 200.0;
           String remainingText = '';
 
           if (cumulativeEnergy <= 200) {
             currentTierTitle = 'TIER 1 STATUS';
-            currentTierRate = '₱0.9803/kWh';
+            currentTierRate = _formatRate(rates, '0-200');
             currentTierMax = 200.0;
             double remaining = (200.0 - cumulativeEnergy).clamp(0.0, 200.0);
             remainingText =
                 '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
           } else if (cumulativeEnergy <= 300) {
             currentTierTitle = 'TIER 2 STATUS';
-            currentTierRate = '₱1.2908/kWh';
+            currentTierRate = _formatRate(rates, '201-300');
             currentTierMax = 300.0;
             double remaining = (300.0 - cumulativeEnergy).clamp(0.0, 100.0);
             remainingText =
                 '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
           } else if (cumulativeEnergy <= 400) {
             currentTierTitle = 'TIER 3 STATUS';
-            currentTierRate = '₱1.5837/kWh';
+            currentTierRate = _formatRate(rates, '301-400');
             currentTierMax = 400.0;
             double remaining = (400.0 - cumulativeEnergy).clamp(0.0, 100.0);
             remainingText =
                 '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
           } else {
             currentTierTitle = 'TIER 4 STATUS';
-            currentTierRate = '₱2.0941/kWh';
+            currentTierRate = _formatRate(rates, 'over 400');
             currentTierMax = 400.0;
             remainingText = 'Naabot na ang pinakamataas na tier';
           }
@@ -489,14 +576,29 @@ class BillingScreen extends StatelessWidget {
                             height: 1,
                           ),
                         ),
-                        Text(
-                          'RATE BRACKETS',
-                          style: TextStyle(
-                            color: textDark,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 0.5,
-                          ),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              'RATE BRACKETS',
+                              style: TextStyle(
+                                color: textDark,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            if (effectivePeriod.isNotEmpty)
+                              Text(
+                                'Effective $effectivePeriod',
+                                style: TextStyle(
+                                  color: textDark.withValues(alpha: 0.45),
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                          ],
                         ),
                       ],
                     ),
@@ -512,27 +614,27 @@ class BillingScreen extends StatelessWidget {
                         _buildRateCard(
                           tierTitle: 'TIER 1',
                           range: 'Up to 200 kWh',
-                          rate: '₱0.9803/kWh',
+                          rate: _formatRate(rates, '0-200'),
                           isActive: cumulativeEnergy <= 200,
                         ),
                         _buildRateCard(
                           tierTitle: 'TIER 2',
                           range: '201 - 300 kWh',
-                          rate: '₱1.2908/kWh',
+                          rate: _formatRate(rates, '201-300'),
                           isActive:
                               cumulativeEnergy > 200 && cumulativeEnergy <= 300,
                         ),
                         _buildRateCard(
                           tierTitle: 'TIER 3',
                           range: '301 - 400 kWh',
-                          rate: '₱1.5837/kWh',
+                          rate: _formatRate(rates, '301-400'),
                           isActive:
                               cumulativeEnergy > 300 && cumulativeEnergy <= 400,
                         ),
                         _buildRateCard(
                           tierTitle: 'TIER 4',
                           range: 'Over 400 kWh',
-                          rate: '₱2.0941/kWh',
+                          rate: _formatRate(rates, 'over 400'),
                           isActive: cumulativeEnergy > 400,
                         ),
                       ],
@@ -671,4 +773,4 @@ class CardCirclePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}    
+}
