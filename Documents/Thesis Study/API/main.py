@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from meralco_engine import compute_bill, RATE_SCHEDULE_DIR
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -9,8 +10,10 @@ import numpy as np
 import pandas as pd
 import calendar
 import os
+import re
 import firebase_admin
 from firebase_admin import credentials, db as firebase_db, messaging
+import asyncio
 
 app = FastAPI()
 
@@ -70,6 +73,11 @@ BILLING_BASELINE_KWH  = 0.0
 BILLING_CUTOFF_DATE   = ""
 BILLING_COMPUTED = 0.0
 BILLING_STATE_REF      = "/billing/state"
+
+# ── Sync Watchdog ──────────────────────────────────────────────────────────────
+last_reading_ts      = None   # updated on every /reading POST
+SYNC_TIMEOUT_SECONDS = 60     # seconds before sync = false
+last_sync_state = True        # tracks previous sync state to detect transition
 
 
 def compute_billing_cutoff() -> str:
@@ -157,8 +165,13 @@ def startup_event():
     global BILLING_BASELINE_KWH, BILLING_CUTOFF_DATE, BILLING_COMPUTED
     global last_pushed_hour, last_pushed_date
 
+    # Set sync = false immediately on startup
+    firebase_db.reference("/sync").set(False)
+
     computed_cutoff = compute_billing_cutoff()
     state = load_billing_state()
+
+    asyncio.create_task(sync_watchdog())
 
     if state and state.get("billing_cutoff_date") == computed_cutoff:
         # Same billing cycle as before restart — resume as-is
@@ -198,12 +211,46 @@ def startup_event():
         last_pushed_hour = datetime.now(PH_TZ).hour
     # else: leave last_pushed_hour = -1, last_pushed_date = "" (their existing
     # global defaults) so push_hourly_history() takes the normal reset path
-
+    
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
+async def sync_watchdog():
+    """
+    Background task — runs every 10 seconds.
+    Sets Firebase /sync to false if no reading received recently.
+    Triggers FCM notification when device goes offline.
+    """
+    global last_sync_state
+
+    while True:
+        await asyncio.sleep(10)
+
+        if last_reading_ts is None:
+            continue
+
+        elapsed   = (datetime.now(PH_TZ) - last_reading_ts).total_seconds()
+        is_synced = elapsed <= SYNC_TIMEOUT_SECONDS
+
+        firebase_db.reference("/sync").set(is_synced)
+
+        # Only trigger notification on TRANSITION from true → false
+        # Avoids sending repeated notifications every 10 seconds
+        if not is_synced and last_sync_state:
+            send_fcm_alert(
+                title="⚠️ Device Offline",
+                body="Ang IoT device ay hindi na naka-konekta. "
+                     "Mangyaring suriin ang inyong koneksyon.",
+                channel_id="high_channel",
+                data={
+                    "type":      "sync_lost",
+                    "timestamp": datetime.now(PH_TZ).isoformat(),
+                }
+            )
+
+        last_sync_state = is_synced
 
 def get_recent_averaged_readings(n: int):
     """Return last n averaged rows from DB, oldest first."""
@@ -337,7 +384,7 @@ def log_forecast(result: dict, window_ts: datetime):
             )
         conn.commit()
 
-def push_to_firebase(raw: dict, adjusted_cumul: float):
+def push_to_firebase(raw: dict, adjusted_cumul: float, est_cost: float):
     """Push all 6 live measurements to Firebase /live_reading."""
     firebase_db.reference("/live_reading").set({
         "voltage":      raw["voltage"],
@@ -347,12 +394,22 @@ def push_to_firebase(raw: dict, adjusted_cumul: float):
         "power_factor": raw["power_factor"],
         "frequency":    raw["frequency"],
         "timestamp":    raw["timestamp"],
+        "estimated_cost": est_cost,
     })
 
 # ── FCM Push Notification ──────────────────────────────────────────────────────
-def send_fcm_alert(title: str, body: str, data: dict = None):
+def send_fcm_alert(
+    title: str,
+    body: str,
+    channel_id: str = "high_channel",
+    data: dict = None
+):
     """
     Sends FCM push notification to ALL registered devices.
+    channel_id maps to Flutter AndroidNotificationChannel:
+      - high_channel   → Anomaly Alerts (urgent)
+      - medium_channel → Billing Warnings (important)
+      - low_channel    → Bill Forecasts (informational)
     """
     try:
         tokens_ref = firebase_db.reference("/device_tokens").get()
@@ -364,33 +421,41 @@ def send_fcm_alert(title: str, body: str, data: dict = None):
         tokens = list(tokens_ref.values())
 
         if not tokens:
+            print("❌ Token list is empty")
             return
 
-        # Send to all registered devices using multicast
         message = messaging.MulticastMessage(
             notification=messaging.Notification(
                 title=title,
                 body=body,
+            ),
+            android=messaging.AndroidConfig(
+                notification=messaging.AndroidNotification(
+                    channel_id=channel_id,
+                    priority="high" if channel_id == "high_channel" else "normal",
+                )
             ),
             data={k: str(v) for k, v in (data or {}).items()},
             tokens=tokens,
         )
 
         response = messaging.send_each_for_multicast(message)
-        print(f"✅ FCM sent to {response.success_count} devices")
+        print(f"✅ FCM sent to {response.success_count}/{len(tokens)} devices "
+              f"via {channel_id}")
 
-        # Clean up invalid tokens
+        # Clean up invalid/expired tokens automatically
         if response.failure_count > 0:
             for idx, result in enumerate(response.responses):
                 if not result.success:
                     failed_token = tokens[idx]
-                    safe_key = failed_token[-20:].replace(":", "_").replace("-", "_")
-                    firebase_db.reference(f"/device_tokens/{safe_key}").delete()
+                    safe_key = failed_token[-20:].replace(
+                        ":", "_").replace("-", "_")
+                    firebase_db.reference(
+                        f"/device_tokens/{safe_key}").delete()
                     print(f"🗑️ Removed invalid token: {safe_key}")
 
     except Exception as e:
         print(f"❌ FCM error: {e}")
-
 
 # ── Device Token Registration ──────────────────────────────────────────────────
 class DeviceToken(BaseModel):
@@ -540,14 +605,16 @@ def flush_buffer():
             "power_avg":  avg_power,
         })
         send_fcm_alert(
-                    title="⚠️ Anomalya Natukoy",
-                    body=f"Hindi karaniwan ang kuryente: {avg_power:.1f}W. Normal ba ito?",
-                    data={
-                        "type":      "anomaly",
-                        "power_avg": str(avg_power),
-                        "timestamp": window_ts.isoformat(),
-                    }
-                )
+            title="⚠️ Anomalya Natukoy",
+            body=f"Hindi karaniwan ang kuryente: {avg_power:.1f}W. "
+            f"Suriin at kumpirmahin kung normal ito.",
+            channel_id="high_channel",
+                data={
+                    "type":      "anomaly",
+                    "power_avg": str(avg_power),
+                    "timestamp": window_ts.isoformat(),
+                }
+            )
     else:
         firebase_db.reference("/anomaly_alert").set({
             "is_anomaly": False,
@@ -608,6 +675,23 @@ def run_anomaly(voltage, current, power, interval_kwh):
         "dev_24hr":       round(float(dev_24hr), 4),
     }
 
+def get_current_schedule_filename():
+    """Picks the PDF whose filename encodes the latest year-month, e.g.
+    '08-2026_rate_schedule.pdf' -> (2026, 8). More reliable than file
+    modification time, which can be misleading after any copy/restore/
+    re-sync operation touches an older file more recently than a newer one."""
+    pdfs = [f for f in os.listdir(RATE_SCHEDULE_DIR) if f.lower().endswith(".pdf")]
+    if not pdfs:
+        raise HTTPException(status_code=500, detail="No rate schedule PDF found in meralco_rates/")
+ 
+    def year_month(filename):
+        match = re.match(r"(\d{2})-(\d{4})", filename)
+        if not match:
+            return (0, 0)  # unrecognized naming sorts first, never wins
+        month, year = int(match.group(1)), int(match.group(2))
+        return (year, month)
+ 
+    return max(pdfs, key=year_month)
 
 # ── ESP32 Ingestion Endpoint ───────────────────────────────────────────────────
 class Reading(BaseModel):
@@ -631,7 +715,19 @@ def post_reading(data: Reading):
     global reading_buffer
 
     now            = datetime.now(PH_TZ)
+    last_reading_ts = now   # ← update on every reading
     adjusted_cumul = adjust_cumul(data.cumul_kwh)
+
+    # Set sync = true immediately on every reading
+    firebase_db.reference("/sync").set(True)
+
+    bracket = "0-200" if adjusted_cumul <= 200 else "201-300" if adjusted_cumul <= 300 else "301-400" if adjusted_cumul <= 400 else "over-400"
+
+    bracket_ref= firebase_db.reference("/meralco_rates").get()
+    rate_per_kwh = bracket_ref["brackets"][bracket]
+    fixed_charge = bracket_ref["fixed_charge"]
+
+    estimated_cost = adjusted_cumul * rate_per_kwh + fixed_charge
 
     # 1. Push all 6 to Firebase (adjusted cumul_kwh)
     push_to_firebase({
@@ -641,7 +737,7 @@ def post_reading(data: Reading):
         "power_factor": data.power_factor,
         "frequency":    data.frequency,
         "timestamp":    now.isoformat(),
-    }, adjusted_cumul)
+    }, adjusted_cumul, estimated_cost)
 
     # 2. Add to 5-min buffer (raw cumul for interval_kwh calculation)
     reading_buffer.append({
@@ -762,6 +858,85 @@ def forecast():
 
     return result
 
+
+# ── Weekly Comparison Endpoint ────────────────────────────────────────────────
+@app.get("/history/weekly-comparison")
+def get_weekly_comparison():
+    """
+    Returns daily kWh for current week (Sun→today) and last week (Sun→Sat).
+    Week landmark: Sunday to Saturday.
+    No date params needed — auto-computed from today's PH date.
+    One call covers both weeks. ✅
+    """
+    today = datetime.now(PH_TZ).date()
+ 
+    # Find this week's Sunday
+    days_since_sunday  = (today.weekday() + 1) % 7
+    this_sunday        = today - timedelta(days=days_since_sunday)
+ 
+    # Current week: this Sunday → today (may be incomplete)
+    current_week_start = this_sunday
+    current_week_end   = today
+ 
+    # Last week: previous Sunday → previous Saturday (always complete)
+    last_week_start    = this_sunday - timedelta(days=7)
+    last_week_end      = this_sunday - timedelta(days=1)
+ 
+    def fetch_week(start, end):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        DATE(timestamp)                       AS day,
+                        ROUND(SUM(interval_kwh)::numeric, 4) AS daily_kwh
+                    FROM readings
+                    WHERE DATE(timestamp) BETWEEN %s AND %s
+                    GROUP BY DATE(timestamp)
+                    ORDER BY day ASC
+                    """,
+                    (str(start), str(end))
+                )
+                rows = cur.fetchall()
+ 
+        # Build full week map (missing days = 0.0)
+        result = {}
+        for row in rows:
+            result[str(row[0])] = float(row[1])
+ 
+        # Fill missing days with 0.0
+        current = start
+        while current <= end:
+            if str(current) not in result:
+                result[str(current)] = 0.0
+            current += timedelta(days=1)
+ 
+        return [
+            {"date": d, "daily_kwh": result[d]}
+            for d in sorted(result)
+        ]
+ 
+    current_week_data = fetch_week(current_week_start, current_week_end)
+    last_week_data    = fetch_week(last_week_start, last_week_end)
+ 
+    return {
+        "status": "ok",
+        "current_week": {
+            "start":      str(current_week_start),
+            "end":        str(current_week_end),
+            "total_kwh":  round(sum(d["daily_kwh"] for d in current_week_data), 4),
+            "is_complete": today.weekday() == 5,  # True only on Saturday
+            "data":       current_week_data,
+        },
+        "last_week": {
+            "start":      str(last_week_start),
+            "end":        str(last_week_end),
+            "total_kwh":  round(sum(d["daily_kwh"] for d in last_week_data), 4),
+            "is_complete": True,
+            "data":       last_week_data,
+        },
+    }
+
 # ── Historical Data Endpoint ───────────────────────────────────────────────────
 @app.get("/history/{date_str}")
 def get_history(date_str: str):
@@ -876,6 +1051,29 @@ def billing_info():
         "billing_computed": BILLING_COMPUTED
     }
 
+#GET /bill/breakdown?kwh=219
+@app.get("/bill/breakdown")
+def get_bill_breakdown(
+    kwh: float = Query(..., gt=0, description="Consumption in kWh"),
+):
+    """On-demand itemized bill breakdown for a given consumption value.
+    NOT part of the 2-second loop — that reads cached rates from Firebase
+    instead. This endpoint is for when a user actually wants to see
+    Generation/Transmission/VAT/etc. broken out."""
+    pdf_filename = get_current_schedule_filename()
+
+    try:
+        result = compute_bill(pdf_filename, kwh)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=f"Could not parse rate schedule: {e}")
+
+    return {
+        "kwh": kwh,
+        "source_file": pdf_filename,
+        **result,
+    }
 
 # ── Health Check ───────────────────────────────────────────────────────────────
 @app.get("/")
