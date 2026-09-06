@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
-import 'package:intl/intl.dart';
 
 class AdvisoriesScreen extends StatefulWidget {
   const AdvisoriesScreen({super.key});
@@ -22,35 +21,35 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
   final Color upBg = const Color(0xFFFFEBEE);
   final Color downText = const Color(0xFF2E7D32);
   final Color downBg = const Color(0xFFE8F5E9);
+  // Muted slate used for the "Last Week" series when comparison mode is on.
+  final Color lastWeekBar = const Color(0xFFB0B7C3);
 
   // Same FastAPI VM used by Dashboard for historical, non-today data.
   static const String _apiBaseUrl = 'http://35.209.250.46:8000';
 
-  // ── CLIENT-SIDE CACHE for finalized past days ───────────────────────────
-  // 'static' so it survives navigating away from and back to this screen
-  // within the same app session (a new State object is created each time,
-  // but a static field is shared across all of them). Only ever populated
-  // with SUCCESSFUL fetches for days that are fully in the past — today's
-  // total is live and must never be cached, and a failed/404 fetch is
-  // deliberately NOT cached, so a transient network error doesn't
-  // permanently show 0 for that date for the rest of the session.
-  // Keyed by 'yyyy-MM-dd'. Resets on app restart (in-memory only).
-  static final Map<String, double> _dayTotalCache = {};
-
+  // Chart runs Sunday -> Saturday.
   final List<String> _weekDayLabels = const [
-    'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'
+    'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'
+  ];
+
+  static const List<String> _monthAbbr = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
   ];
 
   // ── LIVE WEEKLY DATA STATE ────────────────────────────────────────────
-  // Index 0 = Monday ... 6 = Sunday, for both weeks.
+  // Index 0 = Sunday ... 6 = Saturday, for both weeks.
   List<double> _thisWeek = List<double>.filled(7, 0.0);
   List<double> _lastWeek = List<double>.filled(7, 0.0);
   bool _isLoadingWeekly = true;
   String? _weeklyError;
 
+  // Toggle between the single-series "This Week" view and the grouped
+  // side-by-side "Compare" view (this week vs. last week per day).
+  bool _showComparison = false;
+
   StreamSubscription<DatabaseEvent>? _todaySubscription;
-  late DateTime _weekMonday; // Monday of the current week, midnight
-  int _todayIndex = 0; // 0=Mon ... 6=Sun
+  int _todayIndex = 0; // 0=Sun ... 6=Sat
 
   @override
   void initState() {
@@ -64,7 +63,12 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
     super.dispose();
   }
 
-  // ── FETCH: whole week (this week's past days + all of last week) ───────
+  // ── FETCH: single call to /history/weekly-comparison ────────────────────
+  // Replaces the old approach of 7+7 individual GET /history/{date} calls
+  // (up to 13 requests per load, since today was skipped and handled live).
+  // The backend now pre-aggregates both weeks server-side in one response,
+  // so this is always exactly 1 HTTP call regardless of how many days have
+  // elapsed this week.
   Future<void> _loadWeeklyData() async {
     setState(() {
       _isLoadingWeekly = true;
@@ -72,43 +76,40 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
     });
 
     final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    // DateTime.weekday: Mon=1 ... Sun=7, so this lines up with our 0-6 index.
-    _weekMonday = today.subtract(Duration(days: today.weekday - 1));
-    _todayIndex = today.weekday - 1;
-    final lastWeekMonday = _weekMonday.subtract(const Duration(days: 7));
+    // DateTime.weekday: Mon=1 ... Sun=7. We want Sun=0 ... Sat=6,
+    // so shift with modulo instead of a plain -1.
+    _todayIndex = now.weekday % 7;
 
     try {
-      final thisWeekResults = await Future.wait(
-        List.generate(7, (i) {
-          final date = _weekMonday.add(Duration(days: i));
-          if (i == _todayIndex) {
-            // Handled live by _attachTodayListener; leave as 0 for now.
-            return Future.value(0.0);
-          }
-          if (date.isAfter(today)) {
-            // Hasn't happened yet.
-            return Future.value(0.0);
-          }
-          return _fetchDayTotal(date);
-        }),
-      );
+      final response = await http
+          .get(Uri.parse('$_apiBaseUrl/history/weekly-comparison'))
+          .timeout(const Duration(seconds: 10));
 
-      final lastWeekResults = await Future.wait(
-        List.generate(
-          7,
-          (i) => _fetchDayTotal(lastWeekMonday.add(Duration(days: i))),
-        ),
-      );
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (body['status'] != 'ok') {
+        throw Exception('API returned status: ${body['status']}');
+      }
+
+      final currentWeek = body['current_week'] as Map<String, dynamic>? ?? {};
+      final lastWeek = body['last_week'] as Map<String, dynamic>? ?? {};
+
+      final thisWeekData =
+          _parseWeekData(currentWeek['data'] as List<dynamic>? ?? []);
+      final lastWeekData =
+          _parseWeekData(lastWeek['data'] as List<dynamic>? ?? []);
 
       if (!mounted) return;
       setState(() {
-        _thisWeek = thisWeekResults;
-        _lastWeek = lastWeekResults;
+        _thisWeek = thisWeekData;
+        _lastWeek = lastWeekData;
         _isLoadingWeekly = false;
       });
     } catch (e) {
-      debugPrint("🔴 ERROR LOADING WEEKLY DATA: $e");
+      debugPrint("🔴 ERROR LOADING WEEKLY COMPARISON: $e");
       if (!mounted) return;
       setState(() {
         _isLoadingWeekly = false;
@@ -116,41 +117,32 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
       });
     }
 
+    // Today's entry from the API may already be lagging (it's a snapshot),
+    // so we still layer the live Firebase total for today's index on top —
+    // this is the only piece that genuinely needs to be real-time.
     _attachTodayListener();
   }
 
-  // ── FETCH: a single past day's total via FastAPI, cache-aware ──────────
-  // Checks the static cache first; only writes to the cache on a confirmed
-  // successful response, so transient errors/404s are retried next time
-  // instead of being permanently remembered as 0.
-  Future<double> _fetchDayTotal(DateTime date) async {
-    final dateStr = DateFormat('yyyy-MM-dd').format(date);
-
-    final cached = _dayTotalCache[dateStr];
-    if (cached != null) {
-      return cached;
-    }
-
-    try {
-      final response = await http
-          .get(Uri.parse('$_apiBaseUrl/history/$dateStr'))
-          .timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final body = jsonDecode(response.body) as Map<String, dynamic>;
-        final List<dynamic> rows = body['data'] as List<dynamic>? ?? [];
-        double total = 0.0;
-        for (final row in rows) {
-          final kwh = (row['total_kwh'] as num?)?.toDouble();
-          if (kwh != null) total += kwh;
-        }
-        _dayTotalCache[dateStr] = total; // cache only on confirmed success
-        return total;
+  // ── Map the API's {date, daily_kwh} rows onto a fixed Sun..Sat array ────
+  // Rows are keyed by actual calendar date, not by list position, so we
+  // derive the index from the date itself rather than assuming order.
+  // Missing days (e.g. days in the current week that haven't happened yet)
+  // are left at 0.0.
+  List<double> _parseWeekData(List<dynamic> rows) {
+    final result = List<double>.filled(7, 0.0);
+    for (final row in rows) {
+      if (row is! Map) continue;
+      final dateStr = row['date'] as String?;
+      final kwh = (row['daily_kwh'] as num?)?.toDouble();
+      if (dateStr == null || kwh == null) continue;
+      final date = DateTime.tryParse(dateStr);
+      if (date == null) continue;
+      final index = date.weekday % 7; // Sun=0 ... Sat=6
+      if (index >= 0 && index < 7) {
+        result[index] = kwh;
       }
-    } catch (e) {
-      debugPrint("🔴 ERROR FETCHING DAY TOTAL for $dateStr: $e");
     }
-    return 0.0; // 404 / no data / error → 0 for this call, but NOT cached
+    return result;
   }
 
   // ── LIVE: today's running total via Firebase `history/today`, same
@@ -253,6 +245,31 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
       : ((_thisWeekElapsedTotal - _lastWeekComparableTotal) /
               _lastWeekComparableTotal) *
           100;
+
+  // ── WEEK DATE SPANS: Sunday-of-this-week derived from today's index, so
+  // the legend can show actual calendar ranges instead of generic labels.
+  DateTime get _thisWeekStart {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day)
+        .subtract(Duration(days: _todayIndex));
+  }
+
+  DateTime get _lastWeekStart =>
+      _thisWeekStart.subtract(const Duration(days: 7));
+
+  String _formatDate(DateTime d) => '${_monthAbbr[d.month - 1]} ${d.day}';
+
+  String _formatWeekSpan(DateTime start) {
+    final end = start.add(const Duration(days: 6));
+    // Skip the repeated month when the span stays within one month.
+    if (start.month == end.month) {
+      return '${_monthAbbr[start.month - 1]} ${start.day}–${end.day}';
+    }
+    return '${_formatDate(start)} – ${_formatDate(end)}';
+  }
+
+  String get _thisWeekSpanLabel => _formatWeekSpan(_thisWeekStart);
+  String get _lastWeekSpanLabel => _formatWeekSpan(_lastWeekStart);
 
   @override
   Widget build(BuildContext context) {
@@ -373,23 +390,44 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            'Weekly Consumption',
-                            style: TextStyle(
-                              color: textDark,
-                              fontSize: 20,
-                              fontWeight: FontWeight.w800,
-                            ),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Weekly Consumption',
+                                      style: TextStyle(
+                                        color: textDark,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      _showComparison
+                                          ? 'This week vs. last week'
+                                          : 'Last 7 days',
+                                      style: TextStyle(
+                                        color: Colors.grey[500],
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              _buildChartModeToggle(),
+                            ],
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Last 7 days',
-                            style: TextStyle(
-                              color: Colors.grey[500],
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
+                          if (_showComparison) ...[
+                            const SizedBox(height: 12),
+                            _buildChartLegend(),
+                          ],
                           const SizedBox(height: 16),
                           SizedBox(
                             height: 180,
@@ -481,6 +519,80 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  // ── CHART TOGGLE: "This Week" / "Compare" pill switch ───────────────────
+  Widget _buildChartModeToggle() {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F5F7),
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildToggleOption(label: 'This Week', selected: !_showComparison),
+          _buildToggleOption(label: 'Compare', selected: _showComparison),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToggleOption({required String label, required bool selected}) {
+    return GestureDetector(
+      onTap: () => setState(() => _showComparison = label == 'Compare'),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? primaryOrange : Colors.transparent,
+          borderRadius: BorderRadius.circular(24),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.white : Colors.grey[600],
+            fontSize: 11.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── CHART LEGEND: shown only in Compare mode, labeled with each week's
+  // actual calendar span (e.g. "Aug 24–30") rather than generic text. ─────
+  Widget _buildChartLegend() {
+    return Row(
+      children: [
+        _legendDot(color: lastWeekBar, label: _lastWeekSpanLabel),
+        const SizedBox(width: 16),
+        _legendDot(color: primaryOrange, label: _thisWeekSpanLabel),
+      ],
+    );
+  }
+
+  Widget _legendDot({required Color color, required String label}) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.grey[600],
+            fontSize: 11.5,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 
@@ -881,10 +993,18 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
     );
   }
 
-  // ── WEEKLY BAR CHART (now backed by real fetched data) ──────────────────
+  // ── WEEKLY BAR CHART (backed by data from the weekly-comparison endpoint,
+  // with today's slot kept live via the Firebase listener). Renders either
+  // a single "This Week" series or, when _showComparison is on, grouped
+  // bars per day so last week and this week can be read side by side. ─────
   Widget _buildWeeklyBarChart() {
-    final maxVal =
+    final maxThisWeek =
         _thisWeek.isEmpty ? 0.0 : _thisWeek.reduce((a, b) => a > b ? a : b);
+    final maxLastWeek =
+        _lastWeek.isEmpty ? 0.0 : _lastWeek.reduce((a, b) => a > b ? a : b);
+    final maxVal = _showComparison
+        ? (maxThisWeek > maxLastWeek ? maxThisWeek : maxLastWeek)
+        : maxThisWeek;
     final maxY = maxVal == 0 ? 1.0 : maxVal * 1.3;
     final midY = maxY / 2;
 
@@ -908,8 +1028,14 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
             fitInsideHorizontally: true,
             fitInsideVertically: true,
             getTooltipItem: (group, groupIndex, rod, rodIndex) {
+              final day = _weekDayLabels[groupIndex];
+              // In comparison mode rodIndex 0 = last week, 1 = this week.
+              final seriesLabel = _showComparison
+                  ? (rodIndex == 0 ? 'Last Week' : 'This Week')
+                  : day;
+              final label = _showComparison ? '$day · $seriesLabel' : day;
               return BarTooltipItem(
-                '${_weekDayLabels[groupIndex]}\n${rod.toY.toStringAsFixed(2)} kWh',
+                '$label\n${rod.toY.toStringAsFixed(2)} kWh',
                 const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,
@@ -950,6 +1076,35 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
           ),
         ),
         barGroups: List.generate(_thisWeek.length, (i) {
+          if (_showComparison) {
+            // Two rods per day: last week (muted) then this week (orange),
+            // shown side by side so the two weeks are directly comparable.
+            return BarChartGroupData(
+              x: i,
+              barsSpace: 4,
+              barRods: [
+                BarChartRodData(
+                  toY: _lastWeek[i],
+                  color: lastWeekBar,
+                  width: 10,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(4),
+                    topRight: Radius.circular(4),
+                  ),
+                ),
+                BarChartRodData(
+                  toY: _thisWeek[i],
+                  color: primaryOrange,
+                  width: 10,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(4),
+                    topRight: Radius.circular(4),
+                  ),
+                ),
+              ],
+            );
+          }
+
           final isToday = i == _todayIndex;
           return BarChartGroupData(
             x: i,
@@ -962,7 +1117,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                   topLeft: Radius.circular(6),
                   topRight: Radius.circular(6),
                 ),
-              ), 
+              ),
             ],
           );
         }),

@@ -41,6 +41,51 @@ class _DashboardState extends State<Dashboard> {
   bool _isTestMode = false;
   String _nickname = 'My Home';
 
+  // --- PESO COST ESTIMATE ---
+  // Flat placeholder rate — used ONLY as a fallback for the "Est. Bill"
+  // figure while the real /bill/breakdown fetch (below) is in flight or
+  // hasn't resolved yet (e.g. first frame, or _displayedTotal is 0).
+  // Once that fetch resolves, its `total_energy_amount` fully overrides
+  // this local estimate — see the FutureBuilder around "Est. Bill" in
+  // build().
+  static const double _pesoRatePerKwh = 12.00;
+
+  double get _estimatedCost => _displayedTotal * _pesoRatePerKwh;
+
+  // ── In-memory cache for /bill/breakdown calls ───────────────────────────
+  // Keyed on kWh rounded to the nearest whole number so the "Est. Bill"
+  // figure (which reads this on every RTDB tick via _displayedTotal)
+  // doesn't hammer the backend every time the stream emits a near-identical
+  // value. This is a per-session cache tied to this State object — it's
+  // cleared when the Dashboard is disposed and recreated.
+  final Map<int, Future<Map<String, dynamic>>> _breakdownCache = {};
+
+  // ── FETCH: real bill breakdown from the backend's rate-schedule engine ──
+  // Returns the raw JSON map from GET /bill/breakdown?kwh=<kwh>. Same
+  // endpoint the Billing screen uses — this is the single source of truth
+  // for the "Est. Bill" figure instead of the flat _pesoRatePerKwh rate.
+  Future<Map<String, dynamic>> _fetchBillBreakdown(double kwh) async {
+    final url = Uri.parse(
+      '$_apiBaseUrl/bill/breakdown?kwh=${kwh.toStringAsFixed(2)}',
+    );
+    final response = await http.get(url).timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) {
+      throw Exception('HTTP ${response.statusCode}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> _fetchBillBreakdownCached(double kwh) {
+    final key = kwh.round();
+    return _breakdownCache.putIfAbsent(key, () => _fetchBillBreakdown(kwh));
+  }
+
+  // --- IOT CONNECTION WATCHDOG STATE ---
+  bool _isIotConnected = true;
+  DateTime? _lastLiveDataTime;
+  Timer? _connectionWatchdog;
+  static const Duration _connectionTimeout = Duration(seconds: 30);
+
   bool get _isTodaySelected {
     final now = DateTime.now();
     return _selectedDate.year == now.year &&
@@ -100,6 +145,8 @@ class _DashboardState extends State<Dashboard> {
       _setupFirebaseListener();
       _attachTodayHistoryListener();
     }
+
+    _startConnectionWatchdog();
   }
 
   void _onNicknameChanged() {
@@ -158,6 +205,8 @@ class _DashboardState extends State<Dashboard> {
         _cumulativeEnergy += 0.005;
 
         final timestamp = DateTime.now();
+        _lastLiveDataTime = timestamp;
+        if (!_isIotConnected) _isIotConnected = true;
 
         if (_wattsHistory.length >= maxDataPoints) _wattsHistory.removeAt(0);
         _wattsHistory.add(
@@ -205,6 +254,11 @@ class _DashboardState extends State<Dashboard> {
                 double.tryParse(data['voltage'].toString()) ?? 0.0;
 
             final timestamp = DateTime.now();
+
+            // Any reading, however small the visible change, means the
+            // device is alive — reset the connection watchdog clock.
+            _lastLiveDataTime = timestamp;
+            if (!_isIotConnected) _isIotConnected = true;
 
             // Round to match display precision so "no visible change"
             // actually means "no chart update" — prevents the chart from
@@ -454,11 +508,402 @@ class _DashboardState extends State<Dashboard> {
     return maxVal == 0 ? 1.0 : maxVal * 1.3;
   }
 
+  // --- IOT CONNECTION WATCHDOG ---
+  // Polls every few seconds; if no live reading has come in for
+  // `_connectionTimeout`, flags the device as disconnected and shows
+  // a modal telling the user to check/restart it. Only fires once per
+  // disconnection (won't spam the dialog while still offline).
+  void _startConnectionWatchdog() {
+    _connectionWatchdog?.cancel();
+    _connectionWatchdog = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted || _lastLiveDataTime == null) return;
+
+      final isStale =
+          DateTime.now().difference(_lastLiveDataTime!) > _connectionTimeout;
+
+      if (isStale && _isIotConnected) {
+        setState(() => _isIotConnected = false);
+        _showNoConnectionDialog();
+      }
+    });
+  }
+
+  void _showNoConnectionDialog() {
+    if (!mounted) return;
+
+    final now = DateTime.now();
+    final lastSeen = _lastLiveDataTime;
+    final downtime = lastSeen != null ? now.difference(lastSeen) : Duration.zero;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      barrierColor: Colors.black.withValues(alpha: 0.5),
+      isDismissible: false,
+      enableDrag: false,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Drag handle
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 20),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+
+              // Badge
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.red.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  'NO CONNECTION',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                    color: Colors.red[700],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Timestamp
+              Text(
+                DateFormat('MMM d, yyyy · HH:mm').format(now),
+                style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+              ),
+              const SizedBox(height: 12),
+
+              // Title
+              const Text(
+                'Device Went Offline',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.w800,
+                  height: 1.15,
+                  color: Colors.black,
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Stats row
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Last Reading',
+                            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            lastSeen != null
+                                ? DateFormat('h:mm a').format(lastSeen)
+                                : '—',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(width: 1, height: 32, color: Colors.grey[300]),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Downtime',
+                            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            lastSeen != null
+                                ? '${downtime.inMinutes}m ${downtime.inSeconds % 60}s'
+                                : '—',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              const Text(
+                'Would you like to restart the device?',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Primary action
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                    elevation: 0,
+                  ),
+                  onPressed: () {
+                    Navigator.of(sheetContext).pop();
+                    // TODO: hook this up to an actual remote-restart command
+                    // if/when the firmware supports one.
+                  },
+                  child: const Text(
+                    'Restart Device',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Secondary action
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    side: BorderSide(color: Colors.grey[300]!),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                  ),
+                  onPressed: () => Navigator.of(sheetContext).pop(),
+                  child: const Text(
+                    'Dismiss',
+                    style: TextStyle(
+                      color: Colors.black,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- METRICS EXPLAINER ---
+  // Bottom sheet that walks a household owner through what each number
+  // on the dashboard means and why it's worth paying attention to.
+  void _showMetricsInfoDialog() {
+    if (!mounted) return;
+
+    final metrics = <_MetricInfo>[
+      _MetricInfo(
+        icon: Icons.bolt_rounded,
+        title: 'Power (W)',
+        description:
+            'How much electricity your home is drawing right now, in watts. '
+            'A sudden jump usually means a big appliance (aircon, water '
+            'heater, iron) just switched on — useful for spotting what\'s '
+            'actually running up your bill in real time.',
+      ),
+      _MetricInfo(
+        icon: Icons.electric_bolt_rounded,
+        title: 'Current (A)',
+        description:
+            'The amount of electric current flowing through your wiring, '
+            'in amps. Keeping this within your circuit\'s rated capacity '
+            'matters for safety — sustained high current is a common cause '
+            'of overheating wires and tripped breakers.',
+      ),
+      _MetricInfo(
+        icon: Icons.flash_on_rounded,
+        title: 'Voltage (V)',
+        description:
+            'The strength of the electrical supply coming into your home. '
+            'Philippine households normally run close to 220V — voltage '
+            'that drifts far from that can signal a utility supply problem '
+            'or a wiring issue, and can shorten the life of your appliances.',
+      ),
+      _MetricInfo(
+        icon: Icons.graphic_eq_rounded,
+        title: 'Frequency (Hz)',
+        description:
+            'How steadily the power supply is oscillating (normally 60Hz '
+            'locally). It\'s mostly a grid-health indicator — large swings '
+            'are rare, but can point to instability from the utility side '
+            'rather than anything inside your home.',
+      ),
+      _MetricInfo(
+        icon: Icons.speed_rounded,
+        title: 'Power Factor (PF)',
+        description:
+            'How efficiently your appliances are using the electricity '
+            'supplied to them, from 0 to 1. A lower PF means more power is '
+            'being wasted rather than doing useful work — often a sign of '
+            'older motors or poorly matched appliances.',
+      ),
+      _MetricInfo(
+        icon: Icons.show_chart_rounded,
+        title: 'Total Used (kWh)',
+        description:
+            'Your running electricity consumption for the day, in '
+            'kilowatt-hours — the same unit your utility bills you in. '
+            'This is the number that most directly drives your monthly bill.',
+      ),
+      _MetricInfo(
+        icon: Icons.payments_rounded,
+        title: 'Est. Bill (₱)',
+        description:
+            'A peso estimate of today\'s cost so far, computed from your '
+            'kWh usage against the current Meralco rate schedule — the same '
+            'engine used for the detailed bill breakdown. It gives you an '
+            'early sense of where your bill is headed, before the actual '
+            'reading arrives at month\'s end.',
+      ),
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      barrierColor: Colors.black.withValues(alpha: 0.5),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) => DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        minChildSize: 0.4,
+        maxChildSize: 0.92,
+        expand: false,
+        builder: (context, scrollController) => Padding(
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Drag handle
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 20),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+
+              const Text(
+                'Understanding Your Metrics',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'What each reading means for your household',
+                style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+              ),
+              const SizedBox(height: 8),
+
+              Expanded(
+                child: ListView.separated(
+                  controller: scrollController,
+                  itemCount: metrics.length,
+                  separatorBuilder: (_, __) => Divider(
+                    height: 32,
+                    thickness: 1,
+                    color: Colors.grey[200],
+                  ),
+                  itemBuilder: (context, index) =>
+                      _buildMetricInfoRow(metrics[index]),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMetricInfoRow(_MetricInfo metric) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(metric.icon, color: primaryOrange, size: 18),
+            const SizedBox(width: 8),
+            Text(
+              metric.title,
+              style: const TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: Colors.black,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          metric.description,
+          style: TextStyle(
+            fontSize: 13,
+            height: 1.5,
+            color: Colors.grey[600],
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   void dispose() {
     _dbSubscription?.cancel();
     _historySubscription?.cancel();
     _demoTimer?.cancel();
+    _connectionWatchdog?.cancel();
     testModeNotifier.removeListener(_onTestModeChanged);
     nicknameNotifier.removeListener(_onNicknameChanged);
     super.dispose();
@@ -629,46 +1074,115 @@ class _DashboardState extends State<Dashboard> {
                             ],
                           ),
                           const SizedBox(height: 16),
-                          Text(
-                            _nickname,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.white.withValues(alpha: 0.75),
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.3,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            _isTodaySelected ? 'Total Used' : 'Total for This Day',
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Colors.white.withValues(alpha: 0.9),
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
                           Row(
-                            crossAxisAlignment: CrossAxisAlignment.baseline,
-                            textBaseline: TextBaseline.alphabetic,
+                            crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
-                              Text(
-                                _formatWithCommas(_displayedTotal),
-                                style: const TextStyle(
-                                  fontSize: 36,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: -1,
-                                  color: Colors.white,
+                              // --- Left: nickname + kWh total ---
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _nickname,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.white.withValues(alpha: 0.75),
+                                        fontWeight: FontWeight.w600,
+                                        letterSpacing: 0.3,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      _isTodaySelected
+                                          ? 'Total Used'
+                                          : 'Total for This Day',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        color: Colors.white.withValues(alpha: 0.9),
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                                      textBaseline: TextBaseline.alphabetic,
+                                      children: [
+                                        Text(
+                                          _formatWithCommas(_displayedTotal),
+                                          style: const TextStyle(
+                                            fontSize: 36,
+                                            fontWeight: FontWeight.w700,
+                                            letterSpacing: -1,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        const Text(
+                                          'kWh',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
                               ),
-                              const SizedBox(width: 6),
-                              const Text(
-                                'kWh',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w500,
-                                ),
+
+                              const SizedBox(width: 12),
+
+                              // --- Right: estimated bill ───────────────────
+                              // Now sourced from GET /bill/breakdown, NOT the
+                              // flat _pesoRatePerKwh placeholder rate. The
+                              // FutureBuilder fetches (via the shared cache)
+                              // the same backend rate-schedule computation
+                              // the Billing screen's breakdown modal uses,
+                              // keyed off the live `_displayedTotal` (today's
+                              // cumulative kWh, or the selected past day's
+                              // total). While that fetch is in flight (or
+                              // before there's any usage yet), it falls back
+                              // to the local flat-rate `_estimatedCost` so
+                              // the figure never flashes ₱0.00.
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text(
+                                    'Est. Bill',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.white.withValues(alpha: 0.75),
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.3,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  FutureBuilder<Map<String, dynamic>>(
+                                    future: _displayedTotal > 0
+                                        ? _fetchBillBreakdownCached(
+                                            _displayedTotal,
+                                          )
+                                        : null,
+                                    builder: (context, billSnapshot) {
+                                      final totalEnergyAmount =
+                                          (billSnapshot.data?['total_energy_amount']
+                                                  as num?)
+                                              ?.toDouble();
+                                      final double estimatedBillPeso =
+                                          totalEnergyAmount ?? _estimatedCost;
+                                      return Text(
+                                        '₱${_formatWithCommas(estimatedBillPeso)}',
+                                        style: const TextStyle(
+                                          fontSize: 30,
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: -0.5,
+                                          color: Colors.white,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
                               ),
                             ],
                           ),
@@ -993,18 +1507,53 @@ class _DashboardState extends State<Dashboard> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text(
-                        'LIVE FEED',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.5,
-                        ),
+                      Row(
+                        children: [
+                          const Text(
+                            'LIVE FEED',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          GestureDetector(
+                            onTap: _showMetricsInfoDialog,
+                            child: Icon(
+                              Icons.info_outline_rounded,
+                              size: 18,
+                              color: Colors.grey[500],
+                            ),
+                          ),
+                        ],
                       ),
                       Icon(Icons.menu, color: Colors.grey[800]),
                     ],
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 8),
+
+                  // --- TEMP/DEBUG: manual trigger for the no-connection modal ---
+                  // Remove (or hide behind a debug flag) once real device
+                  // testing confirms the watchdog timeout works on its own.
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: _showNoConnectionDialog,
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      icon: Icon(Icons.bug_report, size: 14, color: Colors.grey[500]),
+                      label: Text(
+                        'Test: No Connection',
+                        style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
 
                   _buildLiveFeedCard(
                     title: 'Power',
@@ -1313,4 +1862,17 @@ class _DashboardState extends State<Dashboard> {
       ),
     );
   }
+}
+
+// Simple data holder for a single row in the metrics-explainer sheet.
+class _MetricInfo {
+  final IconData icon;
+  final String title;
+  final String description;
+
+  const _MetricInfo({
+    required this.icon,
+    required this.title,
+    required this.description,
+  });
 }
