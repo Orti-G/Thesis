@@ -79,6 +79,11 @@ last_reading_ts      = None   # updated on every /reading POST
 SYNC_TIMEOUT_SECONDS = 60     # seconds before sync = false
 last_sync_state = True        # tracks previous sync state to detect transition
 
+# ── Meralco Rates ──────────────────────────────────────────────────────────────
+MERALCO_RATES = None  # loaded once on startup from Firebase
+
+#---- Tracking current kwh ------------
+today_total_kwh = 0.0
 
 def compute_billing_cutoff() -> str:
     """
@@ -162,8 +167,15 @@ def save_billing_state(cutoff_date: str, baseline_kwh: float, billing_computed: 
 # ── Startup ────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
-    global BILLING_BASELINE_KWH, BILLING_CUTOFF_DATE, BILLING_COMPUTED
+    global BILLING_BASELINE_KWH, BILLING_CUTOFF_DATE, BILLING_COMPUTED, today_total_kwh
     global last_pushed_hour, last_pushed_date
+    global MERALCO_RATES
+
+    # Load Meralco rates once from Firebase
+    MERALCO_RATES = firebase_db.reference("/meralco_rates").get()
+
+    # Push today's running total
+    today_total_kwh = get_today_total_kwh()
 
     # Set sync = false immediately on startup
     firebase_db.reference("/sync").set(False)
@@ -310,6 +322,20 @@ def get_hourly_kwh_by_date(date_str: str):
                 (date_str,)
             )
             return cur.fetchall()
+        
+def get_today_total_kwh() -> float:
+    """Return total interval_kwh for today so far."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(ROUND(SUM(interval_kwh)::numeric, 4), 0)
+                FROM readings
+                WHERE DATE(timestamp) = (now() AT TIME ZONE 'Asia/Manila')::date
+                """
+            )
+            row = cur.fetchone()
+    return float(row[0]) if row else 0.0
 
 def adjust_cumul(raw_cumul: float) -> float:
     """
@@ -480,13 +506,14 @@ def push_hourly_history(now: datetime):
     - Previous hour → pushed ONCE when hour changes (final value)
     - Midnight reset → clears /history/today/hourly and updates date
     """
-    global last_pushed_hour, last_pushed_date
+    global last_pushed_hour, last_pushed_date, today_total_kwh
 
     today        = now.strftime("%Y-%m-%d")
     current_hour = now.hour
 
     # Midnight reset
     if today != last_pushed_date:
+        today_total_kwh = 0.0
         firebase_db.reference("/history/today/hourly").delete()
         firebase_db.reference("/history/today/date").set(today)
         last_pushed_date = today
@@ -536,7 +563,7 @@ def flush_buffer():
     Average the 5-min buffer, save to PostgreSQL, run anomaly detection.
     Called automatically when buffer covers >= 5 minutes.
     """
-    global reading_buffer
+    global reading_buffer, today_total_kwh
 
     if len(reading_buffer) < 2:
         reading_buffer = []
@@ -551,6 +578,7 @@ def flush_buffer():
     avg_current  = round(float(np.mean(currents)), 3)
     avg_power    = round(float(np.mean(powers)),   2)
     interval_kwh = round(float(cumuls[-1] - cumuls[0]), 4)
+    today_total_kwh = round(today_total_kwh + interval_kwh, 4)
     window_ts    = datetime.now(PH_TZ).replace(tzinfo=None)
 
     # cumul_kwh — continue from last DB value if ESP32 reset detected
@@ -625,6 +653,8 @@ def flush_buffer():
 
     # Push today's hourly history to Firebase (Option C)
     push_hourly_history(datetime.now(PH_TZ))
+
+    firebase_db.reference("/history/today/total_kwh").set(today_total_kwh)
 
     reading_buffer = []
     return anomaly_result
@@ -712,7 +742,7 @@ def post_reading(data: Reading):
     3. Buffers for 5-min averaging
     4. Every 5 minutes: flush → PostgreSQL → anomaly → Firebase history
     """
-    global reading_buffer
+    global reading_buffer, MERALCO_RATES
 
     now            = datetime.now(PH_TZ)
     last_reading_ts = now   # ← update on every reading
@@ -723,9 +753,8 @@ def post_reading(data: Reading):
 
     bracket = "0-200" if adjusted_cumul <= 200 else "201-300" if adjusted_cumul <= 300 else "301-400" if adjusted_cumul <= 400 else "over-400"
 
-    bracket_ref= firebase_db.reference("/meralco_rates").get()
-    rate_per_kwh = bracket_ref["brackets"][bracket]
-    fixed_charge = bracket_ref["fixed_charge"]
+    rate_per_kwh = MERALCO_RATES["brackets"][bracket]
+    fixed_charge = MERALCO_RATES["fixed_charge"]
 
     estimated_cost = adjusted_cumul * rate_per_kwh + fixed_charge
 
@@ -763,6 +792,13 @@ def post_reading(data: Reading):
         "anomaly":        anomaly_result,
     }
 
+
+# ── reset rates ──────────────────────────────────────────────────────────
+@app.post("/refresh-rates")
+def refresh_rates():
+    global MERALCO_RATES
+    MERALCO_RATES = firebase_db.reference("/meralco_rates").get()
+    return {"status": "ok", "message": "Meralco rates refreshed"}
 
 # ── Forecast Endpoint ──────────────────────────────────────────────────────────
 @app.post("/forecast")
@@ -940,11 +976,17 @@ def get_weekly_comparison():
 # ── Historical Data Endpoint ───────────────────────────────────────────────────
 @app.get("/history/{date_str}")
 def get_history(date_str: str):
+    global MERALCO_RATES
     """
     Returns hourly aggregated interval_kwh for any past date.
     Queries PostgreSQL directly.
     date_str format: YYYY-MM-DD
     """
+
+    bracket = "0-200"
+    rate_per_kwh = MERALCO_RATES["brackets"][bracket]
+    fixed_charge = MERALCO_RATES["fixed_charge"]
+    
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
@@ -971,11 +1013,13 @@ def get_history(date_str: str):
     ]
 
     daily_total = round(sum(d["total_kwh"] for d in data), 4)
+    estimated_cost = daily_total * rate_per_kwh + fixed_charge
 
     return {
         "status":          "ok",
         "date":            date_str,
         "daily_total_kwh": daily_total,
+        "estimated_cost":  estimated_cost,
         "data":            data
     }
 
