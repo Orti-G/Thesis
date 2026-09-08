@@ -33,6 +33,9 @@ class _DashboardState extends State<Dashboard> {
 
   DateTime _selectedDate = DateTime.now();
   Map<int, double> _hourlyKwh = {}; // hour (0-23) -> total kWh for that hour
+  // Day total straight from Firebase `history/today/total_kwh` (sibling of
+  // `hourly`) — used for the in-chart "Total for This Day" label.
+  double? _todayTotalKwh;
   bool _isLoadingHistory = false;
   String? _historyError;
   StreamSubscription<DatabaseEvent>? _historySubscription;
@@ -42,49 +45,25 @@ class _DashboardState extends State<Dashboard> {
   String _nickname = 'My Home';
 
   // --- PESO COST ESTIMATE ---
-  // Flat placeholder rate — used ONLY as a fallback for the "Est. Bill"
-  // figure while the real /bill/breakdown fetch (below) is in flight or
-  // hasn't resolved yet (e.g. first frame, or _displayedTotal is 0).
-  // Once that fetch resolves, its `total_energy_amount` fully overrides
-  // this local estimate — see the FutureBuilder around "Est. Bill" in
-  // build().
-  static const double _pesoRatePerKwh = 12.00;
+  // Sourced directly from the `estimated_cost` field on `live_reading` —
+  // the backend/device computes this against the real Meralco rate
+  // schedule and pushes it alongside the other telemetry, so there's no
+  // separate /bill/breakdown fetch to make here.
+  double _estimatedCostFromDevice = 0.0;
 
-  double get _estimatedCost => _displayedTotal * _pesoRatePerKwh;
+  // Estimated cost for a past (non-today) selected day, pulled from
+  // `estimated_cost` in the GET /history/{date} response body — separate
+  // from the live device-pushed figure above, which only applies to today.
+  double? _pastDayEstimatedCost;
 
-  // ── In-memory cache for /bill/breakdown calls ───────────────────────────
-  // Keyed on kWh rounded to the nearest whole number so the "Est. Bill"
-  // figure (which reads this on every RTDB tick via _displayedTotal)
-  // doesn't hammer the backend every time the stream emits a near-identical
-  // value. This is a per-session cache tied to this State object — it's
-  // cleared when the Dashboard is disposed and recreated.
-  final Map<int, Future<Map<String, dynamic>>> _breakdownCache = {};
-
-  // ── FETCH: real bill breakdown from the backend's rate-schedule engine ──
-  // Returns the raw JSON map from GET /bill/breakdown?kwh=<kwh>. Same
-  // endpoint the Billing screen uses — this is the single source of truth
-  // for the "Est. Bill" figure instead of the flat _pesoRatePerKwh rate.
-  Future<Map<String, dynamic>> _fetchBillBreakdown(double kwh) async {
-    final url = Uri.parse(
-      '$_apiBaseUrl/bill/breakdown?kwh=${kwh.toStringAsFixed(2)}',
-    );
-    final response = await http.get(url).timeout(const Duration(seconds: 10));
-    if (response.statusCode != 200) {
-      throw Exception('HTTP ${response.statusCode}');
-    }
-    return jsonDecode(response.body) as Map<String, dynamic>;
-  }
-
-  Future<Map<String, dynamic>> _fetchBillBreakdownCached(double kwh) {
-    final key = kwh.round();
-    return _breakdownCache.putIfAbsent(key, () => _fetchBillBreakdown(kwh));
-  }
-
-  // --- IOT CONNECTION WATCHDOG STATE ---
+  // --- IOT CONNECTION STATE (driven by the real-time `sync` RTDB field) ---
+  // `sync` lives at the root of the database. `false` means the device has
+  // told the backend it's offline / lost connection; `true` (or any other
+  // truthy value) means it's connected. This replaces the old
+  // timeout-guessing watchdog with the device's own reported state.
+  StreamSubscription<DatabaseEvent>? _syncSubscription;
   bool _isIotConnected = true;
   DateTime? _lastLiveDataTime;
-  Timer? _connectionWatchdog;
-  static const Duration _connectionTimeout = Duration(seconds: 30);
 
   bool get _isTodaySelected {
     final now = DateTime.now();
@@ -144,9 +123,8 @@ class _DashboardState extends State<Dashboard> {
     } else {
       _setupFirebaseListener();
       _attachTodayHistoryListener();
+      _setupSyncListener();
     }
-
-    _startConnectionWatchdog();
   }
 
   void _onNicknameChanged() {
@@ -164,11 +142,14 @@ class _DashboardState extends State<Dashboard> {
     if (_isTestMode) {
       _dbSubscription?.cancel();
       _historySubscription?.cancel();
+      _syncSubscription?.cancel();
+      setState(() => _isIotConnected = true);
       _startDemoMode();
     } else {
       _demoTimer?.cancel();
       _setupFirebaseListener();
       _attachTodayHistoryListener();
+      _setupSyncListener();
     }
   }
 
@@ -189,6 +170,7 @@ class _DashboardState extends State<Dashboard> {
       _historyError = null;
       _lastHistoryUpdateTime = DateTime.now();
       _cumulativeEnergy = 145.0;
+      _estimatedCostFromDevice = _cumulativeEnergy * 12.0;
     });
 
     _demoTimer?.cancel();
@@ -203,10 +185,10 @@ class _DashboardState extends State<Dashboard> {
         _frequency = 59.8 + rand.nextDouble() * 0.4;
         _powerFactor = 0.9 + rand.nextDouble() * 0.1;
         _cumulativeEnergy += 0.005;
+        _estimatedCostFromDevice = _cumulativeEnergy * 12.0;
 
         final timestamp = DateTime.now();
         _lastLiveDataTime = timestamp;
-        if (!_isIotConnected) _isIotConnected = true;
 
         if (_wattsHistory.length >= maxDataPoints) _wattsHistory.removeAt(0);
         _wattsHistory.add(
@@ -252,13 +234,16 @@ class _DashboardState extends State<Dashboard> {
                 double.tryParse(data['power_factor'].toString()) ?? 0.0;
             _currentVoltage =
                 double.tryParse(data['voltage'].toString()) ?? 0.0;
+            _estimatedCostFromDevice =
+                double.tryParse(data['estimated_cost'].toString()) ??
+                    _estimatedCostFromDevice;
 
             final timestamp = DateTime.now();
 
-            // Any reading, however small the visible change, means the
-            // device is alive — reset the connection watchdog clock.
+            // Track the most recent reading time for display in the
+            // "no connection" sheet. Actual connection state now comes
+            // from the `sync` listener below, not from staleness here.
             _lastLiveDataTime = timestamp;
-            if (!_isIotConnected) _isIotConnected = true;
 
             // Round to match display precision so "no visible change"
             // actually means "no chart update" — prevents the chart from
@@ -336,6 +321,7 @@ class _DashboardState extends State<Dashboard> {
     setState(() {
       _isLoadingHistory = true;
       _historyError = null;
+      _pastDayEstimatedCost = null;
     });
 
     final ref = FirebaseDatabase.instance.ref('history/today');
@@ -344,6 +330,7 @@ class _DashboardState extends State<Dashboard> {
       if (event.snapshot.value == null) {
         setState(() {
           _hourlyKwh = {};
+          _todayTotalKwh = null;
           _isLoadingHistory = false;
         });
         return;
@@ -373,8 +360,11 @@ class _DashboardState extends State<Dashboard> {
           }
         }
 
+        final totalKwhRaw = data['total_kwh'];
+
         setState(() {
           _hourlyKwh = parsed;
+          _todayTotalKwh = double.tryParse(totalKwhRaw.toString());
           _isLoadingHistory = false;
           _historyError = null;
           _lastHistoryUpdateTime = DateTime.now();
@@ -420,12 +410,14 @@ class _DashboardState extends State<Dashboard> {
 
         setState(() {
           _hourlyKwh = parsed;
+          _pastDayEstimatedCost = (body['estimated_cost'] as num?)?.toDouble();
           _isLoadingHistory = false;
         });
       } else {
         // e.g. 404 "No data found for {date}"
         setState(() {
           _hourlyKwh = {};
+          _pastDayEstimatedCost = null;
           _isLoadingHistory = false;
           _historyError = 'No data for $dateStr';
         });
@@ -435,6 +427,7 @@ class _DashboardState extends State<Dashboard> {
       if (!mounted) return;
       setState(() {
         _isLoadingHistory = false;
+        _pastDayEstimatedCost = null;
         _historyError = 'Failed to load history';
       });
     }
@@ -502,30 +495,162 @@ class _DashboardState extends State<Dashboard> {
     return hours.map((h) => FlSpot(h.toDouble(), _hourlyKwh[h]!)).toList();
   }
 
+  // The single line style shared by the chart itself and its permanent
+  // "current point" tooltip indicator below, so both stay in sync.
+  LineChartBarData get _hourlyLineBar {
+    final spots = _generateHourlySpots();
+    return LineChartBarData(
+      spots: spots,
+      isCurved: false,
+      color: primaryOrange,
+      barWidth: 2.5,
+      isStrokeCapRound: true,
+      dotData: FlDotData(
+        show: true,
+        getDotPainter: (spot, percent, bar, index) => FlDotCirclePainter(
+          radius: 2,
+          color: bgColor,
+          strokeWidth: 1.5,
+          strokeColor: primaryOrange,
+        ),
+      ),
+      belowBarData: BarAreaData(
+        show: true,
+        gradient: LinearGradient(
+          colors: [
+            primaryOrange.withValues(alpha: 0.25),
+            primaryOrange.withValues(alpha: 0.0),
+          ],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
+    );
+  }
+
+  // Bottom-axis tick (0/6/12/18/24) closest to the current hour, so that
+  // tick can be highlighted in orange like the reference design — only
+  // meaningful while viewing today.
+  int get _nearestHourTick {
+    final hour = DateTime.now().hour;
+    final nearest = ((hour + 3) ~/ 6) * 6;
+    return nearest.clamp(0, 24);
+  }
+
+  Widget _buildLightStatCard({
+    required String label,
+    required String valueText,
+    required String unit,
+    String prefix = '',
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey[500],
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.4,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              if (prefix.isNotEmpty)
+                Text(
+                  prefix,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: primaryOrange,
+                  ),
+                ),
+              Text(
+                valueText,
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w800,
+                  color: Colors.black,
+                  letterSpacing: -0.5,
+                ),
+              ),
+              if (unit.isNotEmpty) ...[
+                const SizedBox(width: 4),
+                Text(
+                  unit,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey[500],
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   double _getHourlyMaxY() {
     if (_hourlyKwh.isEmpty) return 1.0;
     final maxVal = _hourlyKwh.values.reduce((a, b) => a > b ? a : b);
     return maxVal == 0 ? 1.0 : maxVal * 1.3;
   }
 
-  // --- IOT CONNECTION WATCHDOG ---
-  // Polls every few seconds; if no live reading has come in for
-  // `_connectionTimeout`, flags the device as disconnected and shows
-  // a modal telling the user to check/restart it. Only fires once per
-  // disconnection (won't spam the dialog while still offline).
-  void _startConnectionWatchdog() {
-    _connectionWatchdog?.cancel();
-    _connectionWatchdog = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (!mounted || _lastLiveDataTime == null) return;
+  // --- IOT CONNECTION: real-time listener on the root-level `sync` field ---
+  // `sync == false` → device reported it's offline, show the disconnected
+  // state and surface the "device went offline" sheet once per drop.
+  // `sync == true` (or any other truthy value) → device is connected.
+  void _setupSyncListener() {
+    _syncSubscription?.cancel();
 
-      final isStale =
-          DateTime.now().difference(_lastLiveDataTime!) > _connectionTimeout;
+    final ref = FirebaseDatabase.instance.ref('sync');
+    _syncSubscription = ref.onValue.listen((event) {
+      if (!mounted) return;
 
-      if (isStale && _isIotConnected) {
-        setState(() => _isIotConnected = false);
+      final bool isConnected = _parseSyncValue(event.snapshot.value);
+      final bool wasConnected = _isIotConnected;
+
+      setState(() => _isIotConnected = isConnected);
+
+      // Only pop the sheet on the transition into "disconnected" so it
+      // doesn't spam the user while `sync` stays false.
+      if (!isConnected && wasConnected) {
         _showNoConnectionDialog();
       }
     });
+  }
+
+  // Treats missing/null data as disconnected, and accepts bool, numeric,
+  // or string ("true"/"1") representations of `sync` just in case the
+  // backend writes it in a slightly different shape.
+  bool _parseSyncValue(Object? value) {
+    if (value == null) return false;
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      return normalized == 'true' || normalized == '1';
+    }
+    return false;
   }
 
   void _showNoConnectionDialog() {
@@ -793,11 +918,10 @@ class _DashboardState extends State<Dashboard> {
         icon: Icons.payments_rounded,
         title: 'Est. Bill (₱)',
         description:
-            'A peso estimate of today\'s cost so far, computed from your '
-            'kWh usage against the current Meralco rate schedule — the same '
-            'engine used for the detailed bill breakdown. It gives you an '
-            'early sense of where your bill is headed, before the actual '
-            'reading arrives at month\'s end.',
+            'A peso estimate of today\'s cost so far, reported directly by '
+            'the device against the current Meralco rate schedule. It '
+            'gives you an early sense of where your bill is headed, before '
+            'the actual reading arrives at month\'s end.',
       ),
     ];
 
@@ -902,8 +1026,8 @@ class _DashboardState extends State<Dashboard> {
   void dispose() {
     _dbSubscription?.cancel();
     _historySubscription?.cancel();
+    _syncSubscription?.cancel();
     _demoTimer?.cancel();
-    _connectionWatchdog?.cancel();
     testModeNotifier.removeListener(_onTestModeChanged);
     nicknameNotifier.removeListener(_onNicknameChanged);
     super.dispose();
@@ -975,11 +1099,7 @@ class _DashboardState extends State<Dashboard> {
 
   @override
   Widget build(BuildContext context) {
-    // Get total screen height for our 70% calculation
-    final screenHeight = MediaQuery.of(context).size.height;
-
     final double chartMaxY = _getHourlyMaxY();
-    final double chartMidY = chartMaxY / 2;
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -987,509 +1107,419 @@ class _DashboardState extends State<Dashboard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // --- HEADER SECTION ---
+            // --- HEADER SECTION (solid orange band) ---
             Container(
-              height: screenHeight * 0.70, // Takes up 70% of the screen
               width: double.infinity,
-              color: topCardColor, // The Big Orange Section
+              decoration: BoxDecoration(
+                color: topCardColor,
+                borderRadius: const BorderRadius.only(
+                  bottomLeft: Radius.circular(28),
+                  bottomRight: Radius.circular(28),
+                ),
+              ),
               child: SafeArea(
                 bottom: false,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header text
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 10),
-                      child: Column(
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              // Date navigator (placeholder for hourly history browsing)
-                              Row(
-                                children: [
-                                  GestureDetector(
-                                    onTap: () => _changeDate(-1),
-                                    child: const Icon(
-                                      Icons.chevron_left,
-                                      color: Colors.white,
-                                      size: 22,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 2),
-                                  GestureDetector(
-                                    onTap: () => _pickDate(context),
-                                    child: Text(
-                                      _isTodaySelected
-                                          ? 'Today'
-                                          : DateFormat(
-                                              'EEE MMM d',
-                                            ).format(_selectedDate),
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 2),
-                                  GestureDetector(
-                                    onTap: _isTodaySelected
-                                        ? null
-                                        : () => _changeDate(1),
-                                    child: Icon(
-                                      Icons.chevron_right,
-                                      color: Colors.white.withValues(
-                                        alpha: _isTodaySelected ? 0.3 : 1.0,
-                                      ),
-                                      size: 22,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              if (_isTodaySelected)
-                                Row(
-                                  children: [
-                                    Container(
-                                      width: 6,
-                                      height: 6,
-                                      decoration: const BoxDecoration(
-                                        color: Colors.white,
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      _isTestMode ? 'DEMO' : 'LIVE',
-                                      style: const TextStyle(
-                                        fontSize: 11,
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.5,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                            ],
+                          Text(
+                            _nickname,
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              letterSpacing: -0.3,
+                            ),
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 2),
                           Row(
-                            crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
-                              // --- Left: nickname + kWh total ---
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      _nickname,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.white.withValues(alpha: 0.75),
-                                        fontWeight: FontWeight.w600,
-                                        letterSpacing: 0.3,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      _isTodaySelected
-                                          ? 'Total Used'
-                                          : 'Total for This Day',
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        color: Colors.white.withValues(alpha: 0.9),
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Row(
-                                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                                      textBaseline: TextBaseline.alphabetic,
-                                      children: [
-                                        Text(
-                                          _formatWithCommas(_displayedTotal),
-                                          style: const TextStyle(
-                                            fontSize: 36,
-                                            fontWeight: FontWeight.w700,
-                                            letterSpacing: -1,
-                                            color: Colors.white,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 6),
-                                        const Text(
-                                          'kWh',
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
+                              if (!_isTestMode)
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  margin: const EdgeInsets.only(right: 6),
+                                  decoration: BoxDecoration(
+                                    color: _isIotConnected
+                                        ? Colors.greenAccent
+                                        : Colors.white54,
+                                    shape: BoxShape.circle,
+                                  ),
                                 ),
-                              ),
-
-                              const SizedBox(width: 12),
-
-                              // --- Right: estimated bill ───────────────────
-                              // Now sourced from GET /bill/breakdown, NOT the
-                              // flat _pesoRatePerKwh placeholder rate. The
-                              // FutureBuilder fetches (via the shared cache)
-                              // the same backend rate-schedule computation
-                              // the Billing screen's breakdown modal uses,
-                              // keyed off the live `_displayedTotal` (today's
-                              // cumulative kWh, or the selected past day's
-                              // total). While that fetch is in flight (or
-                              // before there's any usage yet), it falls back
-                              // to the local flat-rate `_estimatedCost` so
-                              // the figure never flashes ₱0.00.
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text(
-                                    'Est. Bill',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Colors.white.withValues(alpha: 0.75),
-                                      fontWeight: FontWeight.w600,
-                                      letterSpacing: 0.3,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  FutureBuilder<Map<String, dynamic>>(
-                                    future: _displayedTotal > 0
-                                        ? _fetchBillBreakdownCached(
-                                            _displayedTotal,
-                                          )
-                                        : null,
-                                    builder: (context, billSnapshot) {
-                                      final totalEnergyAmount =
-                                          (billSnapshot.data?['total_energy_amount']
-                                                  as num?)
-                                              ?.toDouble();
-                                      final double estimatedBillPeso =
-                                          totalEnergyAmount ?? _estimatedCost;
-                                      return Text(
-                                        '₱${_formatWithCommas(estimatedBillPeso)}',
-                                        style: const TextStyle(
-                                          fontSize: 30,
-                                          fontWeight: FontWeight.w800,
-                                          letterSpacing: -0.5,
-                                          color: Colors.white,
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
+                              Text(
+                                _isTestMode ? 'Demo mode' : 'Welcome back',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: Colors.white.withValues(alpha: 0.85),
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ],
                           ),
                         ],
                       ),
-                    ),
-                    const SizedBox(height: 10),
-
-                    // DAILY CHART WITH SUBTLE GLOW EFFECT
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8.0),
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: Padding(
-                            padding: const EdgeInsets.only(
-                              top: 24.0,
-                              bottom: 0.0,
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: cardColor,
+                          borderRadius: BorderRadius.circular(30),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.18),
+                              blurRadius: 14,
+                              offset: const Offset(0, 5),
                             ),
-                            child: Stack(
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            GestureDetector(
+                              onTap: () => _changeDate(-1),
+                              child: Icon(
+                                Icons.chevron_left,
+                                size: 18,
+                                color: Colors.grey[700],
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: () => _pickDate(context),
+                              child: Text(
+                                _isTodaySelected
+                                    ? 'Today'
+                                    : DateFormat(
+                                        'EEE MMM d',
+                                      ).format(_selectedDate),
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: primaryOrange,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: _isTodaySelected
+                                  ? null
+                                  : () => _changeDate(1),
+                              child: Icon(
+                                Icons.chevron_right,
+                                size: 18,
+                                color: Colors.grey.withValues(
+                                  alpha: _isTodaySelected ? 0.3 : 1.0,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // --- Stat cards + Hourly Distribution (still on the orange band) ---
+                Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // --- Stat cards: Total Used / Est. Total Bill ---
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: _buildLightStatCard(
+                          label: 'TOTAL USED',
+                          valueText: _formatWithCommas(_displayedTotal),
+                          unit: 'kWh',
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _buildLightStatCard(
+                          label: _isTodaySelected
+                              ? 'EST. TOTAL BILL'
+                              : 'BILL FOR THIS DAY',
+                          valueText: _formatWithCommas(
+                            _isTodaySelected
+                                ? _estimatedCostFromDevice
+                                : (_pastDayEstimatedCost ?? 0.0),
+                          ),
+                          unit: '',
+                          prefix: '₱',
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+
+                  // --- Hourly Distribution card (simplified chart) ---
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
+                    decoration: BoxDecoration(
+                      color: cardColor,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.15),
+                          blurRadius: 18,
+                          offset: const Offset(0, 6),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                LineChart(
-                                  LineChartData(
-                                    minX: -2,
-                                    maxX: 26,
-                                    minY: 0,
-                                    maxY: chartMaxY,
-                                    gridData: FlGridData(
-                                      show: true,
-                                      drawVerticalLine: true,
-                                      horizontalInterval: chartMidY == 0
-                                          ? 1
-                                          : chartMidY,
-                                      verticalInterval: 6,
-                                      getDrawingHorizontalLine: (value) =>
-                                          FlLine(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.2,
-                                            ),
-                                            strokeWidth: 1,
-                                          ),
-                                      getDrawingVerticalLine: (value) => FlLine(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.2,
-                                        ),
-                                        strokeWidth: 1,
+                                Text(
+                                  'HOURLY DISTRIBUTION',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.grey[500],
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 0.4,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Row(
+                                  children: [
+                                    Text(
+                                      _isTodaySelected
+                                          ? "Today's Total: "
+                                          : 'Total: ',
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        color: Colors.black,
+                                        fontWeight: FontWeight.w600,
                                       ),
                                     ),
-                                    borderData: FlBorderData(show: false),
-
-                                    // --- Tooltip: shows hour (12-hr + AM/PM) and kWh on touch ---
-                                    lineTouchData: LineTouchData(
-                                      enabled: true,
-                                      touchTooltipData: LineTouchTooltipData(
-                                        fitInsideHorizontally: true,
-                                        fitInsideVertically: true,
-                                        getTooltipItems: (touchedSpots) {
-                                          final latestHour =
-                                              _hourlyKwh.keys.isEmpty
-                                              ? null
-                                              : _hourlyKwh.keys.reduce(
-                                                  (a, b) => a > b ? a : b,
-                                                );
-
-                                          return touchedSpots.map((spot) {
-                                            final hour = spot.x.round();
-                                            final isLatestHour =
-                                                _isTodaySelected &&
-                                                latestHour != null &&
-                                                hour == latestHour;
-
-                                            if (isLatestHour &&
-                                                _lastHistoryUpdateTime !=
-                                                    null) {
-                                              final timeStr =
-                                                  DateFormat('h:mma')
-                                                      .format(
-                                                        _lastHistoryUpdateTime!,
-                                                      )
-                                                      .toLowerCase();
-                                              return LineTooltipItem(
-                                                'As of $timeStr\n${spot.y.toStringAsFixed(3)}kWh',
-                                                const TextStyle(
-                                                  color: Colors.white,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 12,
-                                                ),
-                                              );
-                                            }
-
-                                            return LineTooltipItem(
-                                              '${_formatHourLabel(spot.x)}\n${spot.y.toStringAsFixed(2)} kWh',
-                                              const TextStyle(
-                                                color: Colors.white,
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 12,
-                                              ),
-                                            );
-                                          }).toList();
-                                        },
+                                    Text(
+                                      '${_formatWithCommas(_isTodaySelected && _todayTotalKwh != null ? _todayTotalKwh! : _displayedTotal)} kWh',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: primaryOrange,
+                                        fontWeight: FontWeight.w800,
                                       ),
                                     ),
-
-                                    extraLinesData: ExtraLinesData(
-                                      horizontalLines: [
-                                        HorizontalLine(
-                                          y: chartMidY,
-                                          color: Colors.transparent,
-                                          label: HorizontalLineLabel(
-                                            show: true,
-                                            alignment: Alignment.bottomRight,
-                                            padding: const EdgeInsets.only(
-                                              right: 4,
-                                              bottom: 4,
-                                            ),
-                                            style: TextStyle(
-                                              color: Colors.white.withValues(
-                                                alpha: 0.8,
-                                              ),
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                            labelResolver: (line) =>
-                                                chartMidY.toStringAsFixed(2),
-                                          ),
-                                        ),
-                                        HorizontalLine(
-                                          y: chartMaxY,
-                                          color: Colors.transparent,
-                                          label: HorizontalLineLabel(
-                                            show: true,
-                                            alignment: Alignment.bottomRight,
-                                            padding: const EdgeInsets.only(
-                                              right: 4,
-                                              bottom: 4,
-                                            ),
-                                            style: TextStyle(
-                                              color: Colors.white.withValues(
-                                                alpha: 0.8,
-                                              ),
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                            labelResolver: (line) =>
-                                                '${chartMaxY.toStringAsFixed(2)} kWh',
-                                          ),
-                                        ),
-                                      ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                            if (_isTodaySelected)
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text(
+                                    'CURRENT DRAW',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey[500],
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.4,
                                     ),
-
-                                    titlesData: FlTitlesData(
-                                      topTitles: const AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: false,
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Row(
+                                    children: [
+                                      Container(
+                                        width: 7,
+                                        height: 7,
+                                        decoration: BoxDecoration(
+                                          color: primaryOrange,
+                                          shape: BoxShape.circle,
                                         ),
                                       ),
-                                      leftTitles: const AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: false,
-                                        ),
-                                      ),
-                                      rightTitles: const AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: false,
-                                        ),
-                                      ),
-                                      bottomTitles: AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: true,
-                                          reservedSize: 24,
-                                          interval: 6,
-                                          getTitlesWidget: (value, meta) {
-                                            String label = '';
-                                            if (value == 0) label = '12 AM';
-                                            if (value == 6) label = '6 AM';
-                                            if (value == 12) label = '12 PM';
-                                            if (value == 18) label = '6 PM';
-                                            if (value == 24) label = '12 AM';
-
-                                            if (label.isEmpty) {
-                                              return const SizedBox.shrink();
-                                            }
-
-                                            final textWidget = Text(
-                                              label,
-                                              style: TextStyle(
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.8,
-                                                ),
-                                                fontSize: 10,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            );
-
-                                            // The "12 AM" ticks sit exactly at the left
-                                            // (x = 0) and right (x = 24) edges of the
-                                            // chart, so their centered labels get
-                                            // clipped. Nudge them inward instead of
-                                            // centering on the tick.
-                                            if (value == 0) {
-                                              return SideTitleWidget(
-                                                meta: meta,
-                                                space: 8,
-                                                child: Transform.translate(
-                                                  offset: const Offset(16, 0),
-                                                  child: textWidget,
-                                                ),
-                                              );
-                                            }
-
-                                            if (value == 24) {
-                                              return SideTitleWidget(
-                                                meta: meta,
-                                                space: 8,
-                                                child: Transform.translate(
-                                                  offset: const Offset(-16, 0),
-                                                  child: textWidget,
-                                                ),
-                                              );
-                                            }
-
-                                            return SideTitleWidget(
-                                              meta: meta,
-                                              space: 8,
-                                              child: textWidget,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    ),
-                                    lineBarsData: [
-                                      LineChartBarData(
-                                        spots: _generateHourlySpots(),
-                                        isCurved: false,
-                                        color: Colors.white,
-                                        barWidth: 2.0,
-                                        isStrokeCapRound: true,
-                                        dotData: const FlDotData(show: false),
-                                        // Softened neon line aura
-                                        shadow: Shadow(
-                                          blurRadius: 4,
-                                          color: Colors.white.withValues(
-                                            alpha: 0.25,
-                                          ),
-                                          offset: Offset.zero,
-                                        ),
-                                        // Much lighter, cleaner fade underneath the bar
-                                        belowBarData: BarAreaData(
-                                          show: true,
-                                          gradient: LinearGradient(
-                                            colors: [
-                                              Colors.white.withValues(
-                                                alpha: 0.20,
-                                              ),
-                                              Colors.white.withValues(
-                                                alpha: 0.05,
-                                              ),
-                                              Colors.white.withValues(
-                                                alpha: 0.0,
-                                              ),
-                                            ],
-                                            stops: const [0.0, 0.5, 1.0],
-                                            begin: Alignment.topCenter,
-                                            end: Alignment.bottomCenter,
-                                          ),
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        '${_currentWatts.toStringAsFixed(0)} W',
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.black,
+                                          fontWeight: FontWeight.w800,
                                         ),
                                       ),
                                     ],
                                   ),
-                                ),
-
-                                // Loading / empty-state overlay for the hourly chart
-                                if (_isLoadingHistory)
-                                  const Positioned.fill(
-                                    child: Center(
-                                      child: SizedBox(
-                                        height: 24,
-                                        width: 24,
-                                        child: CircularProgressIndicator(
-                                          color: Colors.white,
-                                          strokeWidth: 2,
-                                        ),
+                                ],
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          height: 170,
+                          child: Stack(
+                            children: [
+                              LineChart(
+                                LineChartData(
+                                  minX: -1,
+                                  maxX: 25,
+                                  minY: 0,
+                                  maxY: chartMaxY,
+                                  gridData: const FlGridData(show: false),
+                                  borderData: FlBorderData(show: false),
+                                  titlesData: FlTitlesData(
+                                    show: true,
+                                    leftTitles: const AxisTitles(
+                                      sideTitles: SideTitles(
+                                        showTitles: false,
                                       ),
                                     ),
-                                  )
-                                else if (_hourlyKwh.isEmpty)
-                                  Positioned.fill(
-                                    child: Center(
-                                      child: Text(
-                                        _historyError ?? 'No data yet',
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(
-                                            alpha: 0.8,
-                                          ),
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w500,
-                                        ),
+                                    rightTitles: const AxisTitles(
+                                      sideTitles: SideTitles(
+                                        showTitles: false,
+                                      ),
+                                    ),
+                                    topTitles: const AxisTitles(
+                                      sideTitles: SideTitles(
+                                        showTitles: false,
+                                      ),
+                                    ),
+                                    bottomTitles: AxisTitles(
+                                      sideTitles: SideTitles(
+                                        showTitles: true,
+                                        reservedSize: 22,
+                                        interval: 6,
+                                        getTitlesWidget: (value, meta) {
+                                          String label = '';
+                                          if (value == 0) label = '12 AM';
+                                          if (value == 6) label = '6 AM';
+                                          if (value == 12) label = '12 PM';
+                                          if (value == 18) label = '6 PM';
+                                          if (value == 24) label = '12 AM';
+
+                                          if (label.isEmpty) {
+                                            return const SizedBox.shrink();
+                                          }
+
+                                          final isCurrentTick =
+                                              _isTodaySelected &&
+                                              value == _nearestHourTick;
+
+                                          final textWidget = Text(
+                                            label,
+                                            style: TextStyle(
+                                              color: isCurrentTick
+                                                  ? primaryOrange
+                                                  : Colors.grey[400],
+                                              fontSize: 10,
+                                              fontWeight: isCurrentTick
+                                                  ? FontWeight.w800
+                                                  : FontWeight.w500,
+                                            ),
+                                          );
+
+                                          if (value == 0) {
+                                            return SideTitleWidget(
+                                              meta: meta,
+                                              space: 8,
+                                              child: Transform.translate(
+                                                offset: const Offset(12, 0),
+                                                child: textWidget,
+                                              ),
+                                            );
+                                          }
+                                          if (value == 24) {
+                                            return SideTitleWidget(
+                                              meta: meta,
+                                              space: 8,
+                                              child: Transform.translate(
+                                                offset: const Offset(-12, 0),
+                                                child: textWidget,
+                                              ),
+                                            );
+                                          }
+                                          return SideTitleWidget(
+                                            meta: meta,
+                                            space: 8,
+                                            child: textWidget,
+                                          );
+                                        },
                                       ),
                                     ),
                                   ),
-                              ],
-                            ),
+                                  lineTouchData: LineTouchData(
+                                    enabled: true,
+                                    touchTooltipData: LineTouchTooltipData(
+                                      getTooltipColor: (spot) => primaryOrange,
+                                      tooltipPadding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 6,
+                                      ),
+                                      tooltipMargin: 10,
+                                      getTooltipItems: (touchedSpots) {
+                                        return touchedSpots.map((spot) {
+                                          return LineTooltipItem(
+                                            '${spot.y.toStringAsFixed(2)} kWh',
+                                            const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w700,
+                                              fontSize: 11,
+                                            ),
+                                          );
+                                        }).toList();
+                                      },
+                                    ),
+                                  ),
+                                  lineBarsData: [_hourlyLineBar],
+                                ),
+                                duration: Duration.zero,
+                              ),
+
+                              // Loading / empty-state overlay
+                              if (_isLoadingHistory)
+                                const Positioned.fill(
+                                  child: Center(
+                                    child: SizedBox(
+                                      height: 22,
+                                      width: 22,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              else if (_hourlyKwh.isEmpty)
+                                Positioned.fill(
+                                  child: Center(
+                                    child: Text(
+                                      _historyError ?? 'No data yet',
+                                      style: TextStyle(
+                                        color: Colors.grey[500],
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
-                      ),
+                      ],
                     ),
-                    const SizedBox(height: 0),
+                  ),
+                ],
+              ),
+            ),
                   ],
                 ),
               ),
@@ -1533,24 +1563,13 @@ class _DashboardState extends State<Dashboard> {
                   ),
                   const SizedBox(height: 8),
 
-                  // --- TEMP/DEBUG: manual trigger for the no-connection modal ---
-                  // Remove (or hide behind a debug flag) once real device
-                  // testing confirms the watchdog timeout works on its own.
+                  // --- LIVE connection status, driven by the real-time
+                  // `sync` field in Firebase RTDB (root level). Green +
+                  // "Connected" when `sync` is true/truthy, red +
+                  // "Disconnected" when `sync` is false.
                   Align(
                     alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
-                      onPressed: _showNoConnectionDialog,
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      icon: Icon(Icons.bug_report, size: 14, color: Colors.grey[500]),
-                      label: Text(
-                        'Test: No Connection',
-                        style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                      ),
-                    ),
+                    child: _buildConnectionStatusBadge(),
                   ),
 
                   const SizedBox(height: 8),
@@ -1670,6 +1689,50 @@ class _DashboardState extends State<Dashboard> {
   }
 
   // --- SUB CARD WIDGET UI HELPERS ---
+
+  // Small pill showing live device connection state, sourced from the
+  // real-time `sync` RTDB field via _setupSyncListener().
+  Widget _buildConnectionStatusBadge() {
+    final Color statusColor = _isIotConnected ? Colors.green : Colors.red;
+    final String label = _isIotConnected ? 'Connected' : 'Disconnected';
+    final IconData icon = _isIotConnected
+        ? Icons.wifi_rounded
+        : Icons.wifi_off_rounded;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: statusColor.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: statusColor,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Icon(icon, size: 13, color: statusColor),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+              color: statusColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildLiveFeedCard({
     required String title,
     required String value,

@@ -42,7 +42,7 @@ class BillingScreen extends StatelessWidget {
     '0-200': 0.9803,
     '201-300': 1.2908,
     '301-400': 1.5837,
-    'over 400': 2.0941,
+    'over-400': 2.0941,
   };
 
   Future<void> _handleRefresh() async {
@@ -106,7 +106,7 @@ class BillingScreen extends StatelessWidget {
     final r1 = rates['0-200'] ?? _fallbackRates['0-200']!;
     final r2 = rates['201-300'] ?? _fallbackRates['201-300']!;
     final r3 = rates['301-400'] ?? _fallbackRates['301-400']!;
-    final r4 = rates['over 400'] ?? _fallbackRates['over 400']!;
+    final r4 = rates['over-400'] ?? _fallbackRates['over-400']!;
 
     double bill = 0.0;
 
@@ -586,7 +586,7 @@ class BillingScreen extends StatelessWidget {
                 '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
           } else {
             currentTierTitle = 'TIER 4 STATUS';
-            currentTierRate = _formatRate(rates, 'over 400');
+            currentTierRate = _formatRate(rates, 'over-400');
             currentTierMax = 400.0;
             remainingText = 'Naabot na ang pinakamataas na tier';
           }
@@ -991,57 +991,64 @@ class BillingScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 14),
                         // ── View bill breakdown button ───────────────────
-                        InkWell(
-                          borderRadius: BorderRadius.circular(16),
-                          onTap: () => _showBillBreakdown(
-                            context,
-                            kwh: estimatedMonthEnd,
-                          ),
-                          child: Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 14,
-                              horizontal: 18,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                color: tierCardBorder.withValues(alpha: 0.25),
-                                width: 1,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisAlignment:
-                                  MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
-                                  children: [
-                                    Icon(
-                                      Icons.receipt_long_rounded,
-                                      color: brandOrangeText,
-                                      size: 18,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      'View bill breakdown',
-                                      style: TextStyle(
-                                        color: textDark,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                Icon(
-                                  Icons.chevron_right_rounded,
-                                  color: textDark.withValues(alpha: 0.35),
-                                  size: 20,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
+InkWell(
+  borderRadius: BorderRadius.circular(16),
+  onTap: () => _showBillBreakdown(
+    context,
+    kwh: estimatedMonthEnd,
+  ),
+  child: Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(
+      vertical: 12,
+      horizontal: 16,
+    ),
+    decoration: BoxDecoration(
+      color: brandOrangeText.withValues(alpha: 0.08), // Soft orange tint
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(
+        color: brandOrangeText.withValues(alpha: 0.15),
+        width: 1,
+      ),
+    ),
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.receipt_long_rounded,
+                color: brandOrangeText,
+                size: 18,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'View bill breakdown',
+              style: TextStyle(
+                color: brandOrangeText,
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ],
+        ),
+        Icon(
+          Icons.arrow_forward_ios_rounded,
+          color: brandOrangeText.withValues(alpha: 0.5),
+          size: 16,
+        ),
+      ],
+    ),
+  ),
+),
                         Padding(
                           padding: const EdgeInsets.symmetric(vertical: 24.0),
                           child: Divider(
@@ -1108,7 +1115,7 @@ class BillingScreen extends StatelessWidget {
                         _buildRateCard(
                           tierTitle: 'TIER 4',
                           range: 'Over 400 kWh',
-                          rate: _formatRate(rates, 'over 400'),
+                          rate: _formatRate(rates, 'over-400'),
                           isActive: cumulativeEnergy > 400,
                         ),
                       ],
