@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
@@ -999,222 +1000,280 @@ class _DashboardState extends State<Dashboard> {
           children: [
             // --- HEADER SECTION ---
             Container(
-              height: screenHeight * 0.70, // Takes up 70% of the screen
-              width: double.infinity,
-              color: topCardColor, // The Big Orange Section
-              child: SafeArea(
-                bottom: false,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Header text
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 10),
+  height: screenHeight * 0.70,
+  width: double.infinity,
+  color: topCardColor,
+  child: SafeArea(
+    bottom: false,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 1. Top Bar: Title (Left) & Date Navigator Pill (Right)
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Text(
+                    _nickname,
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(24),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 6.0, sigmaY: 6.0),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.35),
+                            width: 0.8,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            GestureDetector(
+                              onTap: () => _changeDate(-1),
+                              child: const Icon(
+                                Icons.chevron_left,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: () => _pickDate(context),
+                              child: Text(
+                                _isTodaySelected
+                                    ? 'Today'
+                                    : DateFormat('EEE MMM d').format(_selectedDate),
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: _isTodaySelected ? null : () => _changeDate(1),
+                              child: Icon(
+                                Icons.chevron_right,
+                                color: Colors.white.withValues(
+                                  alpha: _isTodaySelected ? 0.3 : 1.0,
+                                ),
+                                size: 18,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 16),
+
+              // 2. Two Side-by-Side Metric Cards
+              Row(
+                children: [
+                  // Left Card: Total Used
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 18,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.25),
+                          width: 1,
+                        ),
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              // Date navigator (placeholder for hourly history browsing)
-                              Row(
-                                children: [
-                                  GestureDetector(
-                                    onTap: () => _changeDate(-1),
-                                    child: const Icon(
-                                      Icons.chevron_left,
-                                      color: Colors.white,
-                                      size: 22,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 2),
-                                  GestureDetector(
-                                    onTap: () => _pickDate(context),
-                                    child: Text(
-                                      _isTodaySelected
-                                          ? 'Today'
-                                          : DateFormat(
-                                              'EEE MMM d',
-                                            ).format(_selectedDate),
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 2),
-                                  GestureDetector(
-                                    onTap: _isTodaySelected
-                                        ? null
-                                        : () => _changeDate(1),
-                                    child: Icon(
-                                      Icons.chevron_right,
-                                      color: Colors.white.withValues(
-                                        alpha: _isTodaySelected ? 0.3 : 1.0,
-                                      ),
-                                      size: 22,
-                                    ),
-                                  ),
-                                ],
+                              const Icon(
+                                Icons.bolt_rounded,
+                                color: Colors.white,
+                                size: 20,
                               ),
-                              if (_isTodaySelected)
-                                Row(
-                                  children: [
-                                    Container(
-                                      width: 6,
-                                      height: 6,
-                                      decoration: const BoxDecoration(
-                                        color: Colors.white,
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      _isTestMode ? 'DEMO' : 'LIVE',
-                                      style: const TextStyle(
-                                        fontSize: 11,
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.5,
-                                      ),
-                                    ),
-                                  ],
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  _isTodaySelected ? 'Total Used' : 'Total Used',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.white.withValues(alpha: 0.9),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
                                 ),
+                              ),
                             ],
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 12),
                           Row(
-                            crossAxisAlignment: CrossAxisAlignment.end,
+                            crossAxisAlignment: CrossAxisAlignment.baseline,
+                            textBaseline: TextBaseline.alphabetic,
                             children: [
-                              // --- Left: nickname + kWh total ---
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      _nickname,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.white.withValues(alpha: 0.75),
-                                        fontWeight: FontWeight.w600,
-                                        letterSpacing: 0.3,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      _isTodaySelected
-                                          ? 'Total Used'
-                                          : 'Total for This Day',
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        color: Colors.white.withValues(alpha: 0.9),
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Row(
-                                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                                      textBaseline: TextBaseline.alphabetic,
-                                      children: [
-                                        Text(
-                                          _formatWithCommas(_displayedTotal),
-                                          style: const TextStyle(
-                                            fontSize: 36,
-                                            fontWeight: FontWeight.w700,
-                                            letterSpacing: -1,
-                                            color: Colors.white,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 6),
-                                        const Text(
-                                          'kWh',
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
+                              Text(
+                                _formatWithCommas(_displayedTotal),
+                                style: const TextStyle(
+                                  fontSize: 28,
+                                  fontWeight: FontWeight.w800,
+                                  color: Colors.white,
+                                  letterSpacing: -0.5,
                                 ),
                               ),
-
-                              const SizedBox(width: 12),
-
-                              // --- Right: estimated bill ───────────────────
-                              // Today: read straight off
-                              // `_estimatedCostFromDevice`, populated from the
-                              // `estimated_cost` field pushed by the
-                              // device/backend into `live_reading` (see
-                              // _setupFirebaseListener / _startDemoMode).
-                              // Past days: use `_pastDayEstimatedCost`, the
-                              // `estimated_cost` field from the
-                              // GET /history/{date} response instead — the
-                              // live figure doesn't apply to a day that's
-                              // already over.
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text(
-                                    _isTodaySelected
-                                        ? 'Est. Total Bill'
-                                        : 'Bill for This Day',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Colors.white.withValues(alpha: 0.75),
-                                      fontWeight: FontWeight.w600,
-                                      letterSpacing: 0.3,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '₱${_formatWithCommas(_isTodaySelected ? _estimatedCostFromDevice : (_pastDayEstimatedCost ?? 0.0))}',
-                                    style: const TextStyle(
-                                      fontSize: 30,
-                                      fontWeight: FontWeight.w800,
-                                      letterSpacing: -0.5,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ],
+                              const SizedBox(width: 4),
+                              const Text(
+                                'kWh',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ],
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(height: 10),
+                  ),
 
-                    // "Total for This Day" — pulled directly from Firebase
-                    // `history/today/total_kwh`, only shown while today is
-                    // the selected day and the value has loaded.
-                    if (_isTodaySelected && _todayTotalKwh != null)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                        child: Row(
-                          children: [
-                            Text(
-                              'Total for This Day: ',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.8),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            Text(
-                              '${_formatWithCommas(_todayTotalKwh!)} kWh',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
+                  const SizedBox(width: 12),
+
+                  // Right Card: Est. Total Bill
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 18,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.25),
+                          width: 1,
                         ),
                       ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.payments_rounded,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  _isTodaySelected ? 'Est. Total Bill' : 'Total Bill',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.white.withValues(alpha: 0.9),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            '₱${_formatWithCommas(_isTodaySelected ? _estimatedCostFromDevice : (_pastDayEstimatedCost ?? 0.0))}',
+                            style: const TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              letterSpacing: -0.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
 
+              const SizedBox(height: 20),
+
+              // 3. Section Header Row: "Energy Usage" (Left) + Today Pill (Right)
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  const Text(
+                    'Energy Usage',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                    ),
+                  ),
+                  if (_isTodaySelected && _todayTotalKwh != null)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.25),
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.calendar_month_rounded,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Today: ${_formatWithCommas(_todayTotalKwh!)} kWh',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
                     // DAILY CHART WITH SUBTLE GLOW EFFECT
                     Expanded(
                       child: Padding(

@@ -4,9 +4,23 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
 import 'package:custom_refresh_indicator/custom_refresh_indicator.dart';
+import 'dart:ui';
 
-class BillingScreen extends StatelessWidget {
-  BillingScreen({super.key});
+// ── Which figures the hero section (top of screen) is currently showing.
+// endOfMonth = projected/forecast values (existing behavior).
+// current    = live "as of today" values read directly from RTDB, no
+//              calculation performed on the client.
+enum _BillMode { endOfMonth, current }
+
+class BillingScreen extends StatefulWidget {
+  const BillingScreen({super.key});
+
+  @override
+  State<BillingScreen> createState() => _BillingScreenState();
+}
+
+class _BillingScreenState extends State<BillingScreen> {
+  _BillMode _mode = _BillMode.endOfMonth;
 
   final Color primaryOrange = const Color(0xFFFCB775); // Jaffa 300 — main fill
   final Color tierCardBorder = const Color(0xFFFA8B39);
@@ -348,27 +362,41 @@ class BillingScreen extends StatelessWidget {
   }
 
   // ── Assembles the header row, itemized charges, and total for the sheet.
-  List<Widget> _buildBreakdownContent(
+List<Widget> _buildBreakdownContent(
     Map<String, dynamic> data,
     TextStyle headerStyle,
   ) {
     final kwh = (data['kwh'] as num?)?.toDouble() ?? 0.0;
-    final tier = data['tier'] as String? ?? '';
+    
+    // Determine the tier dynamically based on the kWh value
+    String displayTier = '';
+    if (kwh > 0) {
+      if (kwh <= 200) {
+        displayTier = 'TIER 1';
+      } else if (kwh <= 300) {
+        displayTier = 'TIER 2';
+      } else if (kwh <= 400) {
+        displayTier = 'TIER 3';
+      } else {
+        displayTier = 'TIER 4';
+      }
+    }
+
     final sourceFile = data['source_file'] as String?;
     final totalEnergyAmount =
         (data['total_energy_amount'] as num?)?.toDouble() ?? 0.0;
     final items = _buildBreakdownItems(data);
 
     return [
-      if (tier.isNotEmpty || kwh > 0)
+      if (displayTier.isNotEmpty || kwh > 0)
         Padding(
           padding: const EdgeInsets.only(bottom: 16),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              if (tier.isNotEmpty)
+              if (displayTier.isNotEmpty)
                 Text(
-                  tier,
+                  displayTier,
                   style: TextStyle(
                     color: tierTextColor,
                     fontSize: 12,
@@ -500,6 +528,101 @@ class BillingScreen extends StatelessWidget {
     );
   }
 
+  // ── Top-right pill toggle: "End of Month" vs "Current". Sits inline with
+  // the "END OF DAY CONSUMPTION" label. Purely local UI state — switching
+  // it just changes which RTDB-derived figures the hero section reads.
+  Widget _buildModeToggle() {
+  final bool isEom = _mode == _BillMode.endOfMonth;
+
+  return ClipRRect(
+    borderRadius: BorderRadius.circular(20),
+    child: BackdropFilter(
+      filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.35), // Translucent frosted track
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.65), // Glass rim border
+            width: 1,
+          ),
+        ),
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: AnimatedAlign(
+                duration: const Duration(milliseconds: 250),
+                curve: Curves.easeInOut,
+                alignment: isEom ? Alignment.centerLeft : Alignment.centerRight,
+                child: FractionallySizedBox(
+                  widthFactor: 0.5,
+                  heightFactor: 1.0,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.90), // Solid frosted active pill
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: brandOrangeText.withValues(alpha: 0.12),
+                          blurRadius: 4,
+                          offset: const Offset(0, 1),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildModeSegment('End of Month', _BillMode.endOfMonth),
+                _buildModeSegment('Current', _BillMode.current),
+              ],
+            ),
+          ],
+        ),
+      ),
+    )
+    );
+  }
+
+  Widget _buildModeSegment(String label, _BillMode mode) {
+  final bool selected = _mode == mode;
+
+  return GestureDetector(
+    onTap: () {
+      if (_mode != mode) {
+        setState(() => _mode = mode);
+      }
+    },
+    behavior: HitTestBehavior.opaque,
+    child: SizedBox(
+      width: 80, // Reduced from 96 to prevent screen overflow
+      child: Center(
+        child: AnimatedDefaultTextStyle(
+          duration: const Duration(milliseconds: 200),
+          style: TextStyle(
+            color: selected
+                ? brandOrangeText
+                : brandOrangeText.withValues(alpha: 0.80),
+            fontSize: 10, // Adjusted slightly for compact fit
+            fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+            letterSpacing: 0.1,
+          ),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.visible,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -510,6 +633,13 @@ class BillingScreen extends StatelessWidget {
           double estimatedMonthEnd = 0.0;
           double predictedDayTotal = 0.0;
           double cumulativeEnergy = 0.0;
+
+          // ── Values for the "Current" toggle state. Pulled directly from
+          // RTDB with no client-side calculation, per spec:
+          //   live_reading/estimated_cost  → Est. Total Bill
+          //   live_reading/cumul_kwh       → Total Used (today's kWh)
+          double todayKwh = 0.0;
+          double estimatedCostLive = 0.0;
 
           Map<String, double> rates = Map.of(_fallbackRates);
           String effectivePeriod = '';
@@ -547,16 +677,27 @@ class BillingScreen extends StatelessWidget {
               cumulativeEnergy =
                   (liveReading['cumul_kWh'] ?? liveReading['cumul_kwh'] ?? 0)
                       .toDouble();
-              // NOTE: live_reading/estimated_cost is intentionally NOT read
-              // anymore. The ESTIMATED BILL figure below now always comes
-              // from GET /bill/breakdown?kwh=<estimatedMonthEnd> — the same
-              // backend rate-schedule engine the breakdown modal uses —
-              // instead of a value written into RTDB.
+              // Used ONLY for the "Current" toggle state's bill figure — see
+              // heroBillLabel/estimatedCostLive below. The "End of Month"
+              // state still sources its bill from GET /bill/breakdown.
+              estimatedCostLive =
+                  (liveReading['estimated_cost'] ?? 0).toDouble();
+              // Used for the "Current" toggle state's kWh figure (Total
+              // Used / today's usage) — same field the TIER card's
+              // cumulativeEnergy reads.
+              todayKwh = cumulativeEnergy;
             }
 
             rates = _parseRates(data['meralco_rates']);
             effectivePeriod = _parseEffectivePeriod(data['meralco_rates']);
           }
+
+          final bool isCurrentMode = _mode == _BillMode.current;
+          final double heroKwh = isCurrentMode ? todayKwh : estimatedMonthEnd;
+          final String heroKwhLabel =
+              isCurrentMode ? "TODAY'S USAGE" : 'PROJECTED END OF MONTH';
+          final String heroBillLabel =
+              isCurrentMode ? 'EST. TOTAL BILL' : 'ESTIMATED BILL';
 
           String currentTierTitle = 'TIER 1 STATUS';
           String currentTierRate = _formatRate(rates, '0-200');
@@ -636,84 +777,96 @@ class BillingScreen extends StatelessWidget {
                             children: [
                               const SizedBox(height: 5),
                               Row(
-                                children: [
-                                  Text(
-                                    'END OF DAY CONSUMPTION',
-                                    style: TextStyle(
-                                      color: brandOrangeText.withValues(
-                                        alpha: 0.85,
-                                      ),
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w700,
-                                      letterSpacing: 0.6,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  GestureDetector(
-                                    onTap: () {
-                                      showModalBottomSheet(
-                                        context: context,
-                                        backgroundColor: Colors.white,
-                                        shape: const RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.vertical(
-                                            top: Radius.circular(20),
-                                          ),
-                                        ),
-                                        builder: (context) => Padding(
-                                          padding: const EdgeInsets.all(24.0),
-                                          child: Column(
-                                            mainAxisSize: MainAxisSize.min,
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Row(
-                                                children: [
-                                                  Icon(
-                                                    Icons.refresh_rounded,
-                                                    color: brandOrangeText,
-                                                    size: 18,
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    'Refresh forecast',
-                                                    style: TextStyle(
-                                                      color: textDark,
-                                                      fontSize: 16,
-                                                      fontWeight:
-                                                          FontWeight.w800,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                              const SizedBox(height: 10),
-                                              Text(
-                                                'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
-                                                style: TextStyle(
-                                                  color: textDark.withValues(
-                                                    alpha: 0.7,
-                                                  ),
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.w500,
-                                                  height: 1.4,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 12),
-                                            ],
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                    child: Icon(
-                                      Icons.info_outline_rounded,
-                                      size: 14,
-                                      color: brandOrangeText.withValues(
-                                        alpha: 0.5,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 2),
+  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+  crossAxisAlignment: CrossAxisAlignment.center,
+  children: [
+    Expanded(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              'END OF DAY CONSUMPTION',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: brandOrangeText.withValues(
+                  alpha: 0.85,
+                ),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.4,
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          GestureDetector(
+            onTap: () {
+              showModalBottomSheet(
+                context: context,
+                backgroundColor: Colors.white,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: BorderRadius.vertical(
+                    top: Radius.circular(20),
+                  ),
+                ),
+                builder: (context) => Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.refresh_rounded,
+                            color: brandOrangeText,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Refresh forecast',
+                            style: TextStyle(
+                              color: textDark,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
+                        style: TextStyle(
+                          color: textDark.withValues(
+                            alpha: 0.7,
+                          ),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          height: 1.4,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+                ),
+              );
+            },
+            child: Icon(
+              Icons.info_outline_rounded,
+              size: 14,
+              color: brandOrangeText.withValues(
+                alpha: 0.5,
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+    const SizedBox(width: 8),
+    _buildModeToggle(),
+  ],
+),
                               Text(
                                 '${predictedDayTotal.toStringAsFixed(2)} kWh',
                                 style: TextStyle(
@@ -735,7 +888,7 @@ class BillingScreen extends StatelessWidget {
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            // LEFT SIDE: PROJECTED END OF MONTH
+                            // LEFT SIDE: PROJECTED END OF MONTH / TODAY'S USAGE
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start, // Align to left
                               children: [
@@ -749,7 +902,7 @@ class BillingScreen extends StatelessWidget {
                                     ),
                                     const SizedBox(width: 4),
                                     Text(
-                                      'PROJECTED END OF MONTH',
+                                      heroKwhLabel,
                                       style: TextStyle(
                                         color: Colors.white.withValues(alpha: 0.95),
                                         fontSize: 10,
@@ -760,7 +913,7 @@ class BillingScreen extends StatelessWidget {
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  '${estimatedMonthEnd.toStringAsFixed(2)} kWh',
+                                  '${heroKwh.toStringAsFixed(2)} kWh',
                                   style: const TextStyle(
                                     color: Colors.white,
                                     fontSize: 19,
@@ -769,18 +922,19 @@ class BillingScreen extends StatelessWidget {
                                 ),
                               ],
                             ),
-                            // RIGHT SIDE: ESTIMATED BILL
-                            // ── Now sourced from GET /bill/breakdown, NOT
-                            // from RTDB `live_reading/estimated_cost`. The
-                            // FutureBuilder fetches (via the shared cache)
-                            // the same backend rate-schedule computation the
-                            // breakdown modal uses, keyed off the live
-                            // `estimatedMonthEnd` value streaming from
-                            // `forecast/projected_eom_kWh`. While that fetch
-                            // is in flight (or before estimatedMonthEnd has
-                            // arrived), it falls back to the local flat-tier
-                            // `_calculateBill` estimate so the figure never
-                            // flashes ₱0.00.
+                            // RIGHT SIDE: ESTIMATED BILL / EST. TOTAL BILL
+                            // ── End of Month state: sourced from GET
+                            // /bill/breakdown, same backend rate-schedule
+                            // computation the breakdown modal uses, keyed off
+                            // the live `estimatedMonthEnd` value streaming
+                            // from `forecast/projected_eom_kWh`. While that
+                            // fetch is in flight (or before estimatedMonthEnd
+                            // has arrived), it falls back to the local
+                            // flat-tier `_calculateBill` estimate so the
+                            // figure never flashes ₱0.00.
+                            // ── Current state: read directly from
+                            // `live_reading/estimated_cost` — no calculation,
+                            // no backend call.
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.end, // Align to right
                               children: [
@@ -794,7 +948,7 @@ class BillingScreen extends StatelessWidget {
                                     ),
                                     const SizedBox(width: 4),
                                     Text(
-                                      'ESTIMATED BILL',
+                                      heroBillLabel,
                                       style: TextStyle(
                                         color: Colors.white.withValues(alpha: 0.95),
                                         fontSize: 10,
@@ -804,33 +958,43 @@ class BillingScreen extends StatelessWidget {
                                   ],
                                 ),
                                 const SizedBox(height: 2),
-                                FutureBuilder<Map<String, dynamic>>(
-                                  future: estimatedMonthEnd > 0
-                                      ? _fetchBillBreakdownCached(
-                                          estimatedMonthEnd,
-                                        )
-                                      : null,
-                                  builder: (context, billSnapshot) {
-                                    final totalEnergyAmount =
-                                        (billSnapshot.data?['total_energy_amount']
-                                                as num?)
-                                            ?.toDouble();
-                                    final double estimatedBillPeso =
-                                        totalEnergyAmount ??
-                                            _calculateBill(
-                                              estimatedMonthEnd,
-                                              rates,
-                                            );
-                                    return Text(
-                                      '₱${estimatedBillPeso.toStringAsFixed(2)}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 19,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    );
-                                  },
-                                ),
+                                if (isCurrentMode)
+                                  Text(
+                                    '₱${estimatedCostLive.toStringAsFixed(2)}',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 19,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  )
+                                else
+                                  FutureBuilder<Map<String, dynamic>>(
+                                    future: estimatedMonthEnd > 0
+                                        ? _fetchBillBreakdownCached(
+                                            estimatedMonthEnd,
+                                          )
+                                        : null,
+                                    builder: (context, billSnapshot) {
+                                      final totalEnergyAmount =
+                                          (billSnapshot.data?['total_energy_amount']
+                                                  as num?)
+                                              ?.toDouble();
+                                      final double estimatedBillPeso =
+                                          totalEnergyAmount ??
+                                              _calculateBill(
+                                                estimatedMonthEnd,
+                                                rates,
+                                              );
+                                      return Text(
+                                        '₱${estimatedBillPeso.toStringAsFixed(2)}',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 19,
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      );
+                                    },
+                                  ),
                               ],
                             ),
                           ],
@@ -991,64 +1155,68 @@ class BillingScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 14),
                         // ── View bill breakdown button ───────────────────
-InkWell(
-  borderRadius: BorderRadius.circular(16),
-  onTap: () => _showBillBreakdown(
-    context,
-    kwh: estimatedMonthEnd,
-  ),
-  child: Container(
-    width: double.infinity,
-    padding: const EdgeInsets.symmetric(
-      vertical: 12,
-      horizontal: 16,
-    ),
-    decoration: BoxDecoration(
-      color: brandOrangeText.withValues(alpha: 0.08), // Soft orange tint
-      borderRadius: BorderRadius.circular(16),
-      border: Border.all(
-        color: brandOrangeText.withValues(alpha: 0.15),
-        width: 1,
-      ),
-    ),
-    child: Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                Icons.receipt_long_rounded,
-                color: brandOrangeText,
-                size: 18,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Text(
-              'View bill breakdown',
-              style: TextStyle(
-                color: brandOrangeText,
-                fontSize: 14,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0.3,
-              ),
-            ),
-          ],
-        ),
-        Icon(
-          Icons.arrow_forward_ios_rounded,
-          color: brandOrangeText.withValues(alpha: 0.5),
-          size: 16,
-        ),
-      ],
-    ),
-  ),
-),
+                        // kwh passed here follows whichever toggle state is
+                        // currently active: estimatedMonthEnd for "End of
+                        // Month", todayKwh (RTDB live_reading/cumul_kwh)
+                        // for "Current".
+                        InkWell(
+                          borderRadius: BorderRadius.circular(16),
+                          onTap: () => _showBillBreakdown(
+                            context,
+                            kwh: isCurrentMode ? todayKwh : estimatedMonthEnd,
+                          ),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 12,
+                              horizontal: 16,
+                            ),
+                            decoration: BoxDecoration(
+                              color: brandOrangeText.withValues(alpha: 0.08), // Soft orange tint
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: brandOrangeText.withValues(alpha: 0.15),
+                                width: 1,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.all(6),
+                                      decoration: const BoxDecoration(
+                                        color: Colors.white,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: Icon(
+                                        Icons.receipt_long_rounded,
+                                        color: brandOrangeText,
+                                        size: 18,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Text(
+                                      'View bill breakdown',
+                                      style: TextStyle(
+                                        color: brandOrangeText,
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 0.3,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Icon(
+                                  Icons.arrow_forward_ios_rounded,
+                                  color: brandOrangeText.withValues(alpha: 0.5),
+                                  size: 16,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                         Padding(
                           padding: const EdgeInsets.symmetric(vertical: 24.0),
                           child: Divider(
