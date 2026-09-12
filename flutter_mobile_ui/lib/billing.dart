@@ -699,30 +699,35 @@ List<Widget> _buildBreakdownContent(
           final String heroBillLabel =
               isCurrentMode ? 'EST. TOTAL BILL' : 'ESTIMATED BILL';
 
+          // ── TIER card now uses the appropriate value based on mode
+          // In "End of Month" mode → estimatedMonthEnd (projected)
+          // In "Current" mode → cumulativeEnergy (today's actual)
+          final double tierCardEnergy = isCurrentMode ? cumulativeEnergy : estimatedMonthEnd;
+
           String currentTierTitle = 'TIER 1 STATUS';
           String currentTierRate = _formatRate(rates, '0-200');
           double currentTierMax = 200.0;
           String remainingText = '';
 
-          if (cumulativeEnergy <= 200) {
+          if (tierCardEnergy <= 200) {
             currentTierTitle = 'TIER 1 STATUS';
             currentTierRate = _formatRate(rates, '0-200');
             currentTierMax = 200.0;
-            double remaining = (200.0 - cumulativeEnergy).clamp(0.0, 200.0);
+            double remaining = (200.0 - tierCardEnergy).clamp(0.0, 200.0);
             remainingText =
                 '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
-          } else if (cumulativeEnergy <= 300) {
+          } else if (tierCardEnergy <= 300) {
             currentTierTitle = 'TIER 2 STATUS';
             currentTierRate = _formatRate(rates, '201-300');
             currentTierMax = 300.0;
-            double remaining = (300.0 - cumulativeEnergy).clamp(0.0, 100.0);
+            double remaining = (300.0 - tierCardEnergy).clamp(0.0, 100.0);
             remainingText =
                 '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
-          } else if (cumulativeEnergy <= 400) {
+          } else if (tierCardEnergy <= 400) {
             currentTierTitle = 'TIER 3 STATUS';
             currentTierRate = _formatRate(rates, '301-400');
             currentTierMax = 400.0;
-            double remaining = (400.0 - cumulativeEnergy).clamp(0.0, 100.0);
+            double remaining = (400.0 - tierCardEnergy).clamp(0.0, 100.0);
             remainingText =
                 '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
           } else {
@@ -732,7 +737,7 @@ List<Widget> _buildBreakdownContent(
             remainingText = 'Naabot na ang pinakamataas na tier';
           }
 
-          final double percentage = (cumulativeEnergy / currentTierMax).clamp(
+          final double percentage = (tierCardEnergy / currentTierMax).clamp(
             0.0,
             1.0,
           );
@@ -1071,7 +1076,7 @@ List<Widget> _buildBreakdownContent(
                                             children: [
                                               TextSpan(
                                                 text:
-                                                    '${cumulativeEnergy.toStringAsFixed(2)} ',
+                                                    '${tierCardEnergy.toStringAsFixed(2)} ',
                                                 style: const TextStyle(
                                                   fontSize: 26,
                                                   fontWeight: FontWeight.w800,
