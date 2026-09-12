@@ -1932,10 +1932,17 @@ class _DashboardState extends State<Dashboard> {
           width: 1,
         ),
         boxShadow: [
+          // Small subtle shadow for depth
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+          // Slightly larger shadow for layered effect
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
           ),
         ],
       ),
@@ -1946,8 +1953,9 @@ class _DashboardState extends State<Dashboard> {
             title,
             style: TextStyle(
               fontSize: 13,
-              color: Colors.grey[800],
+              color: Colors.grey[700],
               fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
             ),
           ),
           const SizedBox(height: 12),
@@ -1961,6 +1969,7 @@ class _DashboardState extends State<Dashboard> {
                   fontSize: 24,
                   fontWeight: FontWeight.w700,
                   letterSpacing: -0.5,
+                  color: Colors.black,
                 ),
               ),
               const SizedBox(width: 4),
@@ -1968,7 +1977,7 @@ class _DashboardState extends State<Dashboard> {
                 unit,
                 style: TextStyle(
                   fontSize: 14,
-                  color: Colors.grey[800],
+                  color: Colors.grey[600],
                   fontWeight: FontWeight.w500,
                 ),
               ),
