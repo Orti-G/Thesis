@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ (API 31+) splash screen override.
+         Without this file, Android automatically shows the app's launcher
+         icon (GRID logo) on a system-picked background before Flutter's
+         first frame draws. This override replaces that with a plain black
+         screen matching OnboardingScreen's background, and a transparent
+         1px icon so the logo doesn't flash before the video splash. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowSplashScreenBackground">@android:color/black</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+</resources>

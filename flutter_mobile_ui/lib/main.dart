@@ -6,6 +6,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
+import 'package:video_player/video_player.dart';
 
 // ── IMPORTS FOR YOUR ACTUAL FILES ─────────────────────────────────────────
 import 'dashboard.dart';
@@ -65,18 +66,24 @@ void main() async {
   testModeNotifier.value = prefs.getBool('test_mode') ?? false;
   nicknameNotifier.value = prefs.getString('nickname') ?? 'My Home';
 
-  runApp(const MyApp());
+  // Create (but don't await) the splash video here so it starts loading
+  // as early as possible without blocking app startup on it.
+  final videoController = VideoPlayerController.asset('assets/grid_animation.mp4');
+
+  runApp(MyApp(videoController: videoController));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  final VideoPlayerController videoController;
+
+  const MyApp({super.key, required this.videoController});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    return MaterialApp(
       debugShowCheckedModeBanner: false,
       // Setting this to OnboardingScreen makes it the first thing that opens
-      home: OnboardingScreen(),
+      home: OnboardingScreen(videoController: videoController),
     );
   }
 }

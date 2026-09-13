@@ -30,6 +30,15 @@ class _BillingScreenState extends State<BillingScreen> {
 
   final Map<int, Future<Map<String, dynamic>>> _breakdownCache = {};
 
+  // Shared clipper instance for the ticket sheet — the shadow painter and
+  // the ClipPath both need the same path, so we build the clip geometry once
+  // and reuse it instead of two separate _TicketReceiptClipper instances
+  // independently recomputing the same Path each frame.
+  static final _TicketReceiptClipper _ticketClipper = _TicketReceiptClipper(
+    notchRadius: 16,
+    notchPositionRatio: 0.24,
+  );
+
   Future<Map<String, dynamic>> _fetchBillBreakdownCached(double kwh) {
     final key = kwh.round();
     return _breakdownCache.putIfAbsent(key, () => _fetchBillBreakdown(kwh));
@@ -232,136 +241,149 @@ class _BillingScreenState extends State<BillingScreen> {
       backgroundColor: Colors.transparent,
       barrierColor: Colors.black.withValues(alpha: 0.25),
       builder: (sheetContext) {
-        return BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        return RepaintBoundary(
           child: Padding(
             padding: EdgeInsets.only(
               bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
             ),
-            child: Container(
-              padding: EdgeInsets.only(
-                top: MediaQuery.of(sheetContext).padding.top + 32,
-                bottom: 32,
-                left: 24,
-                right: 24,
-              ),
-              child: Center(
-                child: NotificationListener<ScrollUpdateNotification>(
-                  onNotification: (notification) {
-                    final dragDetails = notification.dragDetails;
-                    if (!isClosing &&
-                        notification.metrics.pixels <= 0 &&
-                        dragDetails != null &&
-                        dragDetails.delta.dy > 6) {
-                      isClosing = true;
-                      Navigator.of(sheetContext).pop();
-                    }
-                    return false;
-                  },
-                  child: SingleChildScrollView(
-                    physics: const ClampingScrollPhysics(),
-                    child: RepaintBoundary(
-                      child: Stack(
-                        alignment: Alignment.topCenter,
-                        clipBehavior: Clip.none,
-                        children: [
-                        // Outer 3D Drop Shadow
-                        Positioned.fill(
-                          child: CustomPaint(
-                            painter: _TicketShadowPainter(
-                              clipper: _TicketReceiptClipper(
-                                notchRadius: 16,
-                                notchPositionRatio: 0.24,
-                              ),
-                            ),
-                          ),
-                        ),
-
-                        // Ticket Card Container with Glassmorphic Fill
-                        ClipPath(
-                          clipper: _TicketReceiptClipper(
-                            notchRadius: 16,
-                            notchPositionRatio: 0.24,
-                          ),
-                          child: Container(
-                            width: double.infinity,
-                            decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.92),
-                              border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.5),
-                                width: 1.5,
-                              ),
-                            ),
-                            padding: const EdgeInsets.fromLTRB(28, 54, 28, 40),
-                            child: FutureBuilder<Map<String, dynamic>>(
-                              future: _fetchBillBreakdownCached(kwh),
-                              builder: (context, snapshot) {
-                                if (snapshot.connectionState !=
-                                    ConnectionState.done) {
-                                  return const Padding(
-                                    padding:
-                                        EdgeInsets.symmetric(vertical: 90),
-                                    child: Center(
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.5,
-                                      ),
-                                    ),
-                                  );
-                                }
-
-                                if (snapshot.hasError ||
-                                    snapshot.data == null) {
-                                  return Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 70,
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.error_outline_rounded,
-                                          size: 44,
-                                          color: textDark.withValues(
-                                            alpha: 0.3,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 16),
-                                        Text(
-                                          'Unable to load bill breakdown',
-                                          style: TextStyle(
-                                            color: textDark.withValues(
-                                              alpha: 0.6,
-                                            ),
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                }
-
-                                return _buildTicketContent(
-                                  context,
-                                  snapshot.data!,
-                                  kwh,
-                                  tierTitle: tierTitle,
-                                  tierRate: tierRate,
-                                  tierMax: tierMax,
-                                  tierEnergy: tierEnergy,
-                                  tierPercentage: tierPercentage,
-                                  tierRemainingText: tierRemainingText,
-                                );
-                              },
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+            child: Stack(
+              children: [
+                // Static blur backdrop. This used to wrap the
+                // SingleChildScrollView directly, which meant the engine
+                // had to re-sample the gaussian blur every single scroll
+                // frame. The barrier behind the sheet doesn't change while
+                // scrolling, so isolating it as its own RepaintBoundary
+                // sibling lets the compositor cache it once instead of
+                // recomputing it on every frame of the scroll gesture.
+                Positioned.fill(
+                  child: RepaintBoundary(
+                    child: ClipRect(
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                        child: const SizedBox.expand(),
+                      ),
                     ),
                   ),
                 ),
-              ),
+                Container(
+                  padding: EdgeInsets.only(
+                    top: MediaQuery.of(sheetContext).padding.top + 32,
+                    bottom: 32,
+                    left: 24,
+                    right: 24,
+                  ),
+                  child: Center(
+                    child: NotificationListener<ScrollUpdateNotification>(
+                      onNotification: (notification) {
+                        final dragDetails = notification.dragDetails;
+                        if (!isClosing &&
+                            notification.metrics.pixels <= 0 &&
+                            dragDetails != null &&
+                            dragDetails.delta.dy > 6) {
+                          isClosing = true;
+                          Navigator.of(sheetContext).pop();
+                        }
+                        return false;
+                      },
+                      child: RepaintBoundary(
+                        child: Stack(
+                          alignment: Alignment.topCenter,
+                          clipBehavior: Clip.none,
+                          children: [
+                          // Outer 3D Drop Shadow
+                          Positioned.fill(
+                            child: CustomPaint(
+                              isComplex: true,
+                              willChange: false,
+                              painter: _TicketShadowPainter(
+                                clipper: _ticketClipper,
+                              ),
+                            ),
+                          ),
+
+                          // Ticket Card Container with Glassmorphic Fill
+                          ClipPath(
+                            clipper: _ticketClipper,
+                            child: Container(
+                              width: double.infinity,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.92),
+                                border: Border.all(
+                                  color: Colors.white.withValues(alpha: 0.5),
+                                  width: 1.5,
+                                ),
+                              ),
+                              padding: const EdgeInsets.fromLTRB(28, 54, 28, 40),
+                              child: FutureBuilder<Map<String, dynamic>>(
+                                future: _fetchBillBreakdownCached(kwh),
+                                builder: (context, snapshot) {
+                                  if (snapshot.connectionState !=
+                                      ConnectionState.done) {
+                                    return const Padding(
+                                      padding:
+                                          EdgeInsets.symmetric(vertical: 90),
+                                      child: Center(
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2.5,
+                                        ),
+                                      ),
+                                    );
+                                  }
+
+                                  if (snapshot.hasError ||
+                                      snapshot.data == null) {
+                                    return Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 70,
+                                      ),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            Icons.error_outline_rounded,
+                                            size: 44,
+                                            color: textDark.withValues(
+                                              alpha: 0.3,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 16),
+                                          Text(
+                                            'Unable to load bill breakdown',
+                                            style: TextStyle(
+                                              color: textDark.withValues(
+                                                alpha: 0.6,
+                                              ),
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }
+
+                                  return _buildTicketContent(
+                                    context,
+                                    snapshot.data!,
+                                    kwh,
+                                    tierTitle: tierTitle,
+                                    tierRate: tierRate,
+                                    tierMax: tierMax,
+                                    tierEnergy: tierEnergy,
+                                    tierPercentage: tierPercentage,
+                                    tierRemainingText: tierRemainingText,
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                        ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         );
@@ -495,21 +517,38 @@ class _BillingScreenState extends State<BillingScreen> {
         _TicketDashedTearLine(color: textDark.withValues(alpha: 0.15)),
         const SizedBox(height: 20),
 
-        // ── Itemized breakdown ──────────────────────────────────────
-        Text(
-          'BILL BREAKDOWN',
-          style: TextStyle(
-            color: brandOrangeText,
-            fontSize: 14,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 0.6,
+        // ── Itemized breakdown (the only scrollable region) ──────────
+        // Everything above this point (total, tier status) and below it
+        // (reiterated total, Done) is static — it lays out once and never
+        // repaints during scroll. Only this list, wrapped in Flexible +
+        // a shrink-wrapped SingleChildScrollView, scrolls: it takes just
+        // the space it needs up to what's left in the ticket, and only
+        // becomes scrollable once the items don't fit.
+        Flexible(
+          child: SingleChildScrollView(
+            
+            physics: const ClampingScrollPhysics(),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'BILL BREAKDOWN',
+                  style: TextStyle(
+                    color: brandOrangeText,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                for (final item in items) ...[
+                  _buildLineItemRow(item),
+                  const SizedBox(height: 12),
+                ],
+              ],
+            ),
           ),
         ),
-        const SizedBox(height: 16),
-        for (final item in items) ...[
-          _buildLineItemRow(item),
-          const SizedBox(height: 12),
-        ],
         const SizedBox(height: 4),
         _TicketDashedTearLine(color: textDark.withValues(alpha: 0.15)),
         const SizedBox(height: 20),
@@ -1076,6 +1115,8 @@ class _BillingScreenState extends State<BillingScreen> {
                             color: primaryOrange,
                             child: CustomPaint(
                               painter: CardCirclePainter(),
+                              isComplex: true,
+                              willChange: false,
                               child: Padding(
                                 padding: const EdgeInsets.all(22),
                                 child: Column(
@@ -1549,6 +1590,9 @@ class CardCirclePainter extends CustomPainter {
 }
 
 // ── Realistic Dashed Tear Line ──────────────────────────────────────────────
+// Rendered with a single CustomPaint instead of List.generate'd widgets —
+// same visual output (dashWidth-sized dashes evenly spanning the available
+// width), but without instantiating a SizedBox+DecoratedBox pair per dash.
 class _TicketDashedTearLine extends StatelessWidget {
   final Color color;
   final double height;
@@ -1564,29 +1608,60 @@ class _TicketDashedTearLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final boxWidth = constraints.constrainWidth();
-        final dashCount = (boxWidth / (dashWidth + dashSpace)).floor();
-        return Flex(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          direction: Axis.horizontal,
-          children: List.generate(dashCount, (_) {
-            return SizedBox(
-              width: dashWidth,
-              height: height,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: color,
-                  borderRadius: BorderRadius.circular(1),
-                ),
-              ),
-            );
-          }),
-        );
-      },
+    return SizedBox(
+      width: double.infinity,
+      height: height,
+      child: CustomPaint(
+        painter: _DashedLinePainter(
+          color: color,
+          dashWidth: dashWidth,
+          dashSpace: dashSpace,
+        ),
+      ),
     );
   }
+}
+
+class _DashedLinePainter extends CustomPainter {
+  final Color color;
+  final double dashWidth;
+  final double dashSpace;
+
+  const _DashedLinePainter({
+    required this.color,
+    required this.dashWidth,
+    required this.dashSpace,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    final dashCount = (size.width / (dashWidth + dashSpace)).floor();
+    if (dashCount <= 0) return;
+
+    // Matches the original Flex(mainAxisAlignment: spaceBetween) layout:
+    // dashes of `dashWidth`, with the remaining space split evenly between
+    // and around them.
+    final totalDashSpan = dashCount * dashWidth;
+    final remaining = size.width - totalDashSpan;
+    final gap = dashCount > 1 ? remaining / (dashCount - 1) : 0.0;
+
+    double x = 0;
+    for (int i = 0; i < dashCount; i++) {
+      final rrect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x, 0, dashWidth, size.height),
+        const Radius.circular(1),
+      );
+      canvas.drawRRect(rrect, paint);
+      x += dashWidth + gap;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedLinePainter oldDelegate) =>
+      oldDelegate.color != color ||
+      oldDelegate.dashWidth != dashWidth ||
+      oldDelegate.dashSpace != dashSpace;
 }
 
 // ── Custom Ticket Clipper (Side Notches + Top Rounded + Bottom Serrated) ───
@@ -1669,27 +1744,38 @@ class _TicketReceiptClipper extends CustomClipper<Path> {
 class _TicketShadowPainter extends CustomPainter {
   final CustomClipper<Path> clipper;
 
-  _TicketShadowPainter({required this.clipper});
+  const _TicketShadowPainter({required this.clipper});
 
   @override
   void paint(Canvas canvas, Size size) {
     final path = clipper.getClip(size);
 
-    // Soft Ambient 3D Shadow
-    canvas.drawShadow(
+    // Soft Ambient Shadow — canvas.drawShadow() runs Skia's full
+    // physically-based shadow model (separate ambient + spot passes,
+    // penumbra/umbra geometry) every time it rasterizes, which is heavy
+    // for a shape this size. A blurred path fill achieves the same soft,
+    // sunken-card look with one Gaussian convolution — the same
+    // lightweight technique BoxShadow uses — at a fraction of the cost.
+    canvas.save();
+    canvas.translate(0, 6);
+    canvas.drawPath(
       path,
-      Colors.black.withValues(alpha: 0.18),
-      20.0,
-      true,
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.18)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
     );
+    canvas.restore();
 
-    // Directional Depth Shadow
-    canvas.drawShadow(
+    // Directional Depth Tint
+    canvas.save();
+    canvas.translate(0, 3);
+    canvas.drawPath(
       path,
-      const Color(0xFFE25319).withValues(alpha: 0.12),
-      8.0,
-      false,
+      Paint()
+        ..color = const Color(0xFFE25319).withValues(alpha: 0.12)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
     );
+    canvas.restore();
   }
 
   @override
