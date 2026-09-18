@@ -8,6 +8,32 @@ import 'package:custom_refresh_indicator/custom_refresh_indicator.dart';
 
 enum _BillMode { endOfMonth, current }
 
+/// Input mode for the manual bill calculator.
+/// [kwh]   — user types consumption, we hit /bill/breakdown directly.
+/// [pesos] — user types a budget; resolving it back to kWh requires a
+///           numeric inverse of the billing function. UI only for now.
+enum _CalcInput { kwh, pesos }
+
+/// Tier metadata for a given consumption figure, so the live tier card and
+/// the calculator resolve tiers through one code path.
+class _TierInfo {
+  final String title;
+  final String rate;
+  final double max;
+  final double energy;
+  final double percentage;
+  final String remainingText;
+
+  const _TierInfo({
+    required this.title,
+    required this.rate,
+    required this.max,
+    required this.energy,
+    required this.percentage,
+    required this.remainingText,
+  });
+}
+
 class BillingScreen extends StatefulWidget {
   const BillingScreen({super.key});
 
@@ -91,6 +117,26 @@ class _BillingScreenState extends State<BillingScreen> {
     return '';
   }
 
+  double _parseFixedCharge(dynamic meralcoRatesNode) {
+    if (meralcoRatesNode is Map) {
+      final raw = meralcoRatesNode['fixed_charge'];
+      if (raw is num) return raw.toDouble();
+      final parsed = double.tryParse(raw?.toString() ?? '');
+      if (parsed != null) return parsed;
+    }
+    return 0.0;
+  }
+
+  String _parseSourceFile(dynamic meralcoRatesNode) {
+    if (meralcoRatesNode is Map) {
+      final file = meralcoRatesNode['source_file'];
+      if (file != null && file.toString().isNotEmpty) {
+        return file.toString();
+      }
+    }
+    return '';
+  }
+
   String _formatRate(Map<String, double> rates, String key) {
     final value = rates[key] ?? _fallbackRates[key] ?? 0.0;
     return '₱${value.toStringAsFixed(4)}/kWh';
@@ -141,7 +187,10 @@ class _BillingScreenState extends State<BillingScreen> {
     Map<String, dynamic> map_(dynamic v) =>
         (v is Map) ? v.cast<String, dynamic>() : const {};
 
-    List<_BillLineItem> sub(Map<String, dynamic> m, Map<String, String> labels) {
+    List<_BillLineItem> sub(
+      Map<String, dynamic> m,
+      Map<String, String> labels,
+    ) {
       final items = <_BillLineItem>[];
       labels.forEach((key, label) {
         final amt = num_(m[key]);
@@ -222,6 +271,347 @@ class _BillingScreenState extends State<BillingScreen> {
     ];
   }
 
+  _TierInfo _tierInfoFor(double kwh, Map<String, double> rates) {
+    String title;
+    String rate;
+    double max;
+    String remainingText;
+
+    if (kwh <= 200) {
+      title = 'TIER 1 STATUS';
+      rate = _formatRate(rates, '0-200');
+      max = 200.0;
+      final remaining = (200.0 - kwh).clamp(0.0, 200.0);
+      remainingText =
+          '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
+    } else if (kwh <= 300) {
+      title = 'TIER 2 STATUS';
+      rate = _formatRate(rates, '201-300');
+      max = 300.0;
+      final remaining = (300.0 - kwh).clamp(0.0, 100.0);
+      remainingText =
+          '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
+    } else if (kwh <= 400) {
+      title = 'TIER 3 STATUS';
+      rate = _formatRate(rates, '301-400');
+      max = 400.0;
+      final remaining = (400.0 - kwh).clamp(0.0, 100.0);
+      remainingText =
+          '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
+    } else {
+      title = 'TIER 4 STATUS';
+      rate = _formatRate(rates, 'over-400');
+      max = 400.0;
+      remainingText = 'Naabot na ang pinakamataas na tier';
+    }
+
+    return _TierInfo(
+      title: title,
+      rate: rate,
+      max: max,
+      energy: kwh,
+      percentage: (kwh / max).clamp(0.0, 1.0),
+      remainingText: remainingText,
+    );
+  }
+
+  // ── Bill Calculator (manual input) ───────────────────────────────────────
+  // kWh mode is live: the typed consumption is passed straight to the
+  // existing breakdown sheet, so no breakdown UI is duplicated here.
+  //
+  // Peso mode is UI only. /bill/breakdown accepts kwh exclusively, so a
+  // budget figure has to be inverted into kWh before anything can be
+  // fetched. Wire it by replacing the _resolveKwh() stub below with a
+  // numeric solver (the bill is monotonic and piecewise-linear in kWh, so
+  // the secant method converges in two or three probes against
+  // data['total_energy_amount']).
+
+  void _showBillCalculator(
+    BuildContext context,
+    Map<String, double> rates, {
+    required double fixedCharge,
+    required String sourceFile,
+  }) {
+    final controller = TextEditingController();
+    _CalcInput inputType = _CalcInput.kwh;
+    String? error;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (innerContext, setSheetState) {
+            /// Resolves the typed value into a kWh figure.
+            /// TODO(peso mode): implement the inverse solve for _CalcInput.pesos.
+            double? resolveKwh(double value) {
+              if (inputType == _CalcInput.kwh) return value;
+              return null;
+            }
+
+            void compute() {
+              final value = double.tryParse(controller.text.trim());
+              if (value == null || value <= 0) {
+                setSheetState(() => error = 'Maglagay ng valid na numero.');
+                return;
+              }
+
+              final kwh = resolveKwh(value);
+              if (kwh == null) {
+                setSheetState(
+                  () => error =
+                      'Hindi pa available ang budget mode. Gamitin muna ang kWh.',
+                );
+                return;
+              }
+
+              Navigator.of(sheetContext).pop();
+
+              final tier = _tierInfoFor(kwh, rates);
+              _showBillBreakdown(
+                context,
+                kwh: kwh,
+                tierTitle: tier.title,
+                tierRate: tier.rate,
+                tierMax: tier.max,
+                tierEnergy: tier.energy,
+                tierPercentage: tier.percentage,
+                tierRemainingText: tier.remainingText,
+                fixedCharge: fixedCharge,
+                sourceFile: sourceFile,
+              );
+            }
+
+            Widget modeChip(String label, _CalcInput value) {
+              final selected = inputType == value;
+              return Expanded(
+                child: GestureDetector(
+                  onTap: () => setSheetState(() {
+                    inputType = value;
+                    error = null;
+                  }),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    decoration: BoxDecoration(
+                      color: selected ? tierCardBorder : Colors.transparent,
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                    child: Center(
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: selected
+                              ? Colors.white
+                              : textDark.withValues(alpha: 0.55),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }
+
+            final bool isPesoMode = inputType == _CalcInput.pesos;
+
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(innerContext).viewInsets.bottom,
+              ),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: creamBg,
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(28),
+                  ),
+                ),
+                padding: const EdgeInsets.fromLTRB(24, 14, 24, 28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 44,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: textDark.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Text(
+                      'BILL CALCULATOR',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                        color: textDark.withValues(alpha: 0.55),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      isPesoMode
+                          ? 'Magkano ang budget mo sa kuryente?'
+                          : 'Ilang kWh ang gagamitin mo?',
+                      style: TextStyle(
+                        fontSize: 19,
+                        fontWeight: FontWeight.w900,
+                        color: textDark,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        border: Border.all(
+                          color: tierCardBorder.withValues(alpha: 0.3),
+                        ),
+                        borderRadius: BorderRadius.circular(17),
+                      ),
+                      child: Row(
+                        children: [
+                          modeChip('Konsumo (kWh)', _CalcInput.kwh),
+                          modeChip('Budget (₱)', _CalcInput.pesos),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      style: TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w900,
+                        color: brandOrangeText,
+                      ),
+                      decoration: InputDecoration(
+                        prefixText: isPesoMode ? '₱ ' : null,
+                        prefixStyle: TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          color: brandOrangeText,
+                        ),
+                        suffixText: isPesoMode ? null : 'kWh',
+                        suffixStyle: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: textDark.withValues(alpha: 0.45),
+                        ),
+                        hintText: isPesoMode ? '2500' : '250',
+                        hintStyle: TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          color: textDark.withValues(alpha: 0.18),
+                        ),
+                        filled: true,
+                        fillColor: Colors.white,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 16,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(color: tierCardBorder),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(
+                            color: tierCardBorder.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(
+                            color: tierCardBorder,
+                            width: 1.6,
+                          ),
+                        ),
+                      ),
+                      onSubmitted: (_) => compute(),
+                    ),
+
+                    if (error != null) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(
+                            Icons.error_outline_rounded,
+                            size: 15,
+                            color: Color(0xFFB3261E),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              error!,
+                              style: const TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFFB3261E),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+
+                    const SizedBox(height: 10),
+                    Text(
+                      isPesoMode
+                          ? 'Titingnan kung ilang kWh ang kasya sa budget na ito. (Hindi pa gumagana)'
+                          : 'Ipapakita ang buong itemized breakdown para sa konsumong ito.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: textDark.withValues(alpha: 0.5),
+                        height: 1.35,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    SizedBox(
+                      height: 52,
+                      child: ElevatedButton(
+                        onPressed: compute,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: tierCardBorder,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                        ),
+                        child: const Text(
+                          'Compute',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   // ── 3D Ticket Receipt Modal Bottom Sheet ─────────────────────────────────
 
   void _showBillBreakdown(
@@ -233,13 +623,15 @@ class _BillingScreenState extends State<BillingScreen> {
     required double tierEnergy,
     required double tierPercentage,
     required String tierRemainingText,
+    required double fixedCharge,
+    required String sourceFile,
   }) {
     bool isClosing = false;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withValues(alpha: 0.25),
+      barrierColor: Colors.black.withValues(alpha: 0.45),
       builder: (sheetContext) {
         return RepaintBoundary(
           child: Padding(
@@ -248,23 +640,6 @@ class _BillingScreenState extends State<BillingScreen> {
             ),
             child: Stack(
               children: [
-                // Static blur backdrop. This used to wrap the
-                // SingleChildScrollView directly, which meant the engine
-                // had to re-sample the gaussian blur every single scroll
-                // frame. The barrier behind the sheet doesn't change while
-                // scrolling, so isolating it as its own RepaintBoundary
-                // sibling lets the compositor cache it once instead of
-                // recomputing it on every frame of the scroll gesture.
-                Positioned.fill(
-                  child: RepaintBoundary(
-                    child: ClipRect(
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                        child: const SizedBox.expand(),
-                      ),
-                    ),
-                  ),
-                ),
                 Container(
                   padding: EdgeInsets.only(
                     top: MediaQuery.of(sheetContext).padding.top + 32,
@@ -290,94 +665,102 @@ class _BillingScreenState extends State<BillingScreen> {
                           alignment: Alignment.topCenter,
                           clipBehavior: Clip.none,
                           children: [
-                          // Outer 3D Drop Shadow
-                          Positioned.fill(
-                            child: CustomPaint(
-                              isComplex: true,
-                              willChange: false,
-                              painter: _TicketShadowPainter(
-                                clipper: _ticketClipper,
-                              ),
-                            ),
-                          ),
-
-                          // Ticket Card Container with Glassmorphic Fill
-                          ClipPath(
-                            clipper: _ticketClipper,
-                            child: Container(
-                              width: double.infinity,
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.92),
-                                border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.5),
-                                  width: 1.5,
+                            // Outer 3D Drop Shadow
+                            Positioned.fill(
+                              child: CustomPaint(
+                                isComplex: true,
+                                willChange: false,
+                                painter: _TicketShadowPainter(
+                                  clipper: _ticketClipper,
                                 ),
                               ),
-                              padding: const EdgeInsets.fromLTRB(28, 54, 28, 40),
-                              child: FutureBuilder<Map<String, dynamic>>(
-                                future: _fetchBillBreakdownCached(kwh),
-                                builder: (context, snapshot) {
-                                  if (snapshot.connectionState !=
-                                      ConnectionState.done) {
-                                    return const Padding(
-                                      padding:
-                                          EdgeInsets.symmetric(vertical: 90),
-                                      child: Center(
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2.5,
+                            ),
+
+                            // Ticket Card Container with Glassmorphic Fill
+                            ClipPath(
+                              clipper: _ticketClipper,
+                              child: Container(
+                                width: double.infinity,
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.92),
+                                  border: Border.all(
+                                    color: Colors.white.withValues(alpha: 0.5),
+                                    width: 1.5,
+                                  ),
+                                ),
+                                padding: const EdgeInsets.fromLTRB(
+                                  28,
+                                  54,
+                                  28,
+                                  40,
+                                ),
+                                child: FutureBuilder<Map<String, dynamic>>(
+                                  future: _fetchBillBreakdownCached(kwh),
+                                  builder: (context, snapshot) {
+                                    if (snapshot.connectionState !=
+                                        ConnectionState.done) {
+                                      return const Padding(
+                                        padding: EdgeInsets.symmetric(
+                                          vertical: 90,
                                         ),
-                                      ),
-                                    );
-                                  }
-
-                                  if (snapshot.hasError ||
-                                      snapshot.data == null) {
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 70,
-                                      ),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            Icons.error_outline_rounded,
-                                            size: 44,
-                                            color: textDark.withValues(
-                                              alpha: 0.3,
-                                            ),
+                                        child: Center(
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2.5,
                                           ),
-                                          const SizedBox(height: 16),
-                                          Text(
-                                            'Unable to load bill breakdown',
-                                            style: TextStyle(
+                                        ),
+                                      );
+                                    }
+
+                                    if (snapshot.hasError ||
+                                        snapshot.data == null) {
+                                      return Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 70,
+                                        ),
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              Icons.error_outline_rounded,
+                                              size: 44,
                                               color: textDark.withValues(
-                                                alpha: 0.6,
+                                                alpha: 0.3,
                                               ),
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.w600,
                                             ),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                  }
+                                            const SizedBox(height: 16),
+                                            Text(
+                                              'Unable to load bill breakdown',
+                                              style: TextStyle(
+                                                color: textDark.withValues(
+                                                  alpha: 0.6,
+                                                ),
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    }
 
-                                  return _buildTicketContent(
-                                    context,
-                                    snapshot.data!,
-                                    kwh,
-                                    tierTitle: tierTitle,
-                                    tierRate: tierRate,
-                                    tierMax: tierMax,
-                                    tierEnergy: tierEnergy,
-                                    tierPercentage: tierPercentage,
-                                    tierRemainingText: tierRemainingText,
-                                  );
-                                },
+                                    return _buildTicketContent(
+                                      context,
+                                      snapshot.data!,
+                                      kwh,
+                                      tierTitle: tierTitle,
+                                      tierRate: tierRate,
+                                      tierMax: tierMax,
+                                      tierEnergy: tierEnergy,
+                                      tierPercentage: tierPercentage,
+                                      tierRemainingText: tierRemainingText,
+                                      fixedCharge: fixedCharge,
+                                      sourceFile: sourceFile,
+                                    );
+                                  },
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
                         ),
                       ),
                     ),
@@ -401,9 +784,12 @@ class _BillingScreenState extends State<BillingScreen> {
     required double tierEnergy,
     required double tierPercentage,
     required String tierRemainingText,
+    required double fixedCharge,
+    required String sourceFile,
   }) {
     final items = _buildBreakdownItems(data);
-    final double total = (data['total_energy_amount'] as num?)?.toDouble() ??
+    final double total =
+        (data['total_energy_amount'] as num?)?.toDouble() ??
         items.fold(0.0, (sum, item) => sum + item.amount);
 
     return Column(
@@ -526,7 +912,6 @@ class _BillingScreenState extends State<BillingScreen> {
         // becomes scrollable once the items don't fit.
         Flexible(
           child: SingleChildScrollView(
-            
             physics: const ClampingScrollPhysics(),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -576,6 +961,56 @@ class _BillingScreenState extends State<BillingScreen> {
             ),
           ],
         ),
+        // ── Rate schedule provenance (from RTDB meralco_rates) ──────
+        if (fixedCharge > 0) ...[
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Fixed Charge',
+                style: TextStyle(
+                  color: textDark.withValues(alpha: 0.6),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                '₱${fixedCharge.toStringAsFixed(4)}',
+                style: TextStyle(
+                  color: textDark.withValues(alpha: 0.75),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ],
+        if (sourceFile.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                Icons.description_outlined,
+                size: 13,
+                color: textDark.withValues(alpha: 0.4),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Source: $sourceFile',
+                  style: TextStyle(
+                    color: textDark.withValues(alpha: 0.45),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
         const SizedBox(height: 28),
 
         // ── Done (text-only, dismisses the sheet) ───────────────────
@@ -602,7 +1037,8 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   Widget _buildLineItemRow(_BillLineItem item) {
-    if (item.amount == 0 && item.subItems.isEmpty) return const SizedBox.shrink();
+    if (item.amount == 0 && item.subItems.isEmpty)
+      return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -685,7 +1121,9 @@ class _BillingScreenState extends State<BillingScreen> {
                 child: AnimatedAlign(
                   duration: const Duration(milliseconds: 250),
                   curve: Curves.easeInOut,
-                  alignment: isEom ? Alignment.centerLeft : Alignment.centerRight,
+                  alignment: isEom
+                      ? Alignment.centerLeft
+                      : Alignment.centerRight,
                   child: FractionallySizedBox(
                     widthFactor: 0.5,
                     heightFactor: 1.0,
@@ -742,11 +1180,7 @@ class _BillingScreenState extends State<BillingScreen> {
               fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
               letterSpacing: 0.1,
             ),
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.visible,
-            ),
+            child: Text(label, maxLines: 1, overflow: TextOverflow.visible),
           ),
         ),
       ),
@@ -768,16 +1202,18 @@ class _BillingScreenState extends State<BillingScreen> {
 
           Map<String, double> rates = Map.of(_fallbackRates);
           String effectivePeriod = '';
+          double fixedCharge = 0.0;
+          String sourceFile = '';
 
           if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
             final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
 
             final forecastData = data['forecast'] as Map<dynamic, dynamic>?;
             if (forecastData != null) {
-              estimatedMonthEnd =
-                  (forecastData['projected_eom_kWh'] ?? 0).toDouble();
-              predictedDayTotal =
-                  (forecastData['predicted_day_total_kWh'] ?? 0).toDouble();
+              estimatedMonthEnd = (forecastData['projected_eom_kWh'] ?? 0)
+                  .toDouble();
+              predictedDayTotal = (forecastData['predicted_day_total_kWh'] ?? 0)
+                  .toDouble();
             }
 
             final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
@@ -785,61 +1221,40 @@ class _BillingScreenState extends State<BillingScreen> {
               cumulativeEnergy =
                   (liveReading['cumul_kWh'] ?? liveReading['cumul_kwh'] ?? 0)
                       .toDouble();
-              estimatedCostLive =
-                  (liveReading['estimated_cost'] ?? 0).toDouble();
+              estimatedCostLive = (liveReading['estimated_cost'] ?? 0)
+                  .toDouble();
               todayKwh = cumulativeEnergy;
             }
 
             rates = _parseRates(data['meralco_rates']);
             effectivePeriod = _parseEffectivePeriod(data['meralco_rates']);
+            fixedCharge = _parseFixedCharge(data['meralco_rates']);
+            sourceFile = _parseSourceFile(data['meralco_rates']);
           }
 
           final bool isCurrentMode = _mode == _BillMode.current;
           final double heroKwh = isCurrentMode ? todayKwh : estimatedMonthEnd;
-          final String heroKwhLabel =
-              isCurrentMode ? "TODAY'S USAGE" : 'PROJECTED END OF MONTH';
-          final String heroBillLabel =
-              isCurrentMode ? 'EST. TOTAL BILL' : 'ESTIMATED BILL';
+          final String heroKwhLabel = isCurrentMode
+              ? "TODAY'S USAGE"
+              : 'PROJECTED END OF MONTH';
+          final String heroBillLabel = isCurrentMode
+              ? 'EST. TOTAL BILL'
+              : 'ESTIMATED BILL';
 
-          final double tierCardEnergy = isCurrentMode ? cumulativeEnergy : estimatedMonthEnd;
+          final double tierCardEnergy = isCurrentMode
+              ? cumulativeEnergy
+              : estimatedMonthEnd;
 
-          String currentTierTitle = 'TIER 1 STATUS';
-          String currentTierRate = _formatRate(rates, '0-200');
-          double currentTierMax = 200.0;
-          String remainingText = '';
+          // Tier resolution is shared with the bill calculator, so both the
+          // live card and a manually entered figure land on identical labels,
+          // thresholds and progress values.
+          final _TierInfo liveTier = _tierInfoFor(tierCardEnergy, rates);
 
-          if (tierCardEnergy <= 200) {
-            currentTierTitle = 'TIER 1 STATUS';
-            currentTierRate = _formatRate(rates, '0-200');
-            currentTierMax = 200.0;
-            double remaining = (200.0 - tierCardEnergy).clamp(0.0, 200.0);
-            remainingText =
-                '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
-          } else if (tierCardEnergy <= 300) {
-            currentTierTitle = 'TIER 2 STATUS';
-            currentTierRate = _formatRate(rates, '201-300');
-            currentTierMax = 300.0;
-            double remaining = (300.0 - tierCardEnergy).clamp(0.0, 100.0);
-            remainingText =
-                '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
-          } else if (tierCardEnergy <= 400) {
-            currentTierTitle = 'TIER 3 STATUS';
-            currentTierRate = _formatRate(rates, '301-400');
-            currentTierMax = 400.0;
-            double remaining = (400.0 - tierCardEnergy).clamp(0.0, 100.0);
-            remainingText =
-                '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
-          } else {
-            currentTierTitle = 'TIER 4 STATUS';
-            currentTierRate = _formatRate(rates, 'over-400');
-            currentTierMax = 400.0;
-            remainingText = 'Naabot na ang pinakamataas na tier';
-          }
-
-          final double percentage = (tierCardEnergy / currentTierMax).clamp(
-            0.0,
-            1.0,
-          );
+          final String currentTierTitle = liveTier.title;
+          final String currentTierRate = liveTier.rate;
+          final double currentTierMax = liveTier.max;
+          final String remainingText = liveTier.remainingText;
+          final double percentage = liveTier.percentage;
 
           return CustomMaterialIndicator(
             onRefresh: _handleRefresh,
@@ -881,7 +1296,8 @@ class _BillingScreenState extends State<BillingScreen> {
                             children: [
                               const SizedBox(height: 5),
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 crossAxisAlignment: CrossAxisAlignment.center,
                                 children: [
                                   Expanded(
@@ -909,31 +1325,43 @@ class _BillingScreenState extends State<BillingScreen> {
                                             showModalBottomSheet(
                                               context: context,
                                               backgroundColor: Colors.white,
-                                              shape: const RoundedRectangleBorder(
-                                                borderRadius: BorderRadius.vertical(
-                                                  top: Radius.circular(20),
-                                                ),
-                                              ),
+                                              shape:
+                                                  const RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.vertical(
+                                                          top: Radius.circular(
+                                                            20,
+                                                          ),
+                                                        ),
+                                                  ),
                                               builder: (context) => Padding(
-                                                padding: const EdgeInsets.all(24.0),
+                                                padding: const EdgeInsets.all(
+                                                  24.0,
+                                                ),
                                                 child: Column(
-                                                  mainAxisSize: MainAxisSize.min,
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
                                                   children: [
                                                     Row(
                                                       children: [
                                                         Icon(
                                                           Icons.refresh_rounded,
-                                                          color: brandOrangeText,
+                                                          color:
+                                                              brandOrangeText,
                                                           size: 18,
                                                         ),
-                                                        const SizedBox(width: 8),
+                                                        const SizedBox(
+                                                          width: 8,
+                                                        ),
                                                         Text(
                                                           'Refresh forecast',
                                                           style: TextStyle(
                                                             color: textDark,
                                                             fontSize: 16,
-                                                            fontWeight: FontWeight.w800,
+                                                            fontWeight:
+                                                                FontWeight.w800,
                                                           ),
                                                         ),
                                                       ],
@@ -942,11 +1370,13 @@ class _BillingScreenState extends State<BillingScreen> {
                                                     Text(
                                                       'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
                                                       style: TextStyle(
-                                                        color: textDark.withValues(
-                                                          alpha: 0.7,
-                                                        ),
+                                                        color: textDark
+                                                            .withValues(
+                                                              alpha: 0.7,
+                                                            ),
                                                         fontSize: 13,
-                                                        fontWeight: FontWeight.w500,
+                                                        fontWeight:
+                                                            FontWeight.w500,
                                                         height: 1.4,
                                                       ),
                                                     ),
@@ -1007,7 +1437,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                     Text(
                                       heroKwhLabel,
                                       style: TextStyle(
-                                        color: Colors.white.withValues(alpha: 0.95),
+                                        color: Colors.white.withValues(
+                                          alpha: 0.95,
+                                        ),
                                         fontSize: 10,
                                         fontWeight: FontWeight.w600,
                                       ),
@@ -1040,7 +1472,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                     Text(
                                       heroBillLabel,
                                       style: TextStyle(
-                                        color: Colors.white.withValues(alpha: 0.95),
+                                        color: Colors.white.withValues(
+                                          alpha: 0.95,
+                                        ),
                                         fontSize: 10,
                                         fontWeight: FontWeight.w600,
                                       ),
@@ -1211,8 +1645,8 @@ class _BillingScreenState extends State<BillingScreen> {
                                             .withValues(alpha: 0.4),
                                         valueColor:
                                             const AlwaysStoppedAnimation<Color>(
-                                          Colors.white,
-                                        ),
+                                              Colors.white,
+                                            ),
                                         minHeight: 7,
                                       ),
                                     ),
@@ -1259,6 +1693,8 @@ class _BillingScreenState extends State<BillingScreen> {
                             tierEnergy: tierCardEnergy,
                             tierPercentage: percentage,
                             tierRemainingText: remainingText,
+                            fixedCharge: fixedCharge,
+                            sourceFile: sourceFile,
                           ),
                           child: Container(
                             width: double.infinity,
@@ -1277,8 +1713,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                     style: TextStyle(
                                       fontSize: 110,
                                       fontWeight: FontWeight.w900,
-                                      color: const Color(0xFFE27B66)
-                                          .withValues(alpha: 0.18),
+                                      color: const Color(
+                                        0xFFE27B66,
+                                      ).withValues(alpha: 0.18),
                                     ),
                                   ),
                                 ),
@@ -1307,8 +1744,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                             Text(
                                               'See detailed itemized charges and breakdown!',
                                               style: TextStyle(
-                                                color: const Color(0xFF2B2C36)
-                                                    .withValues(alpha: 0.65),
+                                                color: const Color(
+                                                  0xFF2B2C36,
+                                                ).withValues(alpha: 0.65),
                                                 fontSize: 12,
                                                 fontWeight: FontWeight.w500,
                                               ),
@@ -1329,8 +1767,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                               shape: BoxShape.circle,
                                               boxShadow: [
                                                 BoxShadow(
-                                                  color: const Color(0xFFD36852)
-                                                      .withValues(alpha: 0.35),
+                                                  color: const Color(
+                                                    0xFFD36852,
+                                                  ).withValues(alpha: 0.35),
                                                   blurRadius: 10,
                                                   offset: const Offset(0, 4),
                                                 ),
@@ -1353,7 +1792,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                                 boxShadow: [
                                                   BoxShadow(
                                                     color: Colors.black
-                                                        .withValues(alpha: 0.15),
+                                                        .withValues(
+                                                          alpha: 0.15,
+                                                        ),
                                                     blurRadius: 4,
                                                     offset: const Offset(0, 2),
                                                   ),
@@ -1367,6 +1808,106 @@ class _BillingScreenState extends State<BillingScreen> {
                                             ),
                                           ),
                                         ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+
+                        // Bill Calculator Button
+                        InkWell(
+                          borderRadius: BorderRadius.circular(20),
+                          onTap: () => _showBillCalculator(
+                            context,
+                            rates,
+                            fixedCharge: fixedCharge,
+                            sourceFile: sourceFile,
+                          ),
+                          child: Container(
+                            width: double.infinity,
+                            clipBehavior: Clip.antiAlias,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFAEEDA),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: tierCardBorder.withValues(alpha: 0.18),
+                                width: 1,
+                              ),
+                            ),
+                            child: Stack(
+                              children: [
+                                Positioned(
+                                  right: -12,
+                                  bottom: -26,
+                                  child: Icon(
+                                    Icons.calculate_rounded,
+                                    size: 120,
+                                    color: tierCardBorder.withValues(
+                                      alpha: 0.10,
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20.0,
+                                    vertical: 18.0,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              'Bill calculator',
+                                              style: TextStyle(
+                                                color: tierTextColor,
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.w800,
+                                                letterSpacing: -0.2,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              'Ilagay ang sarili mong konsumo at tingnan ang bill.',
+                                              style: TextStyle(
+                                                color: tierTextColor.withValues(
+                                                  alpha: 0.65,
+                                                ),
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Container(
+                                        width: 48,
+                                        height: 48,
+                                        decoration: BoxDecoration(
+                                          color: tierCardBorder,
+                                          shape: BoxShape.circle,
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: tierCardBorder.withValues(
+                                                alpha: 0.32,
+                                              ),
+                                              blurRadius: 10,
+                                              offset: const Offset(0, 4),
+                                            ),
+                                          ],
+                                        ),
+                                        child: const Icon(
+                                          Icons.calculate_rounded,
+                                          color: Colors.white,
+                                          size: 24,
+                                        ),
                                       ),
                                     ],
                                   ),
