@@ -1,12 +1,57 @@
 import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart' show Simulation;
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
 import 'package:custom_refresh_indicator/custom_refresh_indicator.dart';
 
 enum _BillMode { endOfMonth, current }
+
+/// Bounces at the top (so pull-to-refresh still feels natural) but clamps
+/// hard at the bottom edge so the page can't be pulled past the end.
+class TopBounceBottomClampPhysics extends BouncingScrollPhysics {
+  const TopBounceBottomClampPhysics({super.parent});
+
+  @override
+  TopBounceBottomClampPhysics applyTo(ScrollPhysics? ancestor) {
+    return TopBounceBottomClampPhysics(parent: buildParent(ancestor));
+  }
+
+  @override
+  double applyBoundaryConditions(ScrollMetrics position, double value) {
+    // Already at/after the bottom edge and pushing further down.
+    if (position.maxScrollExtent <= position.pixels &&
+        position.pixels < value) {
+      return value - position.pixels;
+    }
+    // Crossing the bottom edge in this single update.
+    if (position.pixels < position.maxScrollExtent &&
+        position.maxScrollExtent < value) {
+      return value - position.maxScrollExtent;
+    }
+    // Top edge: no clamping, so it keeps the bounce.
+    return 0.0;
+  }
+
+  @override
+  Simulation? createBallisticSimulation(
+    ScrollMetrics position,
+    double velocity,
+  ) {
+    // Flinging toward the bottom, or resting at/past it: use clamping
+    // behavior so it stops dead at the end.
+    if (velocity > 0.0 || position.pixels >= position.maxScrollExtent) {
+      return const ClampingScrollPhysics().createBallisticSimulation(
+        position,
+        velocity,
+      );
+    }
+    // Otherwise (top side) keep the normal bouncing spring.
+    return super.createBallisticSimulation(position, velocity);
+  }
+}
 
 /// Input mode for the manual bill calculator.
 /// [kwh]   — user types consumption, we hit /bill/breakdown directly.
@@ -56,14 +101,23 @@ class _BillingScreenState extends State<BillingScreen> {
 
   final Map<int, Future<Map<String, dynamic>>> _breakdownCache = {};
 
-  // Shared clipper instance for the ticket sheet — the shadow painter and
-  // the ClipPath both need the same path, so we build the clip geometry once
-  // and reuse it instead of two separate _TicketReceiptClipper instances
-  // independently recomputing the same Path each frame.
+  // Timestamp for tracking when the billing forecast was last refreshed
+  DateTime? _lastRefreshedAt;
+
+  // Shared clipper instance for the ticket sheet
   static final _TicketReceiptClipper _ticketClipper = _TicketReceiptClipper(
     notchRadius: 16,
     notchPositionRatio: 0.24,
   );
+
+  @override
+  void initState() {
+    super.initState();
+    // Auto-refresh the billing page every time this screen opens
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _handleRefresh();
+    });
+  }
 
   Future<Map<String, dynamic>> _fetchBillBreakdownCached(double kwh) {
     final key = kwh.round();
@@ -88,7 +142,22 @@ class _BillingScreenState extends State<BillingScreen> {
       }
     } catch (e) {
       debugPrint('Error sending refresh request: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _lastRefreshedAt = DateTime.now();
+        });
+      }
     }
+  }
+
+  String _formatLastRefreshed(DateTime dateTime) {
+    final hour = dateTime.hour == 0
+        ? 12
+        : (dateTime.hour > 12 ? dateTime.hour - 12 : dateTime.hour);
+    final minute = dateTime.minute.toString().padLeft(2, '0');
+    final period = dateTime.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
   }
 
   Map<String, double> _parseRates(dynamic meralcoRatesNode) {
@@ -315,17 +384,6 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
-  // ── Bill Calculator (manual input) ───────────────────────────────────────
-  // kWh mode is live: the typed consumption is passed straight to the
-  // existing breakdown sheet, so no breakdown UI is duplicated here.
-  //
-  // Peso mode is UI only. /bill/breakdown accepts kwh exclusively, so a
-  // budget figure has to be inverted into kWh before anything can be
-  // fetched. Wire it by replacing the _resolveKwh() stub below with a
-  // numeric solver (the bill is monotonic and piecewise-linear in kWh, so
-  // the secant method converges in two or three probes against
-  // data['total_energy_amount']).
-
   void _showBillCalculator(
     BuildContext context,
     Map<String, double> rates, {
@@ -336,6 +394,11 @@ class _BillingScreenState extends State<BillingScreen> {
     _CalcInput inputType = _CalcInput.kwh;
     String? error;
 
+    // --- DUMMY STATE FOR RATE MONTH ---
+    String selectedMonth = 'August';
+    final List<String> availableMonths = ['June', 'July', 'August', 'September'];
+    // ----------------------------------
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -343,8 +406,6 @@ class _BillingScreenState extends State<BillingScreen> {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (innerContext, setSheetState) {
-            /// Resolves the typed value into a kWh figure.
-            /// TODO(peso mode): implement the inverse solve for _CalcInput.pesos.
             double? resolveKwh(double value) {
               if (inputType == _CalcInput.kwh) return value;
               return null;
@@ -353,7 +414,7 @@ class _BillingScreenState extends State<BillingScreen> {
             void compute() {
               final value = double.tryParse(controller.text.trim());
               if (value == null || value <= 0) {
-                setSheetState(() => error = 'Maglagay ng valid na numero.');
+                setSheetState(() => error = 'Enter a valid number.');
                 return;
               }
 
@@ -361,7 +422,7 @@ class _BillingScreenState extends State<BillingScreen> {
               if (kwh == null) {
                 setSheetState(
                   () => error =
-                      'Hindi pa available ang budget mode. Gamitin muna ang kWh.',
+                      'Budget mode is not available yet. Please use kWh for now.',
                 );
                 return;
               }
@@ -456,8 +517,8 @@ class _BillingScreenState extends State<BillingScreen> {
                     const SizedBox(height: 6),
                     Text(
                       isPesoMode
-                          ? 'Magkano ang budget mo sa kuryente?'
-                          : 'Ilang kWh ang gagamitin mo?',
+                          ? 'What is your electricity budget?'
+                          : 'How many kWh will you use?',
                       style: TextStyle(
                         fontSize: 19,
                         fontWeight: FontWeight.w900,
@@ -465,7 +526,6 @@ class _BillingScreenState extends State<BillingScreen> {
                       ),
                     ),
                     const SizedBox(height: 18),
-
                     Container(
                       padding: const EdgeInsets.all(4),
                       decoration: BoxDecoration(
@@ -477,13 +537,12 @@ class _BillingScreenState extends State<BillingScreen> {
                       ),
                       child: Row(
                         children: [
-                          modeChip('Konsumo (kWh)', _CalcInput.kwh),
+                          modeChip('Usage (kWh)', _CalcInput.kwh),
                           modeChip('Budget (₱)', _CalcInput.pesos),
                         ],
                       ),
                     ),
                     const SizedBox(height: 18),
-
                     TextField(
                       controller: controller,
                       autofocus: true,
@@ -540,7 +599,6 @@ class _BillingScreenState extends State<BillingScreen> {
                       ),
                       onSubmitted: (_) => compute(),
                     ),
-
                     if (error != null) ...[
                       const SizedBox(height: 10),
                       Row(
@@ -566,11 +624,64 @@ class _BillingScreenState extends State<BillingScreen> {
                       ),
                     ],
 
-                    const SizedBox(height: 10),
+                    // --- NEW MONTH SELECTOR UI START ---
+                    const SizedBox(height: 18),
+                    Text(
+                      'RATE MONTH',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                        color: textDark.withValues(alpha: 0.55),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: tierCardBorder.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: selectedMonth,
+                          isExpanded: true,
+                          icon: Icon(
+                            Icons.calendar_month_rounded,
+                            color: brandOrangeText,
+                            size: 20,
+                          ),
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: textDark,
+                          ),
+                          items: availableMonths.map((String month) {
+                            return DropdownMenuItem<String>(
+                              value: month,
+                              child: Text('$month Rate'),
+                            );
+                          }).toList(),
+                          onChanged: (String? newValue) {
+                            if (newValue != null) {
+                              setSheetState(() {
+                                selectedMonth = newValue;
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                    ),
+                    // --- NEW MONTH SELECTOR UI END ---
+
+                    const SizedBox(height: 16),
                     Text(
                       isPesoMode
-                          ? 'Titingnan kung ilang kWh ang kasya sa budget na ito. (Hindi pa gumagana)'
-                          : 'Ipapakita ang buong itemized breakdown para sa konsumong ito.',
+                          ? 'Checks how many kWh fit within this budget. (Not working yet)'
+                          : 'Shows the full itemized breakdown for this usage.',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
@@ -579,7 +690,6 @@ class _BillingScreenState extends State<BillingScreen> {
                       ),
                     ),
                     const SizedBox(height: 20),
-
                     SizedBox(
                       height: 52,
                       child: ElevatedButton(
@@ -611,8 +721,6 @@ class _BillingScreenState extends State<BillingScreen> {
       },
     );
   }
-
-  // ── 3D Ticket Receipt Modal Bottom Sheet ─────────────────────────────────
 
   void _showBillBreakdown(
     BuildContext context, {
@@ -665,7 +773,6 @@ class _BillingScreenState extends State<BillingScreen> {
                           alignment: Alignment.topCenter,
                           clipBehavior: Clip.none,
                           children: [
-                            // Outer 3D Drop Shadow
                             Positioned.fill(
                               child: CustomPaint(
                                 isComplex: true,
@@ -675,8 +782,6 @@ class _BillingScreenState extends State<BillingScreen> {
                                 ),
                               ),
                             ),
-
-                            // Ticket Card Container with Glassmorphic Fill
                             ClipPath(
                               clipper: _ticketClipper,
                               child: Container(
@@ -796,7 +901,6 @@ class _BillingScreenState extends State<BillingScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // ── Lead element: Total ────────────────────────────────────
         Center(
           child: Column(
             children: [
@@ -834,8 +938,6 @@ class _BillingScreenState extends State<BillingScreen> {
         const SizedBox(height: 20),
         _TicketDashedTearLine(color: textDark.withValues(alpha: 0.15)),
         const SizedBox(height: 20),
-
-        // ── Tier status ─────────────────────────────────────────────
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -902,14 +1004,6 @@ class _BillingScreenState extends State<BillingScreen> {
         const SizedBox(height: 20),
         _TicketDashedTearLine(color: textDark.withValues(alpha: 0.15)),
         const SizedBox(height: 20),
-
-        // ── Itemized breakdown (the only scrollable region) ──────────
-        // Everything above this point (total, tier status) and below it
-        // (reiterated total, Done) is static — it lays out once and never
-        // repaints during scroll. Only this list, wrapped in Flexible +
-        // a shrink-wrapped SingleChildScrollView, scrolls: it takes just
-        // the space it needs up to what's left in the ticket, and only
-        // becomes scrollable once the items don't fit.
         Flexible(
           child: SingleChildScrollView(
             physics: const ClampingScrollPhysics(),
@@ -937,8 +1031,6 @@ class _BillingScreenState extends State<BillingScreen> {
         const SizedBox(height: 4),
         _TicketDashedTearLine(color: textDark.withValues(alpha: 0.15)),
         const SizedBox(height: 20),
-
-        // ── Total, reiterated ───────────────────────────────────────
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -961,7 +1053,6 @@ class _BillingScreenState extends State<BillingScreen> {
             ),
           ],
         ),
-        // ── Rate schedule provenance (from RTDB meralco_rates) ──────
         if (fixedCharge > 0) ...[
           const SizedBox(height: 10),
           Row(
@@ -1012,8 +1103,6 @@ class _BillingScreenState extends State<BillingScreen> {
           ),
         ],
         const SizedBox(height: 28),
-
-        // ── Done (text-only, dismisses the sheet) ───────────────────
         _TicketDashedTearLine(color: textDark.withValues(alpha: 0.15)),
         const SizedBox(height: 16),
         Center(
@@ -1245,9 +1334,6 @@ class _BillingScreenState extends State<BillingScreen> {
               ? cumulativeEnergy
               : estimatedMonthEnd;
 
-          // Tier resolution is shared with the bill calculator, so both the
-          // live card and a manually entered figure land on identical labels,
-          // thresholds and progress values.
           final _TierInfo liveTier = _tierInfoFor(tierCardEnergy, rates);
 
           final String currentTierTitle = liveTier.title;
@@ -1272,7 +1358,7 @@ class _BillingScreenState extends State<BillingScreen> {
             },
             child: SingleChildScrollView(
               physics: const AlwaysScrollableScrollPhysics(
-                parent: BouncingScrollPhysics(),
+                parent: TopBounceBottomClampPhysics(),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1301,32 +1387,34 @@ class _BillingScreenState extends State<BillingScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.center,
                                 children: [
                                   Expanded(
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
-                                        Flexible(
-                                          child: Text(
-                                            'END OF DAY CONSUMPTION',
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: brandOrangeText.withValues(
-                                                alpha: 0.85,
+                                        Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Flexible(
+                                              child: Text(
+                                                'END OF DAY CONSUMPTION',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  color: brandOrangeText
+                                                      .withValues(alpha: 0.85),
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w700,
+                                                  letterSpacing: 0.4,
+                                                ),
                                               ),
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w700,
-                                              letterSpacing: 0.4,
                                             ),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 4),
-                                        GestureDetector(
-                                          onTap: () {
-                                            showModalBottomSheet(
-                                              context: context,
-                                              backgroundColor: Colors.white,
-                                              shape:
-                                                  const RoundedRectangleBorder(
+                                            const SizedBox(width: 4),
+                                            GestureDetector(
+                                              onTap: () {
+                                                showModalBottomSheet(
+                                                  context: context,
+                                                  backgroundColor: Colors.white,
+                                                  shape: const RoundedRectangleBorder(
                                                     borderRadius:
                                                         BorderRadius.vertical(
                                                           top: Radius.circular(
@@ -1334,66 +1422,89 @@ class _BillingScreenState extends State<BillingScreen> {
                                                           ),
                                                         ),
                                                   ),
-                                              builder: (context) => Padding(
-                                                padding: const EdgeInsets.all(
-                                                  24.0,
-                                                ),
-                                                child: Column(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
-                                                  children: [
-                                                    Row(
+                                                  builder: (context) => Padding(
+                                                    padding:
+                                                        const EdgeInsets.all(
+                                                          24.0,
+                                                        ),
+                                                    child: Column(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
                                                       children: [
-                                                        Icon(
-                                                          Icons.refresh_rounded,
-                                                          color:
-                                                              brandOrangeText,
-                                                          size: 18,
+                                                        Row(
+                                                          children: [
+                                                            Icon(
+                                                              Icons
+                                                                  .refresh_rounded,
+                                                              color:
+                                                                  brandOrangeText,
+                                                              size: 18,
+                                                            ),
+                                                            const SizedBox(
+                                                              width: 8,
+                                                            ),
+                                                            Text(
+                                                              'Refresh forecast',
+                                                              style: TextStyle(
+                                                                color: textDark,
+                                                                fontSize: 16,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w800,
+                                                              ),
+                                                            ),
+                                                          ],
                                                         ),
                                                         const SizedBox(
-                                                          width: 8,
+                                                          height: 10,
                                                         ),
                                                         Text(
-                                                          'Refresh forecast',
+                                                          'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
                                                           style: TextStyle(
-                                                            color: textDark,
-                                                            fontSize: 16,
+                                                            color: textDark
+                                                                .withValues(
+                                                                  alpha: 0.7,
+                                                                ),
+                                                            fontSize: 13,
                                                             fontWeight:
-                                                                FontWeight.w800,
+                                                                FontWeight.w500,
+                                                            height: 1.4,
                                                           ),
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 12,
                                                         ),
                                                       ],
                                                     ),
-                                                    const SizedBox(height: 10),
-                                                    Text(
-                                                      'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
-                                                      style: TextStyle(
-                                                        color: textDark
-                                                            .withValues(
-                                                              alpha: 0.7,
-                                                            ),
-                                                        fontSize: 13,
-                                                        fontWeight:
-                                                            FontWeight.w500,
-                                                        height: 1.4,
-                                                      ),
-                                                    ),
-                                                    const SizedBox(height: 12),
-                                                  ],
-                                                ),
+                                                  ),
+                                                );
+                                              },
+                                              child: Icon(
+                                                Icons.info_outline_rounded,
+                                                size: 14,
+                                                color: brandOrangeText
+                                                    .withValues(alpha: 0.5),
                                               ),
-                                            );
-                                          },
-                                          child: Icon(
-                                            Icons.info_outline_rounded,
-                                            size: 14,
-                                            color: brandOrangeText.withValues(
-                                              alpha: 0.5,
+                                            ),
+                                          ],
+                                        ),
+                                        // Last Refresh Timestamp Label
+                                        if (_lastRefreshedAt != null) ...[
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            'Last refreshed: ${_formatLastRefreshed(_lastRefreshedAt!)}',
+                                            style: TextStyle(
+                                              color: brandOrangeText.withValues(
+                                                alpha: 0.65,
+                                              ),
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w600,
                                             ),
                                           ),
-                                        ),
+                                        ],
                                       ],
                                     ),
                                   ),
@@ -1500,15 +1611,16 @@ class _BillingScreenState extends State<BillingScreen> {
                                         : null,
                                     builder: (context, billSnapshot) {
                                       final totalEnergyAmount =
-                                          (billSnapshot.data?['total_energy_amount']
+                                          (billSnapshot
+                                                      .data?['total_energy_amount']
                                                   as num?)
                                               ?.toDouble();
                                       final double estimatedBillPeso =
                                           totalEnergyAmount ??
-                                              _calculateBill(
-                                                estimatedMonthEnd,
-                                                rates,
-                                              );
+                                          _calculateBill(
+                                            estimatedMonthEnd,
+                                            rates,
+                                          );
                                       return Text(
                                         '₱${estimatedBillPeso.toStringAsFixed(2)}',
                                         style: const TextStyle(
@@ -1874,7 +1986,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                             ),
                                             const SizedBox(height: 4),
                                             Text(
-                                              'Ilagay ang sarili mong konsumo at tingnan ang bill.',
+                                              'Enter your own usage and see the bill.',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
                                               style: TextStyle(
                                                 color: tierTextColor.withValues(
                                                   alpha: 0.65,
@@ -1952,41 +2066,9 @@ class _BillingScreenState extends State<BillingScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  SizedBox(
-                    height: 170,
-                    child: ListView(
-                      scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.symmetric(horizontal: 18.0),
-                      physics: const BouncingScrollPhysics(),
-                      children: [
-                        _buildRateCard(
-                          tierTitle: 'TIER 1',
-                          range: 'Up to 200 kWh',
-                          rate: _formatRate(rates, '0-200'),
-                          isActive: cumulativeEnergy <= 200,
-                        ),
-                        _buildRateCard(
-                          tierTitle: 'TIER 2',
-                          range: '201 - 300 kWh',
-                          rate: _formatRate(rates, '201-300'),
-                          isActive:
-                              cumulativeEnergy > 200 && cumulativeEnergy <= 300,
-                        ),
-                        _buildRateCard(
-                          tierTitle: 'TIER 3',
-                          range: '301 - 400 kWh',
-                          rate: _formatRate(rates, '301-400'),
-                          isActive:
-                              cumulativeEnergy > 300 && cumulativeEnergy <= 400,
-                        ),
-                        _buildRateCard(
-                          tierTitle: 'TIER 4',
-                          range: 'Over 400 kWh',
-                          rate: _formatRate(rates, 'over-400'),
-                          isActive: cumulativeEnergy > 400,
-                        ),
-                      ],
-                    ),
+                  _buildStackedRateCards(
+                    rates: rates,
+                    cumulativeEnergy: tierCardEnergy,
                   ),
                   const SizedBox(height: 120),
                 ],
@@ -1998,100 +2080,484 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+  void _openTierCardsHero(
+    BuildContext context,
+    double cumulativeEnergy,
+    Map<String, double> rates,
+  ) {
+    final tierData = [
+      {'tierTitle': 'TIER 1', 'isActive': cumulativeEnergy <= 200},
+      {
+        'tierTitle': 'TIER 2',
+        'isActive': cumulativeEnergy > 200 && cumulativeEnergy <= 300,
+      },
+      {
+        'tierTitle': 'TIER 3',
+        'isActive': cumulativeEnergy > 300 && cumulativeEnergy <= 400,
+      },
+      {'tierTitle': 'TIER 4', 'isActive': cumulativeEnergy > 400},
+    ];
+
+    final int activeIndex = tierData.indexWhere((t) => t['isActive'] as bool);
+    final int initialPage = activeIndex == -1 ? 0 : activeIndex;
+
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double viewportFraction = (screenWidth - 20) / screenWidth;
+
+    final PageController pageController = PageController(
+      initialPage: initialPage,
+      viewportFraction: viewportFraction,
+    );
+
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        opaque: false,
+        barrierDismissible: true,
+        barrierColor: Colors.black.withValues(alpha: 0.45),
+        transitionDuration: const Duration(milliseconds: 350),
+        reverseTransitionDuration: const Duration(milliseconds: 300),
+        pageBuilder: (context, animation, secondaryAnimation) {
+          return Scaffold(
+            backgroundColor: Colors.transparent,
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: creamBg,
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(28),
+                  ),
+                ),
+                padding: const EdgeInsets.only(bottom: 32.0),
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(height: 12),
+                      Center(
+                        child: Container(
+                          width: 44,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: textDark.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: Row(
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.close_rounded, size: 28),
+                              onPressed: () => Navigator.of(context).pop(),
+                            ),
+                            Expanded(
+                              child: Text(
+                                'Rate Brackets',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w800,
+                                  color: textDark,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 48),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                      SizedBox(
+                        height: 200,
+                        child: PageView.builder(
+                          controller: pageController,
+                          physics: const BouncingScrollPhysics(),
+                          itemCount: tierData.length,
+                          itemBuilder: (context, index) {
+                            final tier = tierData[index];
+
+                            Widget card = Container(
+                              height: 160.0,
+                              width: double.infinity,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(22),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.12),
+                                    blurRadius: 20,
+                                    spreadRadius: -4,
+                                    offset: const Offset(0, 10),
+                                  ),
+                                ],
+                              ),
+                              child: _buildRateCard(
+                                tierTitle: tier['tierTitle'] as String,
+                                isActive: tier['isActive'] as bool,
+                                index: index,
+                                rates: rates,
+                              ),
+                            );
+
+                            if (index == initialPage) {
+                              card = Hero(
+                                tag: 'tier_card_hero',
+                                child: Material(
+                                  type: MaterialType.transparency,
+                                  child: card,
+                                ),
+                              );
+                            }
+
+                            return AnimatedBuilder(
+                              animation: pageController,
+                              builder: (context, child) {
+                                double value = 1.0;
+                                if (pageController.position.haveDimensions) {
+                                  value = pageController.page! - index;
+                                  value = (1 - (value.abs() * 0.12)).clamp(
+                                    0.85,
+                                    1.0,
+                                  );
+                                }
+                                return Center(
+                                  child: Transform.scale(
+                                    scale: value,
+                                    child: child,
+                                  ),
+                                );
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8.0,
+                                ),
+                                child: card,
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          return FadeTransition(opacity: animation, child: child);
+        },
+      ),
+    );
+  }
+
+  Widget _buildStackedRateCards({
+    required Map<String, double> rates,
+    required double cumulativeEnergy,
+  }) {
+    final tierData = [
+      {'tierTitle': 'TIER 1', 'isActive': cumulativeEnergy <= 200},
+      {
+        'tierTitle': 'TIER 2',
+        'isActive': cumulativeEnergy > 200 && cumulativeEnergy <= 300,
+      },
+      {
+        'tierTitle': 'TIER 3',
+        'isActive': cumulativeEnergy > 300 && cumulativeEnergy <= 400,
+      },
+      {'tierTitle': 'TIER 4', 'isActive': cumulativeEnergy > 400},
+    ];
+
+    final activeIndex = tierData.indexWhere((t) => t['isActive'] as bool);
+    final frontIndex = activeIndex == -1 ? 0 : activeIndex;
+    final frontTier = tierData[frontIndex];
+
+    const double cardHeight = 160.0;
+    const double stackHeight = 95.0;
+    const double maskTop = 76.0;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 24.0, left: 18.0, right: 18.0),
+      child: SizedBox(
+        height: stackHeight,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned(
+              top: -12,
+              left: 12,
+              right: 12,
+              child: Transform.rotate(
+                angle: -0.05,
+                alignment: Alignment.topRight,
+                child: Container(
+                  height: cardHeight,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFA8B39).withValues(alpha: 0.50),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.15),
+                        blurRadius: 20,
+                        spreadRadius: -2,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 14,
+              left: 0,
+              right: 0,
+              child: GestureDetector(
+                onTap: () =>
+                    _openTierCardsHero(context, cumulativeEnergy, rates),
+                child: Hero(
+                  tag: 'tier_card_hero',
+                  flightShuttleBuilder:
+                      (
+                        flightContext,
+                        animation,
+                        flightDirection,
+                        fromHeroContext,
+                        toHeroContext,
+                      ) {
+                        return Material(
+                          type: MaterialType.transparency,
+                          child: toHeroContext.widget,
+                        );
+                      },
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: Container(
+                      height: cardHeight,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(22),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.22),
+                            blurRadius: 28,
+                            spreadRadius: -4,
+                            offset: const Offset(0, 14),
+                          ),
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.08),
+                            blurRadius: 8,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: _buildRateCard(
+                        tierTitle: frontTier['tierTitle'] as String,
+                        isActive: frontTier['isActive'] as bool,
+                        index: frontIndex,
+                        rates: rates,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: maskTop,
+              left: -18,
+              right: -18,
+              bottom: -500,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: creamBg,
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(24),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.12),
+                      blurRadius: 18,
+                      spreadRadius: 2,
+                      offset: const Offset(0, -6),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildRateCard({
     required String tierTitle,
-    required String range,
-    required String rate,
     required bool isActive,
+    required int index,
+    required Map<String, double> rates,
   }) {
-    final Color activeCardColor = const Color(0xFFFA8B39);
-    final Color inactiveCardColor = const Color(0xFFFAEEDA);
-    final Color activeTextColor = Colors.white;
-    final Color activeSubTextColor = Colors.white.withValues(alpha: 0.85);
-    final Color inactiveTextColor = const Color(0xFF7A3712);
-    final Color inactiveSubTextColor = const Color(
-      0xFF7A3712,
-    ).withValues(alpha: 0.55);
+    const bracketKeys = ['0-200', '201-300', '301-400', 'over-400'];
+    final dummySubtext = [
+      'First 200 kWh',
+      '201 - 300 kWh',
+      '301 - 400 kWh',
+      'Over 400 kWh',
+    ];
+
+    final rateKey = bracketKeys[index % bracketKeys.length];
+    final rateValue = rates[rateKey] ?? _fallbackRates[rateKey] ?? 0.0;
+    final rate = '₱ ${rateValue.toStringAsFixed(4)}';
+    final subtext = dummySubtext[index % dummySubtext.length];
+
+    final bgColor = isActive ? const Color(0xFFFA8B39) : Colors.white;
+    final textColor = isActive ? Colors.white : const Color(0xFF2D3142);
+    final subtitleColor = isActive
+        ? Colors.white.withValues(alpha: 0.8)
+        : Colors.grey.shade500;
+    final shapeColor = isActive
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black.withValues(alpha: 0.04);
 
     return Container(
-      width: 200,
-      margin: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 4.0),
-      padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 18.0),
       decoration: BoxDecoration(
-        color: isActive ? activeCardColor : inactiveCardColor,
-        borderRadius: BorderRadius.circular(20),
+        color: bgColor,
+        borderRadius: BorderRadius.circular(22),
         border: isActive
             ? null
-            : Border.all(
-                color: const Color(0xFFFA8B39).withValues(alpha: 0.15),
-                width: 1,
-              ),
+            : Border.all(color: Colors.grey.shade200, width: 1.5),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                tierTitle,
-                style: TextStyle(
-                  color: isActive ? activeSubTextColor : inactiveSubTextColor,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.5,
+          if (index % 4 == 0) ...[
+            Positioned(
+              top: -30,
+              right: -20,
+              child: CircleAvatar(radius: 75, backgroundColor: shapeColor),
+            ),
+            Positioned(
+              bottom: -40,
+              left: -10,
+              child: CircleAvatar(radius: 50, backgroundColor: shapeColor),
+            ),
+          ] else if (index % 4 == 1) ...[
+            Positioned(
+              top: 30,
+              right: -30,
+              child: Transform.rotate(
+                angle: 0.4,
+                child: Container(
+                  width: 120,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    color: shapeColor,
+                    borderRadius: BorderRadius.circular(30),
+                  ),
                 ),
               ),
-              if (isActive)
-                Container(
-                  width: 20,
-                  height: 20,
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.bolt_rounded,
-                    size: 13,
-                    color: activeCardColor,
-                  ),
+            ),
+          ] else if (index % 4 == 2) ...[
+            Positioned(
+              top: -40,
+              left: -20,
+              child: CircleAvatar(radius: 80, backgroundColor: shapeColor),
+            ),
+            Positioned(
+              top: 10,
+              left: 60,
+              child: CircleAvatar(radius: 40, backgroundColor: shapeColor),
+            ),
+          ] else ...[
+            Positioned(
+              bottom: -60,
+              right: 10,
+              child: CircleAvatar(radius: 90, backgroundColor: shapeColor),
+            ),
+            Positioned(
+              top: 20,
+              right: 20,
+              child: Icon(Icons.bolt_rounded, size: 90, color: shapeColor),
+            ),
+          ],
+          Padding(
+            padding: const EdgeInsets.all(22.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: isActive
+                            ? Colors.white.withValues(alpha: 0.25)
+                            : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        tierTitle,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: textColor,
+                          letterSpacing: 0.5,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    if (isActive)
+                      const Icon(
+                        Icons.check_circle_rounded,
+                        color: Colors.white,
+                        size: 26,
+                      ),
+                  ],
                 ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(
-            range,
-            style: TextStyle(
-              color: isActive ? activeTextColor : inactiveTextColor,
-              fontSize: 18,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 14),
-          Container(
-            height: 1,
-            color: isActive
-                ? Colors.white.withValues(alpha: 0.25)
-                : const Color(0xFFFA8B39).withValues(alpha: 0.15),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'RATE',
-            style: TextStyle(
-              color: isActive ? activeSubTextColor : inactiveSubTextColor,
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            rate,
-            style: TextStyle(
-              color: isActive ? activeTextColor : inactiveTextColor,
-              fontSize: 18,
-              fontWeight: FontWeight.w900,
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      subtext,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: subtitleColor,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          rate,
+                          style: TextStyle(
+                            fontSize: 34,
+                            fontWeight: FontWeight.w900,
+                            color: textColor,
+                            height: 1.1,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4.0),
+                          child: Text(
+                            '/ kWh',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: subtitleColor,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
         ],
@@ -2105,6 +2571,33 @@ class _BillLineItem {
   final double amount;
   final List<_BillLineItem> subItems;
   const _BillLineItem(this.label, this.amount, [this.subItems = const []]);
+}
+
+class _DiagonalHatchPainter extends CustomPainter {
+  final Color color;
+  final double lineSpacing;
+
+  const _DiagonalHatchPainter({required this.color, this.lineSpacing = 12.0});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.2
+      ..strokeCap = StrokeCap.round;
+
+    for (double i = -size.height; i < size.width; i += lineSpacing) {
+      canvas.drawLine(
+        Offset(i, 0),
+        Offset(i + size.height, size.height),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DiagonalHatchPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.lineSpacing != lineSpacing;
 }
 
 class CardCirclePainter extends CustomPainter {
@@ -2130,10 +2623,6 @@ class CardCirclePainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-// ── Realistic Dashed Tear Line ──────────────────────────────────────────────
-// Rendered with a single CustomPaint instead of List.generate'd widgets —
-// same visual output (dashWidth-sized dashes evenly spanning the available
-// width), but without instantiating a SizedBox+DecoratedBox pair per dash.
 class _TicketDashedTearLine extends StatelessWidget {
   final Color color;
   final double height;
@@ -2180,9 +2669,6 @@ class _DashedLinePainter extends CustomPainter {
     final dashCount = (size.width / (dashWidth + dashSpace)).floor();
     if (dashCount <= 0) return;
 
-    // Matches the original Flex(mainAxisAlignment: spaceBetween) layout:
-    // dashes of `dashWidth`, with the remaining space split evenly between
-    // and around them.
     final totalDashSpan = dashCount * dashWidth;
     final remaining = size.width - totalDashSpan;
     final gap = dashCount > 1 ? remaining / (dashCount - 1) : 0.0;
@@ -2205,7 +2691,6 @@ class _DashedLinePainter extends CustomPainter {
       oldDelegate.dashSpace != dashSpace;
 }
 
-// ── Custom Ticket Clipper (Side Notches + Top Rounded + Bottom Serrated) ───
 class _TicketReceiptClipper extends CustomClipper<Path> {
   final double notchRadius;
   final double notchPositionRatio;
@@ -2224,30 +2709,18 @@ class _TicketReceiptClipper extends CustomClipper<Path> {
 
     final notchY = size.height * notchPositionRatio;
 
-    // Top-Left Corner
     path.moveTo(0, cornerRadius);
     path.quadraticBezierTo(0, 0, cornerRadius, 0);
-
-    // Top Edge
     path.lineTo(size.width - cornerRadius, 0);
-
-    // Top-Right Corner
     path.quadraticBezierTo(size.width, 0, size.width, cornerRadius);
-
-    // Right Edge down to notch
     path.lineTo(size.width, notchY - notchRadius);
-
-    // Right Notch cutout
     path.arcToPoint(
       Offset(size.width, notchY + notchRadius),
       radius: Radius.circular(notchRadius),
       clockwise: false,
     );
-
-    // Right Edge down to bottom
     path.lineTo(size.width, size.height - zigHeight);
 
-    // Bottom Serrated/Scalloped Edge
     double x = size.width;
     bool atPeak = true;
     while (x > 0) {
@@ -2258,17 +2731,12 @@ class _TicketReceiptClipper extends CustomClipper<Path> {
       x = nextX;
     }
 
-    // Left Edge up to notch
     path.lineTo(0, notchY + notchRadius);
-
-    // Left Notch cutout
     path.arcToPoint(
       Offset(0, notchY - notchRadius),
       radius: Radius.circular(notchRadius),
       clockwise: false,
     );
-
-    // Left Edge up to top corner
     path.lineTo(0, cornerRadius);
 
     path.close();
@@ -2281,7 +2749,6 @@ class _TicketReceiptClipper extends CustomClipper<Path> {
       oldClipper.notchPositionRatio != notchPositionRatio;
 }
 
-// ── Layered 3D Drop Shadow Painter for the Ticket ──────────────────────────
 class _TicketShadowPainter extends CustomPainter {
   final CustomClipper<Path> clipper;
 
@@ -2291,12 +2758,6 @@ class _TicketShadowPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final path = clipper.getClip(size);
 
-    // Soft Ambient Shadow — canvas.drawShadow() runs Skia's full
-    // physically-based shadow model (separate ambient + spot passes,
-    // penumbra/umbra geometry) every time it rasterizes, which is heavy
-    // for a shape this size. A blurred path fill achieves the same soft,
-    // sunken-card look with one Gaussian convolution — the same
-    // lightweight technique BoxShadow uses — at a fraction of the cost.
     canvas.save();
     canvas.translate(0, 6);
     canvas.drawPath(
@@ -2307,7 +2768,6 @@ class _TicketShadowPainter extends CustomPainter {
     );
     canvas.restore();
 
-    // Directional Depth Tint
     canvas.save();
     canvas.translate(0, 3);
     canvas.drawPath(
