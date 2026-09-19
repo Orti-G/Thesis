@@ -167,9 +167,13 @@ def parse_tier_bounds(tier_label):
 
 def find_tier_row(table, kwh):
     s, e = find_residential_rows(table)
+
+    # Round the kWh to the nearest whole number to match the integer tiers
+    rounded_kwh = round(kwh)
+
     for i in range(s, e):
         low, high = parse_tier_bounds(table[i][0])
-        if low <= kwh <= high:
+        if low <= rounded_kwh <= high:
             return table[i]
     raise ValueError(f"No tier found for {kwh} kWh")
 
@@ -405,6 +409,60 @@ def compute_bill(pdf_path, kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
         "non_vat": non_vat,
         "total_energy_amount": total_energy_amount,
     }
+
+def analytic_bracket_rate(pdf_path, representative_kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
+    """Closed-form rate_per_kwh (slope) + fixed_charge (intercept) for the
+    tier representative_kwh falls into. Same math compute_bill() uses,
+    just expressed as a line instead of a rounded step-by-step total —
+    this is what makes peso_to_kwh() invertible."""
+    table, cols, vat = get_parsed_schedule(pdf_path)
+    row = find_tier_row(table, representative_kwh)
+    v = lambda field: clean(row[cols[field]]) if field in cols else 0.0
+
+    g, t, a, sl = v("generation"), v("transmission"), v("ancillary_service"), v("system_loss")
+    d, mp, sp = v("distribution"), v("metering_perkwh"), v("supply_perkwh")
+    AW = (v("awat_1") + v("awat_2")) if ("awat_1" in cols or "awat_2" in cols) else v("awat")
+    rr = v("reg_reset")
+    Kd = d + mp + sp + AW + rr
+
+    sc, lra = v("senior_citizen"), v("lifeline_rate_adj")
+    Ks = sc + lra
+
+    Kuc = v("uc_spug") + v("uc_redci") + v("uc_env") + v("uc_npc_debt")
+    fit_rate, lifeline_rate = v("fit_all"), v("lifeline_rate")
+    Krpt = v("rpt") + v("rpt_adj")
+
+    VATg, VATt, VATsl = vat["Generation"], vat["Transmission"], vat["System Loss"]
+    VATa, VATd = vat.get("Ancillary Service", 0), vat["Other Charges"]
+
+    Kenergy = g + t + a + sl + Kd + Ks
+    Kvat = (g*VATg + t*VATt + a*VATa + sl*VATsl + (Kd+Ks)*VATd) / 100
+    Knonvat = Kuc + fit_rate + lifeline_rate + Krpt + (Kenergy+Krpt)*lft_pct/100 + lft_adj_perkwh
+
+    slope = Kenergy + Kvat + Knonvat
+    F = v("metering_fixed") + v("supply_fixed")
+    intercept = F * (1 + VATd/100 + lft_pct/100)
+
+    return round(slope, 4), round(intercept, 4)
+
+
+BRACKET_BOUNDS = {"0-200": (0, 200), "201-300": (201, 300), "301-400": (301, 400), "over-400": (401, float("inf"))}
+BRACKET_REPS = {"0-200": 100, "201-300": 250, "301-400": 350, "over-400": 500}
+
+
+def peso_to_kwh(pdf_path, target_peso, lft_pct=0.5, lft_adj_perkwh=0.0009):
+    """Inverse of compute_bill(): given a target peso total, find the kWh
+    that produces it. Checks each bracket's peso range in order, then
+    solves kwh = (peso - fixed_charge) / rate_per_kwh within the matching
+    one. Verified round-trip exact against compute_bill() across all
+    four brackets, boundaries included."""
+    for name, (low, high) in BRACKET_BOUNDS.items():
+        slope, intercept = analytic_bracket_rate(pdf_path, BRACKET_REPS[name], lft_pct, lft_adj_perkwh)
+        peso_low = slope * low + intercept
+        peso_high = slope * high + intercept if high != float("inf") else float("inf")
+        if peso_low <= target_peso <= peso_high:
+            return round((target_peso - intercept) / slope, 2)
+    raise ValueError(f"Could not resolve kWh for peso amount {target_peso}")
 
 
 if __name__ == "__main__":

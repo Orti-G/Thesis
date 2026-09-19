@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
-from meralco_engine import compute_bill, RATE_SCHEDULE_DIR
+from typing import Optional
+from meralco_engine import compute_bill, RATE_SCHEDULE_DIR, peso_to_kwh
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -48,9 +49,10 @@ FORECAST_FEATURES = forecast_bundle["feature_cols"]
 anomaly_bundle    = joblib.load(os.path.join(MODEL_DIR, "anomaly_model.pkl"))
 ANOMALY_MODEL     = anomaly_bundle["model"]
 ANOMALY_SCALER    = anomaly_bundle["scaler"]
-ANOMALY_FEATURES  = anomaly_bundle["feature_cols"]
-# ['Voltage (V)', 'Current (A)', 'Power (W)', 'Interval kWh',
-#  'Roll mean 1hr', 'Roll mean 24hr', 'Dev 1hr', 'Dev 24hr']
+ANOMALY_FEATURES  = anomaly_bundle["features"]
+TIME_BASELINE    = anomaly_bundle["time_baseline"]
+MIN_STD_TIME     = anomaly_bundle["min_std_time"]
+# ['Interval kWh', 'Dev 1hr', 'Power Delta', 'Roll mean 1hr', 'Roll mean 24hr', 'time_zscore', 'is_weekend', 'Voltage (V)', 'hour_cos', 'hour_sin']
 
 # Rolling window sizes (5-min intervals)
 WINDOW_1HR  = 12
@@ -362,8 +364,8 @@ def log_anomaly(reading_id: int, anomaly_result: dict, avg_power: float,
                 INSERT INTO anomaly_logs
                     (timestamp, reading_id, is_anomaly,
                      anomaly_score, power_avg, roll_mean_1hr, roll_mean_24hr,
-                     dev_1hr, dev_24hr, acknowledged)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     dev_1hr, dev_24hr, acknowledged, power_delta, time_zscore)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     window_ts,
@@ -376,6 +378,8 @@ def log_anomaly(reading_id: int, anomaly_result: dict, avg_power: float,
                     anomaly_result["dev_1hr"],
                     anomaly_result["dev_24hr"],
                     None,   # NULL = pending user review ✅
+                    anomaly_result["power_delta"],
+                    anomaly_result["time_zscore"],
                 )
             )
         conn.commit()
@@ -610,9 +614,9 @@ def flush_buffer():
     # Run anomaly detection
     anomaly_result = run_anomaly(
         voltage=avg_voltage,
-        current=avg_current,
         power=avg_power,
         interval_kwh=interval_kwh,
+        timestamp=window_ts,
     )
 
     # Log anomaly to DB if detected (acknowledged = NULL)
@@ -648,6 +652,7 @@ def flush_buffer():
             "is_anomaly": False,
             "score":      anomaly_result["score"],
             "timestamp":  window_ts.isoformat(),
+            "power_avg":  avg_power,
         })
         
 
@@ -660,16 +665,18 @@ def flush_buffer():
     return anomaly_result
 
 
-def run_anomaly(voltage, current, power, interval_kwh):
+def run_anomaly(voltage, power, interval_kwh, timestamp):
     """
-    Compute rolling features from DB history and run Isolation Forest.
+    Compute rolling + cyclical + time-baseline features from DB history
+    and run Isolation Forest.
     """
     rows = get_recent_averaged_readings(WINDOW_24HR)
 
     if len(rows) < 2:
         return {"status": "collecting_data", "is_anomaly": False, "score": None}
 
-    df           = pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
     power_series = pd.concat(
         [df["power_avg"], pd.Series([power])],
         ignore_index=True,
@@ -680,20 +687,35 @@ def run_anomaly(voltage, current, power, interval_kwh):
     dev_1hr        = power - roll_mean_1hr
     dev_24hr       = power - roll_mean_24hr
 
+    power_delta = power - df["power_avg"].iloc[-1] if len(df) >= 1 else 0.0
+
+    # datetime.hour / .weekday() line up with pandas' .dt.hour / .dt.dayofweek
+    hour = timestamp.hour
+    hour_sin = np.sin(2 * np.pi * hour / 24)
+    hour_cos = np.cos(2 * np.pi * hour / 24)
+    is_weekend = int(timestamp.weekday() >= 5)
+
+    tb_mean, tb_std = TIME_BASELINE.get((hour, is_weekend), (roll_mean_24hr, MIN_STD_TIME))
+    time_zscore = (power - tb_mean) / tb_std
+
+    ['Interval kWh', 'Dev 1hr', 'Power Delta', 'Roll mean 1hr', 'Roll mean 24hr', 'time_zscore', 'is_weekend', 'Voltage (V)', 'hour_cos', 'hour_sin']
+
     feature_row = pd.DataFrame([{
-        "Voltage (V)":    voltage,
-        "Current (A)":   current,
-        "Power (W)":     power,
-        "Interval kWh":  interval_kwh,
+        "Interval kWh":   interval_kwh,
+        "Dev 1hr":        float(dev_1hr),
+        "Power Delta":    float(power_delta),
         "Roll mean 1hr":  float(roll_mean_1hr),
         "Roll mean 24hr": float(roll_mean_24hr),
-        "Dev 1hr":        float(dev_1hr),
-        "Dev 24hr":       float(dev_24hr),
+        "time_zscore":    float(time_zscore),
+        "is_weekend":     is_weekend,
+        "Voltage (V)":    voltage,
+        "hour_cos":       float(hour_cos),
+        "hour_sin":       float(hour_sin),
     }])[ANOMALY_FEATURES]
 
     scaled = ANOMALY_SCALER.transform(feature_row)
-    pred   = ANOMALY_MODEL.predict(scaled)[0]         # 1=normal, -1=anomaly
-    score  = ANOMALY_MODEL.score_samples(scaled)[0]   # more negative = more anomalous
+    pred   = ANOMALY_MODEL.predict(scaled)[0]
+    score  = ANOMALY_MODEL.score_samples(scaled)[0]
 
     return {
         "status":         "ok",
@@ -703,6 +725,8 @@ def run_anomaly(voltage, current, power, interval_kwh):
         "roll_mean_24hr": round(float(roll_mean_24hr), 4),
         "dev_1hr":        round(float(dev_1hr), 4),
         "dev_24hr":       round(float(dev_24hr), 4),
+        "power_delta":    round(float(power_delta), 4),
+        "time_zscore":    round(float(time_zscore), 4),
     }
 
 def get_current_schedule_filename():
@@ -1115,9 +1139,35 @@ def get_bill_breakdown(
 
     return {
         "kwh": kwh,
-        "source_file": pdf_filename,
+        "source_file": "https://company.meralco.com.ph/news-and-advisories/rates-archives/",
         **result,
     }
+
+
+
+@app.get("/calculator/convert")
+def convert(
+    period: str = Query(..., description="Rate schedule PDF filename, e.g. '08-2026_rate_schedule.pdf'"),
+    kwh: Optional[float] = Query(None, gt=0, description="Consumption in kWh — returns itemized peso breakdown"),
+    peso: Optional[float] = Query(None, gt=0, description="Peso amount — returns the equivalent kWh"),
+):
+    """Calculator for the app. Exactly one of kwh/peso must be given:
+    kwh -> full itemized peso breakdown (reuses compute_bill directly).
+    peso -> just the equivalent kWh (uses the inverse formula above)."""
+    if (kwh is None) == (peso is None):
+        raise HTTPException(status_code=422, detail="Provide exactly one of 'kwh' or 'peso', not both or neither.")
+
+    try:
+        if kwh is not None:
+            result = compute_bill(period, kwh)
+            return {"kwh": kwh, "period": period, **result}
+        else:
+            result_kwh = peso_to_kwh(period, peso)
+            return {"peso": peso, "period": period, "kwh": result_kwh}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=f"Could not compute: {e}")
 
 # ── Health Check ───────────────────────────────────────────────────────────────
 @app.get("/")
