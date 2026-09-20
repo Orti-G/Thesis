@@ -15,6 +15,7 @@ import re
 import firebase_admin
 from firebase_admin import credentials, db as firebase_db, messaging
 import asyncio
+import threading
 
 app = FastAPI()
 
@@ -86,6 +87,9 @@ MERALCO_RATES = None  # loaded once on startup from Firebase
 
 #---- Tracking current kwh ------------
 today_total_kwh = 0.0
+
+# ── Flush Lock ─────────────────────────────────────────────────────────────────
+_flush_lock = threading.Lock()
 
 def compute_billing_cutoff() -> str:
     """
@@ -172,6 +176,9 @@ def startup_event():
     global BILLING_BASELINE_KWH, BILLING_CUTOFF_DATE, BILLING_COMPUTED, today_total_kwh
     global last_pushed_hour, last_pushed_date
     global MERALCO_RATES
+    global reading_buffer
+
+    reading_buffer = []   # ← add at the very start
 
     # Load Meralco rates once from Firebase
     MERALCO_RATES = firebase_db.reference("/meralco_rates").get()
@@ -569,106 +576,137 @@ def flush_buffer():
     """
     global reading_buffer, today_total_kwh
 
-    if len(reading_buffer) < 2:
-        reading_buffer = []
-        return
+    if not _flush_lock.acquire(blocking=False):
+        return   
+           
+    # Snapshot and clear buffer immediately ✅
+    snapshot       = reading_buffer[:]
+    reading_buffer = []
+    
+    try:
+        if len(snapshot) < 2:
+            return
 
-    voltages  = [r["voltage"]   for r in reading_buffer]
-    currents  = [r["current"]   for r in reading_buffer]
-    powers    = [r["power"]     for r in reading_buffer]
-    cumuls    = [r["cumul_kwh"] for r in reading_buffer]
+        voltages  = [r["voltage"]   for r in snapshot]
+        currents  = [r["current"]   for r in snapshot]
+        powers    = [r["power"]     for r in snapshot]
+        cumuls    = [r["cumul_kwh"] for r in snapshot]
 
-    avg_voltage  = round(float(np.mean(voltages)), 2)
-    avg_current  = round(float(np.mean(currents)), 3)
-    avg_power    = round(float(np.mean(powers)),   2)
-    interval_kwh = round(float(cumuls[-1] - cumuls[0]), 4)
-    today_total_kwh = round(today_total_kwh + interval_kwh, 4)
-    window_ts    = datetime.now(PH_TZ).replace(tzinfo=None)
+        avg_voltage  = round(float(np.mean(voltages)), 2)
+        avg_current  = round(float(np.mean(currents)), 3)
+        avg_power    = round(float(np.mean(powers)),   2)
+        window_ts    = datetime.now(PH_TZ).replace(tzinfo=None)
 
-    # cumul_kwh — continue from last DB value if ESP32 reset detected
-    last_db_row = get_latest_averaged_reading()
-    if last_db_row and float(cumuls[-1]) < float(last_db_row["cumul_kwh"]):
-        raw_cumul = round(float(last_db_row["cumul_kwh"]) + float(cumuls[-1]), 4)
-    else:
-        raw_cumul = round(float(cumuls[-1]), 4)
+        # cumul_kwh — continue from last DB value if ESP32 reset detected
+        last_db_row = get_latest_averaged_reading()
+        if last_db_row and float(cumuls[-1]) < float(last_db_row["cumul_kwh"]):
+            raw_cumul = round(float(last_db_row["cumul_kwh"]) + float(cumuls[-1]), 4)
+        else:
+            raw_cumul = round(float(cumuls[-1]), 4)
 
-    # Adjust cumul_kwh for current billing cycle
-    adjusted_cumul = adjust_cumul(raw_cumul)
+        # Adjust cumul_kwh for current billing cycle
+        adjusted_cumul = adjust_cumul(raw_cumul)
 
-    # Save to PostgreSQL (adjusted cumul_kwh)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO readings
-                    (timestamp, voltage, current, power_avg, interval_kwh, cumul_kwh)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (window_ts, avg_voltage, avg_current,
-                 avg_power, interval_kwh, adjusted_cumul),
-            )
-            reading_id = cur.fetchone()[0]
-        conn.commit()
+        # ── Time-based gap detection for interval_kwh ──────────────────────────
+        buffer_start_ts = snapshot[0]["ts"].replace(tzinfo=None)
 
-    # Run anomaly detection
-    anomaly_result = run_anomaly(
-        voltage=avg_voltage,
-        power=avg_power,
-        interval_kwh=interval_kwh,
-        timestamp=window_ts,
-    )
+        GAP_THRESHOLD = BUFFER_SECONDS + 60
 
-    # Log anomaly to DB if detected (acknowledged = NULL)
-    if anomaly_result.get("is_anomaly"):
-        log_anomaly(
-            reading_id=reading_id,
-            anomaly_result=anomaly_result,
-            avg_power=avg_power,
-            window_ts=window_ts,
+        if last_db_row:
+            gap_seconds = (buffer_start_ts - last_db_row["timestamp"]).total_seconds()
+            if gap_seconds > GAP_THRESHOLD:
+                # Restart/reconnection detected — use DB difference
+                interval_kwh = round(
+                    float(adjusted_cumul) - float(last_db_row["cumul_kwh"]), 4
+                )
+            else:
+                # Normal 5-min window
+                interval_kwh = round(float(cumuls[-1] - cumuls[0]), 4)
+        else:
+            # No DB rows yet — use buffer difference
+            interval_kwh = round(float(cumuls[-1] - cumuls[0]), 4)
+
+        today_total_kwh = round(today_total_kwh + interval_kwh, 4)
+
+        # Save to PostgreSQL (adjusted cumul_kwh)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO readings
+                        (timestamp, voltage, current, power_avg, interval_kwh, cumul_kwh)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (window_ts, avg_voltage, avg_current,
+                    avg_power, interval_kwh, adjusted_cumul),
+                )
+                reading_id = cur.fetchone()[0]
+            conn.commit()
+
+        # Run anomaly detection
+        anomaly_result = run_anomaly(
+            voltage=avg_voltage,
+            power=avg_power,
+            interval_kwh=interval_kwh,
+            timestamp=window_ts,
         )
 
-    # Push anomaly result to Firebase
-    if anomaly_result["is_anomaly"]:
-        firebase_db.reference("/anomaly_alert").set({
-            "is_anomaly": True,
-            "score":      anomaly_result["score"],
-            "timestamp":  window_ts.isoformat(),
-            "power_avg":  avg_power,
-        })
-        send_fcm_alert(
-            title="⚠️ Anomalya Natukoy",
-            body=f"Hindi karaniwan ang kuryente: {avg_power:.1f}W. "
-            f"Suriin at kumpirmahin kung normal ito.",
-            channel_id="high_channel",
-                data={
-                    "type":      "anomaly",
-                    "power_avg": str(avg_power),
-                    "timestamp": window_ts.isoformat(),
-                }
+        # Log anomaly to DB if detected (acknowledged = NULL)
+        if anomaly_result.get("is_anomaly"):
+            log_anomaly(
+                reading_id=reading_id,
+                anomaly_result=anomaly_result,
+                avg_power=avg_power,
+                window_ts=window_ts,
             )
-    else:
-        firebase_db.reference("/anomaly_alert").set({
-            "is_anomaly": False,
-            "score":      anomaly_result["score"],
-            "timestamp":  window_ts.isoformat(),
-            "power_avg":  avg_power,
-        })
-        
 
-    # Push today's hourly history to Firebase (Option C)
-    push_hourly_history(datetime.now(PH_TZ))
+        # Push anomaly result to Firebase
+        if anomaly_result["is_anomaly"]:
+            firebase_db.reference("/anomaly_alert").set({
+                "is_anomaly": True,
+                "score":      anomaly_result["score"],
+                "timestamp":  window_ts.isoformat(),
+                "power_avg":  avg_power,
+                "power_delta": anomaly_result["power_delta"],
+            })
+            send_fcm_alert(
+                title="⚠️ Anomalya Natukoy",
+                body=f"Hindi karaniwan ang kuryente: {avg_power:.1f}W. "
+                f"Suriin at kumpirmahin kung normal ito.",
+                channel_id="high_channel",
+                    data={
+                        "type":      "anomaly",
+                        "power_avg": str(avg_power),
+                        "timestamp": window_ts.isoformat(),
+                    }
+                )
+        else:
+            firebase_db.reference("/anomaly_alert").set({
+                "is_anomaly": False,
+                "score":      anomaly_result["score"],
+                "timestamp":  window_ts.isoformat(),
+                "power_avg":  avg_power,
+                "power_delta": anomaly_result["power_delta"],
+            })
+            
 
-    firebase_db.reference("/history/today/total_kwh").set(today_total_kwh)
+        # Push today's hourly history to Firebase (Option C)
+        push_hourly_history(datetime.now(PH_TZ))
 
-    reading_buffer = []
-    return anomaly_result
-
+        firebase_db.reference("/history/today/total_kwh").set(today_total_kwh)
+        return anomaly_result
+    
+    finally:
+        _flush_lock.release()      # always releases the lock
 
 def run_anomaly(voltage, power, interval_kwh, timestamp):
     """
     Compute rolling + cyclical + time-baseline features from DB history
     and run Isolation Forest.
+
+    the current reading has already been saved to the DB before
+    this runs, so `rows` includes it as the most recent row.
     """
     rows = get_recent_averaged_readings(WINDOW_24HR)
 
@@ -676,20 +714,14 @@ def run_anomaly(voltage, power, interval_kwh, timestamp):
         return {"status": "collecting_data", "is_anomaly": False, "score": None}
 
     df = pd.DataFrame(rows)
-
-    power_series = pd.concat(
-        [df["power_avg"], pd.Series([power])],
-        ignore_index=True,
-    )
+    power_series = df["power_avg"]  # current reading is already the last row — no append needed
 
     roll_mean_1hr  = power_series.rolling(WINDOW_1HR,  min_periods=1).mean().iloc[-1]
     roll_mean_24hr = power_series.rolling(WINDOW_24HR, min_periods=1).mean().iloc[-1]
     dev_1hr        = power - roll_mean_1hr
-    dev_24hr       = power - roll_mean_24hr
 
-    power_delta = power - df["power_avg"].iloc[-1] if len(df) >= 1 else 0.0
+    power_delta = power - power_series.iloc[-2]  # compare to the reading before this one
 
-    # datetime.hour / .weekday() line up with pandas' .dt.hour / .dt.dayofweek
     hour = timestamp.hour
     hour_sin = np.sin(2 * np.pi * hour / 24)
     hour_cos = np.cos(2 * np.pi * hour / 24)
@@ -697,8 +729,6 @@ def run_anomaly(voltage, power, interval_kwh, timestamp):
 
     tb_mean, tb_std = TIME_BASELINE.get((hour, is_weekend), (roll_mean_24hr, MIN_STD_TIME))
     time_zscore = (power - tb_mean) / tb_std
-
-    ['Interval kWh', 'Dev 1hr', 'Power Delta', 'Roll mean 1hr', 'Roll mean 24hr', 'time_zscore', 'is_weekend', 'Voltage (V)', 'hour_cos', 'hour_sin']
 
     feature_row = pd.DataFrame([{
         "Interval kWh":   interval_kwh,
@@ -724,7 +754,6 @@ def run_anomaly(voltage, power, interval_kwh, timestamp):
         "roll_mean_1hr":  round(float(roll_mean_1hr), 4),
         "roll_mean_24hr": round(float(roll_mean_24hr), 4),
         "dev_1hr":        round(float(dev_1hr), 4),
-        "dev_24hr":       round(float(dev_24hr), 4),
         "power_delta":    round(float(power_delta), 4),
         "time_zscore":    round(float(time_zscore), 4),
     }
@@ -766,7 +795,7 @@ def post_reading(data: Reading):
     3. Buffers for 5-min averaging
     4. Every 5 minutes: flush → PostgreSQL → anomaly → Firebase history
     """
-    global reading_buffer, MERALCO_RATES
+    global reading_buffer, MERALCO_RATES, last_reading_ts
 
     now            = datetime.now(PH_TZ)
     last_reading_ts = now   # ← update on every reading
