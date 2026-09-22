@@ -595,7 +595,7 @@ def flush_buffer():
         avg_voltage  = round(float(np.mean(voltages)), 2)
         avg_current  = round(float(np.mean(currents)), 3)
         avg_power    = round(float(np.mean(powers)),   2)
-        window_ts    = datetime.now(PH_TZ).replace(tzinfo=None)
+        window_ts    = snapshot[-1]["ts"].replace(tzinfo=None)
 
         # cumul_kwh — continue from last DB value if ESP32 reset detected
         last_db_row = get_latest_averaged_reading()
@@ -727,7 +727,8 @@ def run_anomaly(voltage, power, interval_kwh, timestamp):
     hour_cos = np.cos(2 * np.pi * hour / 24)
     is_weekend = int(timestamp.weekday() >= 5)
 
-    tb_mean, tb_std = TIME_BASELINE.get((hour, is_weekend), (roll_mean_24hr, MIN_STD_TIME))
+    key = (int(hour), int(is_weekend))  # ← force int not numpy int64
+    tb_mean, tb_std = TIME_BASELINE.get(key, (roll_mean_24hr, MIN_STD_TIME))
     time_zscore = (power - tb_mean) / tb_std
 
     feature_row = pd.DataFrame([{

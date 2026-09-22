@@ -452,17 +452,28 @@ BRACKET_REPS = {"0-200": 100, "201-300": 250, "301-400": 350, "over-400": 500}
 
 def peso_to_kwh(pdf_path, target_peso, lft_pct=0.5, lft_adj_perkwh=0.0009):
     """Inverse of compute_bill(): given a target peso total, find the kWh
-    that produces it. Checks each bracket's peso range in order, then
-    solves kwh = (peso - fixed_charge) / rate_per_kwh within the matching
-    one. Verified round-trip exact against compute_bill() across all
-    four brackets, boundaries included."""
+    that produces it. If target_peso falls in a genuine gap between two
+    brackets (Meralco's rates step discontinuously at every tier boundary,
+    so some peso values are simply unreachable by any exact kWh), snaps
+    to whichever boundary kWh is closer instead of erroring."""
+    ranges = []
     for name, (low, high) in BRACKET_BOUNDS.items():
         slope, intercept = analytic_bracket_rate(pdf_path, BRACKET_REPS[name], lft_pct, lft_adj_perkwh)
         peso_low = slope * low + intercept
         peso_high = slope * high + intercept if high != float("inf") else float("inf")
+        ranges.append((low, high, peso_low, peso_high))
         if peso_low <= target_peso <= peso_high:
             return round((target_peso - intercept) / slope, 2)
-    raise ValueError(f"Could not resolve kWh for peso amount {target_peso}")
+
+    best_kwh, best_diff = None, float("inf")
+    for low, high, peso_low, peso_high in ranges:
+        for boundary_kwh, boundary_peso in [(low, peso_low), (high, peso_high)]:
+            if boundary_peso == float("inf"):
+                continue
+            diff = abs(target_peso - boundary_peso)
+            if diff < best_diff:
+                best_diff, best_kwh = diff, boundary_kwh
+    return best_kwh
 
 
 if __name__ == "__main__":
