@@ -719,6 +719,7 @@ def run_anomaly(voltage, power, interval_kwh, timestamp):
     roll_mean_1hr  = power_series.rolling(WINDOW_1HR,  min_periods=1).mean().iloc[-1]
     roll_mean_24hr = power_series.rolling(WINDOW_24HR, min_periods=1).mean().iloc[-1]
     dev_1hr        = power - roll_mean_1hr
+    dev_24hr       = power - roll_mean_24hr
 
     power_delta = power - power_series.iloc[-2]  # compare to the reading before this one
 
@@ -755,6 +756,7 @@ def run_anomaly(voltage, power, interval_kwh, timestamp):
         "roll_mean_1hr":  round(float(roll_mean_1hr), 4),
         "roll_mean_24hr": round(float(roll_mean_24hr), 4),
         "dev_1hr":        round(float(dev_1hr), 4),
+        "dev_24hr":       round(float(dev_24hr), 4),
         "power_delta":    round(float(power_delta), 4),
         "time_zscore":    round(float(time_zscore), 4),
     }
