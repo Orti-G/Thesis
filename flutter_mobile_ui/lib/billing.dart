@@ -54,9 +54,9 @@ class TopBounceBottomClampPhysics extends BouncingScrollPhysics {
 }
 
 /// Input mode for the manual bill calculator.
-/// [kwh]   — user types consumption, we hit /bill/breakdown directly.
-/// [pesos] — user types a budget; resolving it back to kWh requires a
-///           numeric inverse of the billing function. UI only for now.
+/// [kwh]   — user types consumption, we hit /calculator/convert with kwh.
+/// [pesos] — user types a budget, we hit /calculator/convert with peso to
+///           get the equivalent kWh.
 enum _CalcInput { kwh, pesos }
 
 /// Tier metadata for a given consumption figure, so the live tier card and
@@ -251,6 +251,28 @@ class _BillingScreenState extends State<BillingScreen> {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
+  /// GET /calculator/convert — pass exactly one of [kwh] or [peso].
+  /// kwh  -> same itemized JSON as /bill/breakdown.
+  /// peso -> {"peso": ..., "period": ..., "kwh": ...}
+  Future<Map<String, dynamic>> _fetchCalculatorConvert({
+    required String period,
+    double? kwh,
+    double? peso,
+  }) async {
+    final url = Uri.parse('$_apiBaseUrl/calculator/convert').replace(
+      queryParameters: {
+        'period': period,
+        if (kwh != null) 'kwh': kwh.toStringAsFixed(2),
+        if (peso != null) 'peso': peso.toStringAsFixed(2),
+      },
+    );
+    final response = await http.get(url).timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) {
+      throw Exception('HTTP ${response.statusCode}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
   List<_BillLineItem> _buildBreakdownItems(Map<String, dynamic> data) {
     double num_(dynamic v) => (v as num?)?.toDouble() ?? 0.0;
     Map<String, dynamic> map_(dynamic v) =>
@@ -393,11 +415,18 @@ class _BillingScreenState extends State<BillingScreen> {
     final controller = TextEditingController();
     _CalcInput inputType = _CalcInput.kwh;
     String? error;
+    bool loading = false;
+    double? pesoResultKwh;
+    double? pesoResultAmount;
 
-    // --- DUMMY STATE FOR RATE MONTH ---
+    // --- RATE MONTH STATE ---
     String selectedMonth = 'August';
-    final List<String> availableMonths = ['June', 'July', 'August', 'September'];
-    // ----------------------------------
+    final Map<String, String> monthPeriods = {
+      'August': '08-2026_rate_schedule.pdf',
+      'September': '09-2026_rate_schedule.pdf',
+    };
+    final List<String> availableMonths = monthPeriods.keys.toList();
+    // ------------------------
 
     showModalBottomSheet(
       context: context,
@@ -406,42 +435,64 @@ class _BillingScreenState extends State<BillingScreen> {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (innerContext, setSheetState) {
-            double? resolveKwh(double value) {
-              if (inputType == _CalcInput.kwh) return value;
-              return null;
-            }
+            Future<void> compute() async {
+              if (loading) return;
 
-            void compute() {
               final value = double.tryParse(controller.text.trim());
               if (value == null || value <= 0) {
                 setSheetState(() => error = 'Enter a valid number.');
                 return;
               }
 
-              final kwh = resolveKwh(value);
-              if (kwh == null) {
-                setSheetState(
-                  () => error =
-                      'Budget mode is not available yet. Please use kWh for now.',
+              final period = monthPeriods[selectedMonth]!;
+
+              if (inputType == _CalcInput.kwh) {
+                Navigator.of(sheetContext).pop();
+
+                final tier = _tierInfoFor(value, rates);
+                _showBillBreakdown(
+                  context,
+                  kwh: value,
+                  tierTitle: tier.title,
+                  tierRate: tier.rate,
+                  tierMax: tier.max,
+                  tierEnergy: tier.energy,
+                  tierPercentage: tier.percentage,
+                  tierRemainingText: tier.remainingText,
+                  fixedCharge: fixedCharge,
+                  sourceFile: sourceFile,
+                  period: period,
                 );
                 return;
               }
 
-              Navigator.of(sheetContext).pop();
-
-              final tier = _tierInfoFor(kwh, rates);
-              _showBillBreakdown(
-                context,
-                kwh: kwh,
-                tierTitle: tier.title,
-                tierRate: tier.rate,
-                tierMax: tier.max,
-                tierEnergy: tier.energy,
-                tierPercentage: tier.percentage,
-                tierRemainingText: tier.remainingText,
-                fixedCharge: fixedCharge,
-                sourceFile: sourceFile,
-              );
+              // Peso -> kWh
+              setSheetState(() {
+                loading = true;
+                error = null;
+                pesoResultKwh = null;
+              });
+              try {
+                final data = await _fetchCalculatorConvert(
+                  period: period,
+                  peso: value,
+                );
+                final kwhResult = (data['kwh'] as num?)?.toDouble();
+                if (kwhResult == null) throw Exception('Missing kwh in response');
+                if (!innerContext.mounted) return;
+                setSheetState(() {
+                  loading = false;
+                  pesoResultKwh = kwhResult;
+                  pesoResultAmount = value;
+                });
+              } catch (e) {
+                debugPrint('Peso -> kWh conversion failed: $e');
+                if (!innerContext.mounted) return;
+                setSheetState(() {
+                  loading = false;
+                  error = 'Unable to convert right now. Please try again.';
+                });
+              }
             }
 
             Widget modeChip(String label, _CalcInput value) {
@@ -451,6 +502,7 @@ class _BillingScreenState extends State<BillingScreen> {
                   onTap: () => setSheetState(() {
                     inputType = value;
                     error = null;
+                    pesoResultKwh = null;
                   }),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 180),
@@ -597,6 +649,11 @@ class _BillingScreenState extends State<BillingScreen> {
                           ),
                         ),
                       ),
+                      onChanged: (_) {
+                        if (pesoResultKwh != null) {
+                          setSheetState(() => pesoResultKwh = null);
+                        }
+                      },
                       onSubmitted: (_) => compute(),
                     ),
                     if (error != null) ...[
@@ -621,6 +678,55 @@ class _BillingScreenState extends State<BillingScreen> {
                             ),
                           ),
                         ],
+                      ),
+                    ],
+
+                    if (isPesoMode && pesoResultKwh != null) ...[
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 14,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: tierCardBorder.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'EQUIVALENT USAGE',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.6,
+                                color: textDark.withValues(alpha: 0.55),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${pesoResultKwh!.toStringAsFixed(2)} kWh',
+                              style: TextStyle(
+                                fontSize: 26,
+                                fontWeight: FontWeight.w900,
+                                color: brandOrangeText,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'for ₱${pesoResultAmount!.toStringAsFixed(2)} ($selectedMonth rate)',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: textDark.withValues(alpha: 0.5),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
 
@@ -669,6 +775,7 @@ class _BillingScreenState extends State<BillingScreen> {
                             if (newValue != null) {
                               setSheetState(() {
                                 selectedMonth = newValue;
+                                pesoResultKwh = null;
                               });
                             }
                           },
@@ -680,7 +787,7 @@ class _BillingScreenState extends State<BillingScreen> {
                     const SizedBox(height: 16),
                     Text(
                       isPesoMode
-                          ? 'Checks how many kWh fit within this budget. (Not working yet)'
+                          ? 'Checks how many kWh fit within this budget.'
                           : 'Shows the full itemized breakdown for this usage.',
                       style: TextStyle(
                         fontSize: 12,
@@ -733,8 +840,14 @@ class _BillingScreenState extends State<BillingScreen> {
     required String tierRemainingText,
     required double fixedCharge,
     required String sourceFile,
+    String? period,
   }) {
     bool isClosing = false;
+    // Calculator flow: fetch once from /calculator/convert for the chosen
+    // rate period. Otherwise fall back to the cached /bill/breakdown call.
+    final Future<Map<String, dynamic>>? calcFuture = period == null
+        ? null
+        : _fetchCalculatorConvert(period: period, kwh: kwh);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -800,7 +913,7 @@ class _BillingScreenState extends State<BillingScreen> {
                                   40,
                                 ),
                                 child: FutureBuilder<Map<String, dynamic>>(
-                                  future: _fetchBillBreakdownCached(kwh),
+                                  future: calcFuture ?? _fetchBillBreakdownCached(kwh),
                                   builder: (context, snapshot) {
                                     if (snapshot.connectionState !=
                                         ConnectionState.done) {
