@@ -88,6 +88,8 @@ class BillingScreen extends StatefulWidget {
 
 class _BillingScreenState extends State<BillingScreen> {
   _BillMode _mode = _BillMode.endOfMonth;
+  // 1 = new content enters from the right (to Current), -1 = from the left.
+  int _slideDir = 1;
 
   final Color primaryOrange = const Color(0xFFFCB775);
   final Color tierCardBorder = const Color(0xFFFA8B39);
@@ -478,7 +480,8 @@ class _BillingScreenState extends State<BillingScreen> {
                   peso: value,
                 );
                 final kwhResult = (data['kwh'] as num?)?.toDouble();
-                if (kwhResult == null) throw Exception('Missing kwh in response');
+                if (kwhResult == null)
+                  throw Exception('Missing kwh in response');
                 if (!innerContext.mounted) return;
                 setSheetState(() {
                   loading = false;
@@ -495,40 +498,99 @@ class _BillingScreenState extends State<BillingScreen> {
               }
             }
 
-            Widget modeChip(String label, _CalcInput value) {
-              final selected = inputType == value;
-              return Expanded(
-                child: GestureDetector(
-                  onTap: () => setSheetState(() {
-                    inputType = value;
-                    error = null;
-                    pesoResultKwh = null;
-                  }),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                    decoration: BoxDecoration(
-                      color: selected ? tierCardBorder : Colors.transparent,
-                      borderRadius: BorderRadius.circular(13),
-                    ),
+            Widget segmented() {
+              final isKwh = inputType == _CalcInput.kwh;
+              Widget label(String text, _CalcInput value) {
+                final selected = inputType == value;
+                return Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setSheetState(() {
+                      inputType = value;
+                      error = null;
+                      pesoResultKwh = null;
+                    }),
                     child: Center(
-                      child: Text(
-                        label,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w800,
-                          color: selected
-                              ? Colors.white
-                              : textDark.withValues(alpha: 0.55),
-                        ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            text,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w800,
+                              color: selected
+                                  ? Colors.white
+                                  : textDark.withValues(alpha: 0.55),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
+                );
+              }
+
+              return Container(
+                height: 54,
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(
+                  color: tierCardBorder.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(40),
+                ),
+                child: Stack(
+                  children: [
+                    AnimatedAlign(
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOutCubic,
+                      alignment: isKwh
+                          ? Alignment.centerLeft
+                          : Alignment.centerRight,
+                      child: FractionallySizedBox(
+                        widthFactor: 0.5,
+                        heightFactor: 1,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(40),
+                            gradient: LinearGradient(
+                              colors: [
+                                tierCardBorder,
+                                tierCardBorder.withValues(alpha: 0.85),
+                              ],
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: tierCardBorder.withValues(alpha: 0.35),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        label('Usage (kWh)', _CalcInput.kwh),
+                        label('Budget (\u20b1)', _CalcInput.pesos),
+                      ],
+                    ),
+                  ],
                 ),
               );
             }
 
             final bool isPesoMode = inputType == _CalcInput.pesos;
+
+            Widget caption(String text) => Text(
+              text,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.8,
+                color: textDark.withValues(alpha: 0.5),
+              ),
+            );
 
             return Padding(
               padding: EdgeInsets.only(
@@ -538,288 +600,352 @@ class _BillingScreenState extends State<BillingScreen> {
                 decoration: BoxDecoration(
                   color: creamBg,
                   borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(28),
+                    top: Radius.circular(36),
                   ),
                 ),
-                padding: const EdgeInsets.fromLTRB(24, 14, 24, 28),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 44,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: textDark.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    Text(
-                      'BILL CALCULATOR',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.6,
-                        color: textDark.withValues(alpha: 0.55),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      isPesoMode
-                          ? 'What is your electricity budget?'
-                          : 'How many kWh will you use?',
-                      style: TextStyle(
-                        fontSize: 19,
-                        fontWeight: FontWeight.w900,
-                        color: textDark,
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    Container(
-                      padding: const EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        border: Border.all(
-                          color: tierCardBorder.withValues(alpha: 0.3),
-                        ),
-                        borderRadius: BorderRadius.circular(17),
-                      ),
-                      child: Row(
-                        children: [
-                          modeChip('Usage (kWh)', _CalcInput.kwh),
-                          modeChip('Budget (₱)', _CalcInput.pesos),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    TextField(
-                      controller: controller,
-                      autofocus: true,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
-                      style: TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w900,
-                        color: brandOrangeText,
-                      ),
-                      decoration: InputDecoration(
-                        prefixText: isPesoMode ? '₱ ' : null,
-                        prefixStyle: TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w900,
-                          color: brandOrangeText,
-                        ),
-                        suffixText: isPesoMode ? null : 'kWh',
-                        suffixStyle: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: textDark.withValues(alpha: 0.45),
-                        ),
-                        hintText: isPesoMode ? '2500' : '250',
-                        hintStyle: TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w900,
-                          color: textDark.withValues(alpha: 0.18),
-                        ),
-                        filled: true,
-                        fillColor: Colors.white,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 16,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: BorderSide(color: tierCardBorder),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: BorderSide(
-                            color: tierCardBorder.withValues(alpha: 0.4),
-                          ),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: BorderSide(
-                            color: tierCardBorder,
-                            width: 1.6,
+                padding: const EdgeInsets.fromLTRB(22, 12, 22, 26),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: textDark.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(2),
                           ),
                         ),
                       ),
-                      onChanged: (_) {
-                        if (pesoResultKwh != null) {
-                          setSheetState(() => pesoResultKwh = null);
-                        }
-                      },
-                      onSubmitted: (_) => compute(),
-                    ),
-                    if (error != null) ...[
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 20),
                       Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Icon(
-                            Icons.error_outline_rounded,
-                            size: 15,
-                            color: Color(0xFFB3261E),
-                          ),
-                          const SizedBox(width: 6),
                           Expanded(
-                            child: Text(
-                              error!,
-                              style: const TextStyle(
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFFB3261E),
-                              ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                caption('BILL CALCULATOR'),
+                                const SizedBox(height: 3),
+                                AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 180),
+                                  child: Text(
+                                    isPesoMode
+                                        ? 'What is your electricity budget?'
+                                        : 'How many kWh will you use?',
+                                    key: ValueKey(isPesoMode),
+                                    style: TextStyle(
+                                      fontSize: 22,
+                                      height: 1.2,
+                                      fontWeight: FontWeight.w900,
+                                      color: textDark,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
-                    ],
-
-                    if (isPesoMode && pesoResultKwh != null) ...[
-                      const SizedBox(height: 14),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 14,
+                      const SizedBox(height: 22),
+                      segmented(),
+                      const SizedBox(height: 16),
+                      Focus(
+                        child: Builder(
+                          builder: (fctx) {
+                            final focused = Focus.of(fctx).hasFocus;
+                            return AnimatedContainer(
+                              duration: const Duration(milliseconds: 180),
+                              padding: const EdgeInsets.fromLTRB(
+                                26,
+                                18,
+                                26,
+                                16,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(32),
+                                border: Border.all(
+                                  color: focused
+                                      ? tierCardBorder
+                                      : tierCardBorder.withValues(alpha: 0.18),
+                                  width: focused ? 1.8 : 1,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: tierCardBorder.withValues(
+                                      alpha: focused ? 0.18 : 0.06,
+                                    ),
+                                    blurRadius: 18,
+                                    offset: const Offset(0, 6),
+                                  ),
+                                ],
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  caption(
+                                    isPesoMode ? 'YOUR BUDGET' : 'YOUR USAGE',
+                                  ),
+                                  TextField(
+                                    controller: controller,
+                                    autofocus: true,
+                                    keyboardType:
+                                        const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        ),
+                                    cursorColor: tierCardBorder,
+                                    style: TextStyle(
+                                      fontSize: 38,
+                                      fontWeight: FontWeight.w900,
+                                      letterSpacing: -1,
+                                      color: brandOrangeText,
+                                    ),
+                                    decoration: InputDecoration(
+                                      isDense: true,
+                                      prefixText: isPesoMode ? '\u20b1 ' : null,
+                                      prefixStyle: TextStyle(
+                                        fontSize: 38,
+                                        fontWeight: FontWeight.w900,
+                                        color: tierCardBorder,
+                                      ),
+                                      suffixText: isPesoMode ? null : 'kWh',
+                                      suffixStyle: TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w800,
+                                        color: textDark.withValues(alpha: 0.4),
+                                      ),
+                                      hintText: isPesoMode ? '2500' : '250',
+                                      hintStyle: TextStyle(
+                                        fontSize: 38,
+                                        fontWeight: FontWeight.w900,
+                                        letterSpacing: -1,
+                                        color: textDark.withValues(alpha: 0.14),
+                                      ),
+                                      border: InputBorder.none,
+                                      enabledBorder: InputBorder.none,
+                                      focusedBorder: InputBorder.none,
+                                      contentPadding: const EdgeInsets.only(
+                                        top: 6,
+                                        bottom: 2,
+                                      ),
+                                    ),
+                                    onChanged: (_) {
+                                      if (pesoResultKwh != null) {
+                                        setSheetState(
+                                          () => pesoResultKwh = null,
+                                        );
+                                      }
+                                    },
+                                    onSubmitted: (_) => compute(),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
                         ),
+                      ),
+                      if (error != null) ...[
+                        const SizedBox(height: 10),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(
+                              0xFFB3261E,
+                            ).withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  error!,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFFB3261E),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+
+                      if (isPesoMode && pesoResultKwh != null) ...[
+                        const SizedBox(height: 14),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 16,
+                          ),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(30),
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                tierCardBorder.withValues(alpha: 0.16),
+                                tierCardBorder.withValues(alpha: 0.06),
+                              ],
+                            ),
+                            border: Border.all(
+                              color: tierCardBorder.withValues(alpha: 0.25),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    caption('EQUIVALENT USAGE'),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      '${pesoResultKwh!.toStringAsFixed(2)} kWh',
+                                      style: TextStyle(
+                                        fontSize: 28,
+                                        fontWeight: FontWeight.w900,
+                                        letterSpacing: -0.5,
+                                        color: brandOrangeText,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'for \u20b1${pesoResultAmount!.toStringAsFixed(2)} ($selectedMonth rate)',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                        color: textDark.withValues(alpha: 0.5),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+
+                      const SizedBox(height: 18),
+                      caption('RATE MONTH'),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(24, 8, 18, 8),
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          borderRadius: BorderRadius.circular(16),
+                          borderRadius: BorderRadius.circular(40),
                           border: Border.all(
-                            color: tierCardBorder.withValues(alpha: 0.4),
+                            color: tierCardBorder.withValues(alpha: 0.18),
                           ),
                         ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                        child: Row(
                           children: [
-                            Text(
-                              'EQUIVALENT USAGE',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0.6,
-                                color: textDark.withValues(alpha: 0.55),
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${pesoResultKwh!.toStringAsFixed(2)} kWh',
-                              style: TextStyle(
-                                fontSize: 26,
-                                fontWeight: FontWeight.w900,
-                                color: brandOrangeText,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              'for ₱${pesoResultAmount!.toStringAsFixed(2)} ($selectedMonth rate)',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: textDark.withValues(alpha: 0.5),
+                            Expanded(
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<String>(
+                                  value: selectedMonth,
+                                  isExpanded: true,
+                                  borderRadius: BorderRadius.circular(24),
+                                  dropdownColor: Colors.white,
+                                  icon: Icon(
+                                    Icons.keyboard_arrow_down_rounded,
+                                    color: textDark.withValues(alpha: 0.5),
+                                  ),
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                    color: textDark,
+                                  ),
+                                  items: availableMonths.map((String month) {
+                                    return DropdownMenuItem<String>(
+                                      value: month,
+                                      child: Text('$month Rate'),
+                                    );
+                                  }).toList(),
+                                  onChanged: (String? newValue) {
+                                    if (newValue != null) {
+                                      setSheetState(() {
+                                        selectedMonth = newValue;
+                                        pesoResultKwh = null;
+                                      });
+                                    }
+                                  },
+                                ),
                               ),
                             ),
                           ],
                         ),
                       ),
+
+                      const SizedBox(height: 14),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              isPesoMode
+                                  ? 'Checks how many kWh fit within this budget.'
+                                  : 'Shows the full itemized breakdown for this usage.',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: textDark.withValues(alpha: 0.5),
+                                height: 1.35,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 18),
+                      GestureDetector(
+                        onTap: compute,
+                        child: Container(
+                          height: 56,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(40),
+                            gradient: LinearGradient(
+                              colors: [
+                                tierCardBorder.withValues(alpha: 0.9),
+                                tierCardBorder,
+                              ],
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: tierCardBorder.withValues(alpha: 0.4),
+                                blurRadius: 16,
+                                offset: const Offset(0, 8),
+                              ),
+                            ],
+                          ),
+                          child: loading
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.4,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Text(
+                                  'Compute',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.3,
+                                  ),
+                                ),
+                        ),
+                      ),
                     ],
-
-                    // --- NEW MONTH SELECTOR UI START ---
-                    const SizedBox(height: 18),
-                    Text(
-                      'RATE MONTH',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.6,
-                        color: textDark.withValues(alpha: 0.55),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: tierCardBorder.withValues(alpha: 0.4),
-                        ),
-                      ),
-                      child: DropdownButtonHideUnderline(
-                        child: DropdownButton<String>(
-                          value: selectedMonth,
-                          isExpanded: true,
-                          icon: Icon(
-                            Icons.calendar_month_rounded,
-                            color: brandOrangeText,
-                            size: 20,
-                          ),
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: textDark,
-                          ),
-                          items: availableMonths.map((String month) {
-                            return DropdownMenuItem<String>(
-                              value: month,
-                              child: Text('$month Rate'),
-                            );
-                          }).toList(),
-                          onChanged: (String? newValue) {
-                            if (newValue != null) {
-                              setSheetState(() {
-                                selectedMonth = newValue;
-                                pesoResultKwh = null;
-                              });
-                            }
-                          },
-                        ),
-                      ),
-                    ),
-                    // --- NEW MONTH SELECTOR UI END ---
-
-                    const SizedBox(height: 16),
-                    Text(
-                      isPesoMode
-                          ? 'Checks how many kWh fit within this budget.'
-                          : 'Shows the full itemized breakdown for this usage.',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: textDark.withValues(alpha: 0.5),
-                        height: 1.35,
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    SizedBox(
-                      height: 52,
-                      child: ElevatedButton(
-                        onPressed: compute,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: tierCardBorder,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                        ),
-                        child: const Text(
-                          'Compute',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 0.3,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             );
@@ -887,11 +1013,13 @@ class _BillingScreenState extends State<BillingScreen> {
                           clipBehavior: Clip.none,
                           children: [
                             Positioned.fill(
-                              child: CustomPaint(
-                                isComplex: true,
-                                willChange: false,
-                                painter: _TicketShadowPainter(
-                                  clipper: _ticketClipper,
+                              child: RepaintBoundary(
+                                child: CustomPaint(
+                                  isComplex: true,
+                                  willChange: false,
+                                  painter: _TicketShadowPainter(
+                                    clipper: _ticketClipper,
+                                  ),
                                 ),
                               ),
                             ),
@@ -900,11 +1028,7 @@ class _BillingScreenState extends State<BillingScreen> {
                               child: Container(
                                 width: double.infinity,
                                 decoration: BoxDecoration(
-                                  color: Colors.white.withValues(alpha: 0.92),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.5),
-                                    width: 1.5,
-                                  ),
+                                  color: const Color(0xFFFFFFFF),
                                 ),
                                 padding: const EdgeInsets.fromLTRB(
                                   28,
@@ -913,7 +1037,9 @@ class _BillingScreenState extends State<BillingScreen> {
                                   40,
                                 ),
                                 child: FutureBuilder<Map<String, dynamic>>(
-                                  future: calcFuture ?? _fetchBillBreakdownCached(kwh),
+                                  future:
+                                      calcFuture ??
+                                      _fetchBillBreakdownCached(kwh),
                                   builder: (context, snapshot) {
                                     if (snapshot.connectionState !=
                                         ConnectionState.done) {
@@ -922,8 +1048,10 @@ class _BillingScreenState extends State<BillingScreen> {
                                           vertical: 90,
                                         ),
                                         child: Center(
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2.5,
+                                          child: RepaintBoundary(
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2.5,
+                                            ),
                                           ),
                                         ),
                                       );
@@ -961,18 +1089,20 @@ class _BillingScreenState extends State<BillingScreen> {
                                       );
                                     }
 
-                                    return _buildTicketContent(
-                                      context,
-                                      snapshot.data!,
-                                      kwh,
-                                      tierTitle: tierTitle,
-                                      tierRate: tierRate,
-                                      tierMax: tierMax,
-                                      tierEnergy: tierEnergy,
-                                      tierPercentage: tierPercentage,
-                                      tierRemainingText: tierRemainingText,
-                                      fixedCharge: fixedCharge,
-                                      sourceFile: sourceFile,
+                                    return RepaintBoundary(
+                                      child: _buildTicketContent(
+                                        context,
+                                        snapshot.data!,
+                                        kwh,
+                                        tierTitle: tierTitle,
+                                        tierRate: tierRate,
+                                        tierMax: tierMax,
+                                        tierEnergy: tierEnergy,
+                                        tierPercentage: tierPercentage,
+                                        tierRemainingText: tierRemainingText,
+                                        fixedCharge: fixedCharge,
+                                        sourceFile: sourceFile,
+                                      ),
                                     );
                                   },
                                 ),
@@ -1365,7 +1495,10 @@ class _BillingScreenState extends State<BillingScreen> {
     return GestureDetector(
       onTap: () {
         if (_mode != mode) {
-          setState(() => _mode = mode);
+          setState(() {
+            _slideDir = mode == _BillMode.current ? 1 : -1;
+            _mode = mode;
+          });
         }
       },
       behavior: HitTestBehavior.opaque,
@@ -1454,6 +1587,140 @@ class _BillingScreenState extends State<BillingScreen> {
           final double currentTierMax = liveTier.max;
           final String remainingText = liveTier.remainingText;
           final double percentage = liveTier.percentage;
+
+          Widget tierCard(
+            double energy,
+            _TierInfo t, {
+            Color? color,
+            Color? ringColor,
+          }) {
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(28),
+              child: Container(
+                width: double.infinity,
+                color: color ?? primaryOrange,
+                child: CustomPaint(
+                  painter: ringColor == null
+                      ? const CardCirclePainter()
+                      : CardCirclePainter(ringColor: ringColor),
+                  isComplex: true,
+                  willChange: false,
+                  child: Padding(
+                    padding: const EdgeInsets.all(22),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              t.title,
+                              style: TextStyle(
+                                color: tierTextColor,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            Text(
+                              t.rate,
+                              style: TextStyle(
+                                color: tierTextColor.withValues(alpha: 0.95),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 20),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                          textBaseline: TextBaseline.alphabetic,
+                          children: [
+                            RichText(
+                              text: TextSpan(
+                                style: TextStyle(color: tierTextColor),
+                                children: [
+                                  TextSpan(
+                                    text: '${energy.toStringAsFixed(2)} ',
+                                    style: const TextStyle(
+                                      fontSize: 26,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  TextSpan(
+                                    text: '/ ${t.max.toStringAsFixed(0)}',
+                                    style: const TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Text(
+                              '${(t.percentage * 100).toStringAsFixed(1)}%',
+                              style: TextStyle(
+                                color: tierTextColor,
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'TOTAL KWH CONSUMPTION',
+                          style: TextStyle(
+                            color: tierTextColor.withValues(alpha: 0.75),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: LinearProgressIndicator(
+                            value: t.percentage,
+                            backgroundColor: Colors.white.withValues(
+                              alpha: 0.4,
+                            ),
+                            valueColor: const AlwaysStoppedAnimation<Color>(
+                              Colors.white,
+                            ),
+                            minHeight: 7,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.info_outline_rounded,
+                              color: tierTextColor,
+                              size: 15,
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                t.remainingText,
+                                style: TextStyle(
+                                  color: tierTextColor.withValues(alpha: 0.95),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }
 
           return CustomMaterialIndicator(
             onRefresh: _handleRefresh,
@@ -1642,111 +1909,115 @@ class _BillingScreenState extends State<BillingScreen> {
                         bottom: 10.0,
                         left: 24.0,
                         right: 24.0,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(
-                                      Icons.trending_up_rounded,
-                                      color: Colors.greenAccent,
-                                      size: 15,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      heroKwhLabel,
-                                      style: TextStyle(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.95,
-                                        ),
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w600,
+                        child: _ModeSlide(
+                          modeKey: _mode,
+                          direction: _slideDir,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(
+                                        Icons.trending_up_rounded,
+                                        color: Colors.greenAccent,
+                                        size: 15,
                                       ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  '${heroKwh.toStringAsFixed(2)} kWh',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 19,
-                                    fontWeight: FontWeight.w800,
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        heroKwhLabel,
+                                        style: TextStyle(
+                                          color: Colors.white.withValues(
+                                            alpha: 0.95,
+                                          ),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ),
-                              ],
-                            ),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(
-                                      Icons.payments_rounded,
-                                      color: Colors.greenAccent,
-                                      size: 15,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      heroBillLabel,
-                                      style: TextStyle(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.95,
-                                        ),
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 2),
-                                if (isCurrentMode)
+                                  const SizedBox(height: 2),
                                   Text(
-                                    '₱${estimatedCostLive.toStringAsFixed(2)}',
+                                    '${heroKwh.toStringAsFixed(2)} kWh',
                                     style: const TextStyle(
                                       color: Colors.white,
                                       fontSize: 19,
                                       fontWeight: FontWeight.w800,
                                     ),
-                                  )
-                                else
-                                  FutureBuilder<Map<String, dynamic>>(
-                                    future: estimatedMonthEnd > 0
-                                        ? _fetchBillBreakdownCached(
-                                            estimatedMonthEnd,
-                                          )
-                                        : null,
-                                    builder: (context, billSnapshot) {
-                                      final totalEnergyAmount =
-                                          (billSnapshot
-                                                      .data?['total_energy_amount']
-                                                  as num?)
-                                              ?.toDouble();
-                                      final double estimatedBillPeso =
-                                          totalEnergyAmount ??
-                                          _calculateBill(
-                                            estimatedMonthEnd,
-                                            rates,
-                                          );
-                                      return Text(
-                                        '₱${estimatedBillPeso.toStringAsFixed(2)}',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 19,
-                                          fontWeight: FontWeight.w800,
-                                        ),
-                                      );
-                                    },
                                   ),
-                              ],
-                            ),
-                          ],
+                                ],
+                              ),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(
+                                        Icons.payments_rounded,
+                                        color: Colors.greenAccent,
+                                        size: 15,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        heroBillLabel,
+                                        style: TextStyle(
+                                          color: Colors.white.withValues(
+                                            alpha: 0.95,
+                                          ),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 2),
+                                  if (isCurrentMode)
+                                    Text(
+                                      '₱${estimatedCostLive.toStringAsFixed(2)}',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 19,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    )
+                                  else
+                                    FutureBuilder<Map<String, dynamic>>(
+                                      future: estimatedMonthEnd > 0
+                                          ? _fetchBillBreakdownCached(
+                                              estimatedMonthEnd,
+                                            )
+                                          : null,
+                                      builder: (context, billSnapshot) {
+                                        final totalEnergyAmount =
+                                            (billSnapshot
+                                                        .data?['total_energy_amount']
+                                                    as num?)
+                                                ?.toDouble();
+                                        final double estimatedBillPeso =
+                                            totalEnergyAmount ??
+                                            _calculateBill(
+                                              estimatedMonthEnd,
+                                              rates,
+                                            );
+                                        return Text(
+                                          '₱${estimatedBillPeso.toStringAsFixed(2)}',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 19,
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ],
@@ -1767,148 +2038,44 @@ class _BillingScreenState extends State<BillingScreen> {
                           ),
                         ),
                         const SizedBox(height: 12),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(28),
-                          child: Container(
-                            width: double.infinity,
-                            color: primaryOrange,
-                            child: CustomPaint(
-                              painter: CardCirclePainter(),
-                              isComplex: true,
-                              willChange: false,
-                              child: Padding(
-                                padding: const EdgeInsets.all(22),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Text(
-                                          currentTierTitle,
-                                          style: TextStyle(
-                                            color: tierTextColor,
-                                            fontSize: 15,
-                                            fontWeight: FontWeight.w800,
-                                            letterSpacing: 0.5,
-                                          ),
-                                        ),
-                                        Text(
-                                          currentTierRate,
-                                          style: TextStyle(
-                                            color: tierTextColor.withValues(
-                                              alpha: 0.95,
-                                            ),
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 20),
-                                    Row(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.spaceBetween,
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.baseline,
-                                      textBaseline: TextBaseline.alphabetic,
-                                      children: [
-                                        RichText(
-                                          text: TextSpan(
-                                            style: TextStyle(
-                                              color: tierTextColor,
-                                            ),
-                                            children: [
-                                              TextSpan(
-                                                text:
-                                                    '${tierCardEnergy.toStringAsFixed(2)} ',
-                                                style: const TextStyle(
-                                                  fontSize: 26,
-                                                  fontWeight: FontWeight.w800,
-                                                ),
-                                              ),
-                                              TextSpan(
-                                                text:
-                                                    '/ ${currentTierMax.toStringAsFixed(0)}',
-                                                style: const TextStyle(
-                                                  fontSize: 20,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        Text(
-                                          '${(percentage * 100).toStringAsFixed(1)}%',
-                                          style: TextStyle(
-                                            color: tierTextColor,
-                                            fontSize: 15,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      'TOTAL KWH CONSUMPTION',
-                                      style: TextStyle(
-                                        color: tierTextColor.withValues(
-                                          alpha: 0.75,
-                                        ),
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.5,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 16),
-                                    ClipRRect(
-                                      borderRadius: BorderRadius.circular(10),
-                                      child: LinearProgressIndicator(
-                                        value: percentage,
-                                        backgroundColor: Colors.white
-                                            .withValues(alpha: 0.4),
-                                        valueColor:
-                                            const AlwaysStoppedAnimation<Color>(
-                                              Colors.white,
-                                            ),
-                                        minHeight: 7,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 16),
-                                    Row(
-                                      children: [
-                                        Icon(
-                                          Icons.info_outline_rounded,
-                                          color: tierTextColor,
-                                          size: 15,
-                                        ),
-                                        const SizedBox(width: 6),
-                                        Expanded(
-                                          child: Text(
-                                            remainingText,
-                                            style: TextStyle(
-                                              color: tierTextColor.withValues(
-                                                alpha: 0.95,
-                                              ),
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w500,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
+                        _TierCardPager(
+                          isCurrent: isCurrentMode,
+                          onSwipe: (toCurrent) {
+                            final target = toCurrent
+                                ? _BillMode.current
+                                : _BillMode.endOfMonth;
+                            if (_mode != target) {
+                              setState(() {
+                                _slideDir = toCurrent ? 1 : -1;
+                                _mode = target;
+                              });
+                            }
+                          },
+                          eomCard: tierCard(
+                            estimatedMonthEnd,
+                            _tierInfoFor(estimatedMonthEnd, rates),
+                            color: const Color(0xFFF59F4E),
+                            ringColor: const Color(0xFFE07A25),
+                          ),
+                          currentCard: tierCard(
+                            cumulativeEnergy,
+                            _tierInfoFor(cumulativeEnergy, rates),
                           ),
                         ),
                         const SizedBox(height: 14),
 
                         // View Bill Breakdown Button
-                        InkWell(
-                          borderRadius: BorderRadius.circular(20),
+                        _PromoBanner(
+                          title: 'View bill breakdown',
+                          subtitle:
+                              'See detailed itemized charges and breakdown!',
+                          art: _PromoArt.receipt,
+                          gradient: const [
+                            Color(0xFFFFDCD2),
+                            Color(0xFFF7A793),
+                          ],
+                          swoosh: const Color(0xFFFFFFFF),
+                          textColor: const Color(0xFF4A2018),
                           onTap: () => _showBillBreakdown(
                             context,
                             kwh: isCurrentMode ? todayKwh : estimatedMonthEnd,
@@ -1921,226 +2088,25 @@ class _BillingScreenState extends State<BillingScreen> {
                             fixedCharge: fixedCharge,
                             sourceFile: sourceFile,
                           ),
-                          child: Container(
-                            width: double.infinity,
-                            clipBehavior: Clip.antiAlias,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFAC3B3),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Stack(
-                              children: [
-                                Positioned(
-                                  right: -10,
-                                  bottom: -20,
-                                  child: Text(
-                                    '₱',
-                                    style: TextStyle(
-                                      fontSize: 110,
-                                      fontWeight: FontWeight.w900,
-                                      color: const Color(
-                                        0xFFE27B66,
-                                      ).withValues(alpha: 0.18),
-                                    ),
-                                  ),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 20.0,
-                                    vertical: 18.0,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            const Text(
-                                              'View bill breakdown',
-                                              style: TextStyle(
-                                                color: Color(0xFF2B2C36),
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w800,
-                                                letterSpacing: -0.2,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              'See detailed itemized charges and breakdown!',
-                                              style: TextStyle(
-                                                color: const Color(
-                                                  0xFF2B2C36,
-                                                ).withValues(alpha: 0.65),
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Stack(
-                                        alignment: Alignment.center,
-                                        clipBehavior: Clip.none,
-                                        children: [
-                                          Container(
-                                            width: 48,
-                                            height: 48,
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xFFF79E87),
-                                              shape: BoxShape.circle,
-                                              boxShadow: [
-                                                BoxShadow(
-                                                  color: const Color(
-                                                    0xFFD36852,
-                                                  ).withValues(alpha: 0.35),
-                                                  blurRadius: 10,
-                                                  offset: const Offset(0, 4),
-                                                ),
-                                              ],
-                                            ),
-                                            child: const Icon(
-                                              Icons.receipt_long_rounded,
-                                              color: Colors.white,
-                                              size: 24,
-                                            ),
-                                          ),
-                                          Positioned(
-                                            top: -6,
-                                            right: -6,
-                                            child: Container(
-                                              padding: const EdgeInsets.all(4),
-                                              decoration: BoxDecoration(
-                                                color: const Color(0xFFFFD56B),
-                                                shape: BoxShape.circle,
-                                                boxShadow: [
-                                                  BoxShadow(
-                                                    color: Colors.black
-                                                        .withValues(
-                                                          alpha: 0.15,
-                                                        ),
-                                                    blurRadius: 4,
-                                                    offset: const Offset(0, 2),
-                                                  ),
-                                                ],
-                                              ),
-                                              child: const Icon(
-                                                Icons.payments_rounded,
-                                                color: Color(0xFF8C5800),
-                                                size: 14,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
                         ),
                         const SizedBox(height: 12),
 
                         // Bill Calculator Button
-                        InkWell(
-                          borderRadius: BorderRadius.circular(20),
+                        _PromoBanner(
+                          title: 'Bill calculator',
+                          subtitle: 'Enter your own usage and see the bill.',
+                          art: _PromoArt.calculator,
+                          gradient: const [
+                            Color(0xFFFFF0D6),
+                            Color(0xFFFFC27A),
+                          ],
+                          swoosh: const Color(0xFFFFFFFF),
+                          textColor: const Color(0xFF5A3410),
                           onTap: () => _showBillCalculator(
                             context,
                             rates,
                             fixedCharge: fixedCharge,
                             sourceFile: sourceFile,
-                          ),
-                          child: Container(
-                            width: double.infinity,
-                            clipBehavior: Clip.antiAlias,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFAEEDA),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: tierCardBorder.withValues(alpha: 0.18),
-                                width: 1,
-                              ),
-                            ),
-                            child: Stack(
-                              children: [
-                                Positioned(
-                                  right: -12,
-                                  bottom: -26,
-                                  child: Icon(
-                                    Icons.calculate_rounded,
-                                    size: 120,
-                                    color: tierCardBorder.withValues(
-                                      alpha: 0.10,
-                                    ),
-                                  ),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 20.0,
-                                    vertical: 18.0,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              'Bill calculator',
-                                              style: TextStyle(
-                                                color: tierTextColor,
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w800,
-                                                letterSpacing: -0.2,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              'Enter your own usage and see the bill.',
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                color: tierTextColor.withValues(
-                                                  alpha: 0.65,
-                                                ),
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Container(
-                                        width: 48,
-                                        height: 48,
-                                        decoration: BoxDecoration(
-                                          color: tierCardBorder,
-                                          shape: BoxShape.circle,
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: tierCardBorder.withValues(
-                                                alpha: 0.32,
-                                              ),
-                                              blurRadius: 10,
-                                              offset: const Offset(0, 4),
-                                            ),
-                                          ],
-                                        ),
-                                        child: const Icon(
-                                          Icons.calculate_rounded,
-                                          color: Colors.white,
-                                          size: 24,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
                           ),
                         ),
                         Padding(
@@ -2217,6 +2183,7 @@ class _BillingScreenState extends State<BillingScreen> {
     final double screenWidth = MediaQuery.of(context).size.width;
     final double viewportFraction = (screenWidth - 20) / screenWidth;
 
+    double dragDy = 0;
     final PageController pageController = PageController(
       initialPage: initialPage,
       viewportFraction: viewportFraction,
@@ -2226,141 +2193,141 @@ class _BillingScreenState extends State<BillingScreen> {
       PageRouteBuilder(
         opaque: false,
         barrierDismissible: true,
-        barrierColor: Colors.black.withValues(alpha: 0.45),
+        barrierColor: Colors.transparent,
         transitionDuration: const Duration(milliseconds: 350),
         reverseTransitionDuration: const Duration(milliseconds: 300),
         pageBuilder: (context, animation, secondaryAnimation) {
           return Scaffold(
             backgroundColor: Colors.transparent,
-            body: Align(
-              alignment: Alignment.bottomCenter,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: creamBg,
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(28),
-                  ),
-                ),
-                padding: const EdgeInsets.only(bottom: 32.0),
-                child: SafeArea(
-                  top: false,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const SizedBox(height: 12),
-                      Center(
-                        child: Container(
-                          width: 44,
-                          height: 4,
-                          decoration: BoxDecoration(
-                            color: textDark.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(2),
+            body: Stack(
+              children: [
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => Navigator.of(context).pop(),
+                    child: AnimatedBuilder(
+                      animation: animation,
+                      builder: (context, _) {
+                        final t = Curves.easeOut.transform(animation.value);
+                        return BackdropFilter(
+                          filter: ImageFilter.blur(
+                            sigmaX: 14 * t,
+                            sigmaY: 14 * t,
                           ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                        child: Row(
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.close_rounded, size: 28),
-                              onPressed: () => Navigator.of(context).pop(),
-                            ),
-                            Expanded(
-                              child: Text(
-                                'Rate Brackets',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w800,
-                                  color: textDark,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 48),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 32),
-                      SizedBox(
-                        height: 200,
-                        child: PageView.builder(
-                          controller: pageController,
-                          physics: const BouncingScrollPhysics(),
-                          itemCount: tierData.length,
-                          itemBuilder: (context, index) {
-                            final tier = tierData[index];
-
-                            Widget card = Container(
-                              height: 160.0,
-                              width: double.infinity,
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(22),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: 0.12),
-                                    blurRadius: 20,
-                                    spreadRadius: -4,
-                                    offset: const Offset(0, 10),
-                                  ),
-                                ],
-                              ),
-                              child: _buildRateCard(
-                                tierTitle: tier['tierTitle'] as String,
-                                isActive: tier['isActive'] as bool,
-                                index: index,
-                                rates: rates,
-                              ),
-                            );
-
-                            if (index == initialPage) {
-                              card = Hero(
-                                tag: 'tier_card_hero',
-                                child: Material(
-                                  type: MaterialType.transparency,
-                                  child: card,
-                                ),
-                              );
-                            }
-
-                            return AnimatedBuilder(
-                              animation: pageController,
-                              builder: (context, child) {
-                                double value = 1.0;
-                                if (pageController.position.haveDimensions) {
-                                  value = pageController.page! - index;
-                                  value = (1 - (value.abs() * 0.12)).clamp(
-                                    0.85,
-                                    1.0,
-                                  );
-                                }
-                                return Center(
-                                  child: Transform.scale(
-                                    scale: value,
-                                    child: child,
-                                  ),
-                                );
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8.0,
-                                ),
-                                child: card,
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ],
+                          child: Container(
+                            color: Colors.black.withValues(alpha: 0.40 * t),
+                          ),
+                        );
+                      },
+                    ),
                   ),
                 ),
-              ),
+                Align(
+                  alignment: const Alignment(0, 0.5),
+                  child: SafeArea(
+                    child: FadeTransition(
+                      opacity: CurvedAnimation(
+                        parent: animation,
+                        curve: const Interval(0.3, 1.0, curve: Curves.easeOut),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onVerticalDragUpdate: (d) {
+                              dragDy += d.delta.dy;
+                            },
+                            onVerticalDragEnd: (d) {
+                              if (dragDy > 50 ||
+                                  (d.primaryVelocity ?? 0) > 400) {
+                                Navigator.of(context).pop();
+                              }
+                              dragDy = 0;
+                            },
+                            child: SizedBox(
+                              height: (screenWidth - 36) / 1.586 + 40,
+                              child: PageView.builder(
+                                controller: pageController,
+                                physics: const BouncingScrollPhysics(),
+                                itemCount: tierData.length,
+                                itemBuilder: (context, index) {
+                                  final tier = tierData[index];
+
+                                  Widget card = Container(
+                                    height: (screenWidth - 36) / 1.586,
+                                    width: double.infinity,
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(22),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withValues(
+                                            alpha: 0.12,
+                                          ),
+                                          blurRadius: 20,
+                                          spreadRadius: -4,
+                                          offset: const Offset(0, 10),
+                                        ),
+                                      ],
+                                    ),
+                                    child: _buildRateCard(
+                                      tierTitle: tier['tierTitle'] as String,
+                                      isActive: tier['isActive'] as bool,
+                                      index: index,
+                                      rates: rates,
+                                    ),
+                                  );
+
+                                  if (index == initialPage) {
+                                    card = Hero(
+                                      tag: 'tier_card_hero',
+                                      child: Material(
+                                        type: MaterialType.transparency,
+                                        child: card,
+                                      ),
+                                    );
+                                  }
+
+                                  return AnimatedBuilder(
+                                    animation: pageController,
+                                    builder: (context, child) {
+                                      double value = 1.0;
+                                      if (pageController
+                                          .position
+                                          .haveDimensions) {
+                                        value = pageController.page! - index;
+                                        value = (1 - (value.abs() * 0.12))
+                                            .clamp(0.85, 1.0);
+                                      }
+                                      return Center(
+                                        child: Transform.scale(
+                                          scale: value,
+                                          child: child,
+                                        ),
+                                      );
+                                    },
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8.0,
+                                      ),
+                                      child: card,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          return FadeTransition(opacity: animation, child: child);
+          return child;
         },
       ),
     );
@@ -2387,118 +2354,124 @@ class _BillingScreenState extends State<BillingScreen> {
     final frontIndex = activeIndex == -1 ? 0 : activeIndex;
     final frontTier = tierData[frontIndex];
 
-    const double cardHeight = 160.0;
     const double stackHeight = 95.0;
     const double maskTop = 76.0;
 
     return Padding(
       padding: const EdgeInsets.only(top: 24.0, left: 18.0, right: 18.0),
-      child: SizedBox(
-        height: stackHeight,
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Positioned(
-              top: -12,
-              left: 12,
-              right: 12,
-              child: Transform.rotate(
-                angle: -0.05,
-                alignment: Alignment.topRight,
-                child: Container(
-                  height: cardHeight,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFA8B39).withValues(alpha: 0.50),
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.15),
-                        blurRadius: 20,
-                        spreadRadius: -2,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            Positioned(
-              top: 14,
-              left: 0,
-              right: 0,
-              child: GestureDetector(
-                onTap: () =>
-                    _openTierCardsHero(context, cumulativeEnergy, rates),
-                child: Hero(
-                  tag: 'tier_card_hero',
-                  flightShuttleBuilder:
-                      (
-                        flightContext,
-                        animation,
-                        flightDirection,
-                        fromHeroContext,
-                        toHeroContext,
-                      ) {
-                        return Material(
-                          type: MaterialType.transparency,
-                          child: toHeroContext.widget,
-                        );
-                      },
-                  child: Material(
-                    type: MaterialType.transparency,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Same aspect ratio as the expanded card so the Hero flight scales
+          // uniformly instead of stretching.
+          final double cardHeight = constraints.maxWidth / 1.586;
+          return SizedBox(
+            height: stackHeight,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned(
+                  top: -12,
+                  left: 12,
+                  right: 12,
+                  child: Transform.rotate(
+                    angle: -0.05,
+                    alignment: Alignment.topRight,
                     child: Container(
                       height: cardHeight,
                       decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(22),
+                        color: const Color(0xFFFA8B39).withValues(alpha: 0.50),
+                        borderRadius: BorderRadius.circular(20),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.22),
-                            blurRadius: 28,
-                            spreadRadius: -4,
-                            offset: const Offset(0, 14),
-                          ),
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.08),
-                            blurRadius: 8,
-                            offset: const Offset(0, 4),
+                            color: Colors.black.withValues(alpha: 0.15),
+                            blurRadius: 20,
+                            spreadRadius: -2,
+                            offset: const Offset(0, 8),
                           ),
                         ],
                       ),
-                      child: _buildRateCard(
-                        tierTitle: frontTier['tierTitle'] as String,
-                        isActive: frontTier['isActive'] as bool,
-                        index: frontIndex,
-                        rates: rates,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: 14,
+                  left: 0,
+                  right: 0,
+                  child: GestureDetector(
+                    onTap: () =>
+                        _openTierCardsHero(context, cumulativeEnergy, rates),
+                    child: Hero(
+                      tag: 'tier_card_hero',
+                      flightShuttleBuilder:
+                          (
+                            flightContext,
+                            animation,
+                            flightDirection,
+                            fromHeroContext,
+                            toHeroContext,
+                          ) {
+                            return Material(
+                              type: MaterialType.transparency,
+                              child: toHeroContext.widget,
+                            );
+                          },
+                      child: Material(
+                        type: MaterialType.transparency,
+                        child: Container(
+                          height: cardHeight,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(22),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.22),
+                                blurRadius: 28,
+                                spreadRadius: -4,
+                                offset: const Offset(0, 14),
+                              ),
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.08),
+                                blurRadius: 8,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: _buildRateCard(
+                            tierTitle: frontTier['tierTitle'] as String,
+                            isActive: frontTier['isActive'] as bool,
+                            index: frontIndex,
+                            rates: rates,
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ),
-            Positioned(
-              top: maskTop,
-              left: -18,
-              right: -18,
-              bottom: -500,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: creamBg,
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(24),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.12),
-                      blurRadius: 18,
-                      spreadRadius: 2,
-                      offset: const Offset(0, -6),
+                Positioned(
+                  top: maskTop,
+                  left: -18,
+                  right: -18,
+                  bottom: -500,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: creamBg,
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(24),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.12),
+                          blurRadius: 18,
+                          spreadRadius: 2,
+                          offset: const Offset(0, -6),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -2714,10 +2687,14 @@ class _DiagonalHatchPainter extends CustomPainter {
 }
 
 class CardCirclePainter extends CustomPainter {
+  final Color ringColor;
+
+  const CardCirclePainter({this.ringColor = const Color(0xFFFA8B39)});
+
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = const Color(0xFFFA8B39).withValues(alpha: 0.5)
+      ..color = ringColor.withValues(alpha: 0.5)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
 
@@ -2733,7 +2710,8 @@ class CardCirclePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant CardCirclePainter oldDelegate) =>
+      oldDelegate.ringColor != ringColor;
 }
 
 class _TicketDashedTearLine extends StatelessWidget {
@@ -2894,4 +2872,612 @@ class _TicketShadowPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+enum _PromoArt { receipt, calculator }
+
+class _ZigzagClipper extends CustomClipper<Path> {
+  @override
+  Path getClip(Size size) {
+    const tooth = 6.0;
+    final path = Path()..moveTo(0, 0);
+    path.lineTo(size.width, 0);
+    path.lineTo(size.width, size.height - tooth);
+    final n = (size.width / tooth).round();
+    final w = size.width / n;
+    for (var i = n; i > 0; i--) {
+      path.lineTo(w * (i - 0.5), size.height);
+      path.lineTo(w * (i - 1), size.height - tooth);
+    }
+    path.close();
+    return path;
+  }
+
+  @override
+  bool shouldReclip(covariant CustomClipper<Path> oldClipper) => false;
+}
+
+/// Promo-style banner with layered, depth-shifted 3D art that moves with
+/// the scroll position (parallax).
+class _PromoBanner extends StatefulWidget {
+  final String title;
+  final String subtitle;
+  final _PromoArt art;
+  final List<Color> gradient;
+  final Color swoosh;
+  final Color textColor;
+  final VoidCallback onTap;
+
+  const _PromoBanner({
+    required this.title,
+    required this.subtitle,
+    required this.art,
+    required this.gradient,
+    required this.swoosh,
+    required this.textColor,
+    required this.onTap,
+  });
+
+  @override
+  State<_PromoBanner> createState() => _PromoBannerState();
+}
+
+class _PromoBannerState extends State<_PromoBanner> {
+  ScrollPosition? _position;
+  final ValueNotifier<double> _shift = ValueNotifier(0);
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _position?.removeListener(_update);
+    _position = Scrollable.maybeOf(context)?.position;
+    _position?.addListener(_update);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _update());
+  }
+
+  @override
+  void dispose() {
+    _position?.removeListener(_update);
+    _shift.dispose();
+    super.dispose();
+  }
+
+  // -1..1: where the banner sits relative to the viewport centre.
+  void _update() {
+    if (!mounted) return;
+    final box = context.findRenderObject();
+    if (box is! RenderBox || !box.attached) return;
+    final screenH = MediaQuery.of(context).size.height;
+    final cy = box.localToGlobal(Offset(0, box.size.height / 2)).dy;
+    _shift.value = ((cy - screenH / 2) / (screenH / 2)).clamp(-1.0, 1.0);
+  }
+
+  Widget _layer(
+    double depth,
+    Widget child, {
+    double? right,
+    double? top,
+    double? bottom,
+  }) {
+    return Positioned(
+      right: right,
+      top: top,
+      bottom: bottom,
+      child: ValueListenableBuilder<double>(
+        valueListenable: _shift,
+        builder: (_, v, c) => Transform.translate(
+          offset: Offset(v * depth * 0.6, v * depth * 1.4),
+          child: c,
+        ),
+        child: child,
+      ),
+    );
+  }
+
+  Widget _coin(double size, double angle, {IconData? glyph}) {
+    final edge = size * 0.12;
+    final inner = size * 0.72;
+    return Transform.rotate(
+      angle: angle,
+      child: SizedBox(
+        width: size,
+        height: size + edge,
+        child: Stack(
+          children: [
+            // coin thickness
+            Positioned(
+              top: edge,
+              child: Container(
+                width: size,
+                height: size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFFD98A12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF8A4A00).withValues(alpha: 0.28),
+                      blurRadius: 8,
+                      offset: const Offset(0, 5),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // rim
+            Container(
+              width: size,
+              height: size,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFFFFE27A), Color(0xFFF3A91C)],
+                ),
+              ),
+              // face
+              child: Container(
+                width: inner,
+                height: inner,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFFFFC93C), Color(0xFFFFB020)],
+                  ),
+                  border: Border.all(
+                    color: const Color(0xFFE08E10).withValues(alpha: 0.55),
+                    width: size * 0.035,
+                  ),
+                ),
+                child: glyph != null
+                    ? Icon(
+                        glyph,
+                        size: inner * 0.7,
+                        color: const Color(0xFFFFF6D6),
+                      )
+                    : Text(
+                        '\u20b1',
+                        style: TextStyle(
+                          color: const Color(0xFFFFF6D6),
+                          fontSize: inner * 0.7,
+                          fontWeight: FontWeight.w900,
+                          height: 1.1,
+                          shadows: [
+                            Shadow(
+                              color: const Color(
+                                0xFFC77F0A,
+                              ).withValues(alpha: 0.9),
+                              offset: Offset(0, size * 0.03),
+                            ),
+                          ],
+                        ),
+                      ),
+              ),
+            ),
+            // gloss
+            Positioned(
+              left: size * 0.16,
+              top: size * 0.1,
+              child: Transform.rotate(
+                angle: -0.7,
+                child: Container(
+                  width: size * 0.2,
+                  height: size * 0.09,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(size),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _tilt(
+    Widget child, {
+    double rx = 0.05,
+    double ry = -0.18,
+    double rz = 0.08,
+  }) {
+    return ValueListenableBuilder<double>(
+      valueListenable: _shift,
+      builder: (_, v, c) => Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()
+          ..setEntry(3, 2, 0.003)
+          ..rotateX(rx + v * 0.12)
+          ..rotateY(ry - v * 0.15)
+          ..rotateZ(rz),
+        child: c,
+      ),
+      child: child,
+    );
+  }
+
+  Widget _receipt() {
+    const ink = Color(0xFF8C5A4E);
+    Widget paper(Color c, {Widget? child}) => ClipPath(
+      clipper: _ZigzagClipper(),
+      child: Container(width: 46, height: 62, color: c, child: child),
+    );
+    Widget line(double w, {Color c = const Color(0xFFE3CFC8), double h = 4}) =>
+        Container(
+          width: w,
+          height: h,
+          decoration: BoxDecoration(
+            color: c,
+            borderRadius: BorderRadius.circular(h),
+          ),
+        );
+    Widget row(double l, double r) => Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [line(l), line(r)],
+      ),
+    );
+    return _tilt(
+      SizedBox(
+        width: 54,
+        height: 70,
+        child: Stack(
+          children: [
+            Positioned(left: 4, top: 5, child: paper(const Color(0xFFC98E80))),
+            paper(
+              const Color(0xFFFFFBF8),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(child: line(20, c: ink, h: 5)),
+                    const SizedBox(height: 6),
+                    row(18, 8),
+                    row(14, 10),
+                    row(20, 8),
+                    Container(height: 1.5, color: const Color(0xFFE3CFC8)),
+                    const SizedBox(height: 4),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        line(12, c: ink, h: 5),
+                        line(14, c: const Color(0xFFE8705A), h: 6),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _calculator() {
+    Widget body(Color c, {Widget? child}) => Container(
+      width: 50,
+      height: 70,
+      decoration: BoxDecoration(
+        color: c,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: child,
+    );
+    Widget key(Color c, Color shade) => Container(
+      width: 8,
+      height: 10,
+      decoration: BoxDecoration(
+        color: c,
+        borderRadius: BorderRadius.circular(3),
+        boxShadow: [BoxShadow(color: shade, offset: const Offset(0, 1.5))],
+      ),
+    );
+    return _tilt(
+      SizedBox(
+        width: 56,
+        height: 78,
+        child: Stack(
+          children: [
+            Positioned(left: 5, top: 7, child: body(const Color(0xFFB85A12))),
+            body(
+              const Color(0xFFFF9B3D),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 5, 6, 0),
+                child: Column(
+                  children: [
+                    Container(
+                      height: 14,
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.only(right: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF4A3A33),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Text(
+                        '0.00',
+                        style: TextStyle(
+                          fontSize: 8,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFFFFE9B8),
+                          height: 1.0,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    for (var r = 0; r < 3; r++)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 3),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            for (var c = 0; c < 4; c++)
+                              c == 3
+                                  ? key(
+                                      const Color(0xFFFFD35A),
+                                      const Color(0xFFC9871A),
+                                    )
+                                  : key(
+                                      const Color(0xFFFFF4E2),
+                                      const Color(0xFFD9A46B),
+                                    ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isReceipt = widget.art == _PromoArt.receipt;
+    return Material(
+      color: Colors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          gradient: LinearGradient(
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+            colors: widget.gradient,
+          ),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: widget.onTap,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: SizedBox(
+              height: 96,
+              child: Stack(
+                clipBehavior: Clip.hardEdge,
+                children: [
+                  // back: swoosh circles (slowest)
+                  _layer(
+                    4,
+                    Container(
+                      width: 150,
+                      height: 150,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: widget.swoosh.withValues(alpha: 0.18),
+                      ),
+                    ),
+                    right: -30,
+                    top: -40,
+                  ),
+                  _layer(
+                    6,
+                    Container(
+                      width: 120,
+                      height: 120,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: widget.swoosh.withValues(alpha: 0.12),
+                      ),
+                    ),
+                    right: 40,
+                    bottom: -60,
+                  ),
+                  // mid: small items
+                  if (isReceipt) ...[
+                    _layer(10, _coin(24, -0.3), right: 92, top: 8),
+                    _layer(12, _coin(18, 0.5), right: 74, bottom: 6),
+                  ] else ...[
+                    _layer(
+                      10,
+                      _coin(24, -0.3, glyph: Icons.bolt_rounded),
+                      right: 92,
+                      top: 8,
+                    ),
+                    _layer(
+                      12,
+                      _coin(18, 0.5, glyph: Icons.bolt_rounded),
+                      right: 74,
+                      bottom: 6,
+                    ),
+                  ],
+                  // front: hero 3D object (fastest)
+                  _layer(
+                    18,
+                    isReceipt ? _receipt() : _calculator(),
+                    right: 36,
+                    top: isReceipt ? 11 : 9,
+                  ),
+                  _layer(
+                    24,
+                    isReceipt
+                        ? _coin(34, 0.25)
+                        : _coin(30, 0.25, glyph: Icons.bolt_rounded),
+                    right: 10,
+                    bottom: 8,
+                  ),
+                  Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 20, right: 130),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: widget.textColor,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -0.2,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            widget.subtitle,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: widget.textColor.withValues(alpha: 0.75),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Slides + fades its child out/in whenever [modeKey] changes, moving toward
+/// [direction] (1 = new content from the right, -1 = from the left).
+class _ModeSlide extends StatelessWidget {
+  final Object modeKey;
+  final int direction;
+  final double distance;
+  final Widget child;
+
+  const _ModeSlide({
+    required this.modeKey,
+    required this.direction,
+    this.distance = 0.35,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 280),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      layoutBuilder: (current, previous) => Stack(
+        alignment: Alignment.topLeft,
+        children: [...previous, ?current],
+      ),
+      transitionBuilder: (child, animation) {
+        final incoming = child.key == ValueKey(modeKey);
+        final dx = (incoming ? direction : -direction) * distance;
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: Offset(dx, 0),
+              end: Offset.zero,
+            ).animate(animation),
+            child: child,
+          ),
+        );
+      },
+      child: KeyedSubtree(key: ValueKey(modeKey), child: child),
+    );
+  }
+}
+
+/// Two tier cards side by side: the active one fills the width and the other
+/// peeks in from the screen edge, so switching modes slides between real cards.
+class _TierCardPager extends StatelessWidget {
+  final bool isCurrent;
+  final ValueChanged<bool> onSwipe;
+  final Widget eomCard;
+  final Widget currentCard;
+
+  const _TierCardPager({
+    required this.isCurrent,
+    required this.onSwipe,
+    required this.eomCard,
+    required this.currentCard,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const duration = Duration(milliseconds: 420);
+    const curve = Curves.easeInOutCubic;
+    const gap = 1.04; // card widths between centres (small gutter)
+
+    Widget slot(Widget card, Offset offset, bool active) {
+      return AnimatedSlide(
+        offset: offset,
+        duration: duration,
+        curve: curve,
+        child: AnimatedScale(
+          scale: active ? 1.0 : 0.94,
+          duration: duration,
+          curve: curve,
+          child: AnimatedOpacity(
+            opacity: active ? 1.0 : 0.85,
+            duration: duration,
+            curve: curve,
+            child: card,
+          ),
+        ),
+      );
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragEnd: (d) {
+        final v = d.primaryVelocity ?? 0;
+        if (v < -200) {
+          onSwipe(true);
+        }
+        if (v > 200) {
+          onSwipe(false);
+        }
+      },
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          slot(
+            eomCard,
+            isCurrent ? const Offset(-gap, 0) : Offset.zero,
+            !isCurrent,
+          ),
+          slot(
+            currentCard,
+            isCurrent ? Offset.zero : const Offset(gap, 0),
+            isCurrent,
+          ),
+        ],
+      ),
+    );
+  }
 }
