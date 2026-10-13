@@ -614,17 +614,49 @@ def flush_buffer():
 
         if last_db_row:
             gap_seconds = (buffer_start_ts - last_db_row["timestamp"]).total_seconds()
+
             if gap_seconds > GAP_THRESHOLD:
-                # Restart/reconnection detected — use DB difference
-                interval_kwh = round(
-                    float(adjusted_cumul) - float(last_db_row["cumul_kwh"]), 4
-                )
+
+                # ── Check if billing cutoff falls within the gap ──────────────────
+                last_db_date   = last_db_row["timestamp"].date()
+                current_date   = buffer_start_ts.date()
+
+                # Parse billing cutoff date from saved state
+                billing_state  = firebase_db.reference("/billing/state").get() or {}
+                cutoff_str     = billing_state.get("billing_cutoff_date", None)
+
+                cutoff_crossed = False
+
+                if cutoff_str:
+                    try:
+                        cutoff_date = datetime.strptime(cutoff_str, "%Y-%m-%d").date()
+                        # Cutoff falls between last DB row and current buffer
+                        if last_db_date < cutoff_date <= current_date:
+                            cutoff_crossed = True
+                    except ValueError:
+                        cutoff_crossed = False
+
+                if cutoff_crossed:
+                    # New billing cycle started during the gap
+                    # PZEM reset to near-zero — use adjusted_cumul directly
+                    interval_kwh = 0.0
+
+                else:
+                    # Normal reconnection — no cutoff crossed
+                    interval_kwh = round(
+                        float(adjusted_cumul) - float(last_db_row["cumul_kwh"]), 4
+                    )
             else:
                 # Normal 5-min window
                 interval_kwh = round(float(cumuls[-1] - cumuls[0]), 4)
+
         else:
             # No DB rows yet — use buffer difference
             interval_kwh = round(float(cumuls[-1] - cumuls[0]), 4)
+
+        # ── Safety clamp — interval_kwh should never be negative ─────────────────
+        if interval_kwh < 0:
+            interval_kwh = 0.0
 
         today_total_kwh = round(today_total_kwh + interval_kwh, 4)
 

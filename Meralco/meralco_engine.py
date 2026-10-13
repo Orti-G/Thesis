@@ -194,15 +194,19 @@ def clean(v):
 
 
 def get_vat_rates(table):
-    """VAT RATES block: rows labeled Generation / Transmission / Ancillary
-    Service / System Loss / Other Charges, found by name, not fixed row
-    index. 'Ancillary Service' only exists from August 2026 onward."""
     rates = {}
     labels = ("Generation", "Transmission", "Ancillary Service", "System Loss", "Other Charges")
+    exempt_text = ""
     for row in table:
         label = (row[0] or "").strip()
         if label in labels and row[1]:
             rates[label] = clean(row[1])
+        if len(row) > 1 and row[1] and "not subject to" in row[1].lower():
+            exempt_text = " ".join((row[0] or "").lower().split())
+
+    if "System Loss" not in rates and "system loss" in exempt_text:
+        rates["System Loss"] = 0.0
+        rates["_system_loss_exempt"] = 1.0
     return rates
 
 
@@ -348,18 +352,30 @@ def compute_bill(pdf_path, kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
     vat_gen = round(gen_amt * vat["Generation"] / 100, 2)
     vat_trans = round(trans_amt * vat["Transmission"] / 100, 2)
     vat_ancillary = round(ancillary_amt * vat.get("Ancillary Service", 0) / 100, 2)
+
+    # replace the vat_sysloss line:
+    if "System Loss" not in vat:
+        raise ValueError("System Loss is neither in the VAT rates nor listed as VAT-exempt - schedule layout changed")
+    sysloss_exempt = bool(vat.get("_system_loss_exempt"))
     vat_sysloss = round(sysloss_amt * vat["System Loss"] / 100, 2)
+
     vat_dist = round(distribution_section * vat["Other Charges"] / 100, 2)
     vat_senior = round(senior_amt * vat["Other Charges"] / 100, 2)
     vat_total = round(vat_gen + vat_trans + vat_ancillary + vat_sysloss + vat_dist + vat_senior, 2)
  
-    vat_sales_base = round(gen_amt + trans_amt + ancillary_amt + sysloss_amt + distribution_section + senior_amt, 2)
-    lft_charge_base = round(vat_sales_base + rpt_amt, 2)
+    # replace vat_sales_base and lft_charge_base:
+    sysloss_in_vat_base = 0.0 if sysloss_exempt else sysloss_amt
+    sysloss_in_non_vat = sysloss_amt if sysloss_exempt else 0.0
+    vat_sales_base = round(gen_amt + trans_amt + ancillary_amt + sysloss_in_vat_base + distribution_section + senior_amt, 2)
+    lft_charge_base = round(vat_sales_base + sysloss_in_non_vat + rpt_amt, 2)
+
     lft_charge_amt = round(lft_charge_base * lft_pct / 100, 2)
     lft_adj_amt = round(kwh * lft_adj_perkwh, 2)
     lft_amt = round(lft_charge_amt + lft_adj_amt, 2)
  
-    non_vat = round(uc_total + fit_amt + lifeline_amt + rpt_amt + lft_amt, 2)
+    # replace non_vat:
+    non_vat = round(uc_total + fit_amt + lifeline_amt + rpt_amt + lft_amt + sysloss_in_non_vat, 2)
+
     total_energy_amount = round(vat_sales_base + vat_total + non_vat, 2)
 
     return {
