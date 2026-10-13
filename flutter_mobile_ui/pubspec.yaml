@@ -82,6 +82,7 @@ flutter:
       - assets/billingbg.png
       - assets/spark loading.json
       - assets/grid_animation.mp4
+      - assets/3d/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

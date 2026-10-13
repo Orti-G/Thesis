@@ -2876,27 +2876,6 @@ class _TicketShadowPainter extends CustomPainter {
 
 enum _PromoArt { receipt, calculator }
 
-class _ZigzagClipper extends CustomClipper<Path> {
-  @override
-  Path getClip(Size size) {
-    const tooth = 6.0;
-    final path = Path()..moveTo(0, 0);
-    path.lineTo(size.width, 0);
-    path.lineTo(size.width, size.height - tooth);
-    final n = (size.width / tooth).round();
-    final w = size.width / n;
-    for (var i = n; i > 0; i--) {
-      path.lineTo(w * (i - 0.5), size.height);
-      path.lineTo(w * (i - 1), size.height - tooth);
-    }
-    path.close();
-    return path;
-  }
-
-  @override
-  bool shouldReclip(covariant CustomClipper<Path> oldClipper) => false;
-}
-
 /// Promo-style banner with layered, depth-shifted 3D art that moves with
 /// the scroll position (parallax).
 class _PromoBanner extends StatefulWidget {
@@ -2974,269 +2953,16 @@ class _PromoBannerState extends State<_PromoBanner> {
     );
   }
 
-  Widget _coin(double size, double angle, {IconData? glyph}) {
-    final edge = size * 0.12;
-    final inner = size * 0.72;
+  /// Fluent Emoji 3D image from assets/3d (MIT, github.com/microsoft/fluentui-emoji).
+  Widget _art(String name, double size, {double angle = 0}) {
     return Transform.rotate(
       angle: angle,
-      child: SizedBox(
+      child: Image.asset(
+        'assets/3d/${name}_3d.png',
         width: size,
-        height: size + edge,
-        child: Stack(
-          children: [
-            // coin thickness
-            Positioned(
-              top: edge,
-              child: Container(
-                width: size,
-                height: size,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: const Color(0xFFD98A12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFF8A4A00).withValues(alpha: 0.28),
-                      blurRadius: 8,
-                      offset: const Offset(0, 5),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // rim
-            Container(
-              width: size,
-              height: size,
-              alignment: Alignment.center,
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [Color(0xFFFFE27A), Color(0xFFF3A91C)],
-                ),
-              ),
-              // face
-              child: Container(
-                width: inner,
-                height: inner,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFFFFC93C), Color(0xFFFFB020)],
-                  ),
-                  border: Border.all(
-                    color: const Color(0xFFE08E10).withValues(alpha: 0.55),
-                    width: size * 0.035,
-                  ),
-                ),
-                child: glyph != null
-                    ? Icon(
-                        glyph,
-                        size: inner * 0.7,
-                        color: const Color(0xFFFFF6D6),
-                      )
-                    : Text(
-                        '\u20b1',
-                        style: TextStyle(
-                          color: const Color(0xFFFFF6D6),
-                          fontSize: inner * 0.7,
-                          fontWeight: FontWeight.w900,
-                          height: 1.1,
-                          shadows: [
-                            Shadow(
-                              color: const Color(
-                                0xFFC77F0A,
-                              ).withValues(alpha: 0.9),
-                              offset: Offset(0, size * 0.03),
-                            ),
-                          ],
-                        ),
-                      ),
-              ),
-            ),
-            // gloss
-            Positioned(
-              left: size * 0.16,
-              top: size * 0.1,
-              child: Transform.rotate(
-                angle: -0.7,
-                child: Container(
-                  width: size * 0.2,
-                  height: size * 0.09,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.6),
-                    borderRadius: BorderRadius.circular(size),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _tilt(
-    Widget child, {
-    double rx = 0.05,
-    double ry = -0.18,
-    double rz = 0.08,
-  }) {
-    return ValueListenableBuilder<double>(
-      valueListenable: _shift,
-      builder: (_, v, c) => Transform(
-        alignment: Alignment.center,
-        transform: Matrix4.identity()
-          ..setEntry(3, 2, 0.003)
-          ..rotateX(rx + v * 0.12)
-          ..rotateY(ry - v * 0.15)
-          ..rotateZ(rz),
-        child: c,
-      ),
-      child: child,
-    );
-  }
-
-  Widget _receipt() {
-    const ink = Color(0xFF8C5A4E);
-    Widget paper(Color c, {Widget? child}) => ClipPath(
-      clipper: _ZigzagClipper(),
-      child: Container(width: 46, height: 62, color: c, child: child),
-    );
-    Widget line(double w, {Color c = const Color(0xFFE3CFC8), double h = 4}) =>
-        Container(
-          width: w,
-          height: h,
-          decoration: BoxDecoration(
-            color: c,
-            borderRadius: BorderRadius.circular(h),
-          ),
-        );
-    Widget row(double l, double r) => Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [line(l), line(r)],
-      ),
-    );
-    return _tilt(
-      SizedBox(
-        width: 54,
-        height: 70,
-        child: Stack(
-          children: [
-            Positioned(left: 4, top: 5, child: paper(const Color(0xFFC98E80))),
-            paper(
-              const Color(0xFFFFFBF8),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Center(child: line(20, c: ink, h: 5)),
-                    const SizedBox(height: 6),
-                    row(18, 8),
-                    row(14, 10),
-                    row(20, 8),
-                    Container(height: 1.5, color: const Color(0xFFE3CFC8)),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        line(12, c: ink, h: 5),
-                        line(14, c: const Color(0xFFE8705A), h: 6),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _calculator() {
-    Widget body(Color c, {Widget? child}) => Container(
-      width: 50,
-      height: 70,
-      decoration: BoxDecoration(
-        color: c,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: child,
-    );
-    Widget key(Color c, Color shade) => Container(
-      width: 8,
-      height: 10,
-      decoration: BoxDecoration(
-        color: c,
-        borderRadius: BorderRadius.circular(3),
-        boxShadow: [BoxShadow(color: shade, offset: const Offset(0, 1.5))],
-      ),
-    );
-    return _tilt(
-      SizedBox(
-        width: 56,
-        height: 78,
-        child: Stack(
-          children: [
-            Positioned(left: 5, top: 7, child: body(const Color(0xFFB85A12))),
-            body(
-              const Color(0xFFFF9B3D),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(6, 5, 6, 0),
-                child: Column(
-                  children: [
-                    Container(
-                      height: 14,
-                      alignment: Alignment.centerRight,
-                      padding: const EdgeInsets.only(right: 4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF4A3A33),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: const Text(
-                        '0.00',
-                        style: TextStyle(
-                          fontSize: 8,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFFFFE9B8),
-                          height: 1.0,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 5),
-                    for (var r = 0; r < 3; r++)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 3),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            for (var c = 0; c < 4; c++)
-                              c == 3
-                                  ? key(
-                                      const Color(0xFFFFD35A),
-                                      const Color(0xFFC9871A),
-                                    )
-                                  : key(
-                                      const Color(0xFFFFF4E2),
-                                      const Color(0xFFD9A46B),
-                                    ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
+        height: size,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
       ),
     );
   }
@@ -3294,36 +3020,36 @@ class _PromoBannerState extends State<_PromoBanner> {
                   ),
                   // mid: small items
                   if (isReceipt) ...[
-                    _layer(10, _coin(24, -0.3), right: 92, top: 8),
-                    _layer(12, _coin(18, 0.5), right: 74, bottom: 6),
+                    _layer(10, _art('coin', 24, angle: -0.3), right: 96, top: 8),
+                    _layer(12, _art('coin', 18, angle: 0.5), right: 80, bottom: 6),
                   ] else ...[
                     _layer(
                       10,
-                      _coin(24, -0.3, glyph: Icons.bolt_rounded),
-                      right: 92,
+                      _art('high_voltage', 24, angle: -0.3),
+                      right: 96,
                       top: 8,
                     ),
                     _layer(
                       12,
-                      _coin(18, 0.5, glyph: Icons.bolt_rounded),
-                      right: 74,
+                      _art('high_voltage', 20, angle: 0.4),
+                      right: 80,
                       bottom: 6,
                     ),
                   ],
                   // front: hero 3D object (fastest)
                   _layer(
                     18,
-                    isReceipt ? _receipt() : _calculator(),
-                    right: 36,
-                    top: isReceipt ? 11 : 9,
+                    _art(isReceipt ? 'receipt' : 'abacus', 68, angle: 0.08),
+                    right: 26,
+                    top: 12,
                   ),
                   _layer(
                     24,
                     isReceipt
-                        ? _coin(34, 0.25)
-                        : _coin(30, 0.25, glyph: Icons.bolt_rounded),
-                    right: 10,
-                    bottom: 8,
+                        ? _art('coin', 32, angle: 0.25)
+                        : _art('high_voltage', 32, angle: 0.25),
+                    right: 8,
+                    bottom: 6,
                   ),
                   Positioned.fill(
                     child: Padding(

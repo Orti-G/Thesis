@@ -496,6 +496,63 @@ class _DashboardState extends State<Dashboard> {
     return hours.map((h) => FlSpot(h.toDouble(), _hourlyKwh[h]!)).toList();
   }
 
+  // Muted lead-in/lead-out drawn in the chart's side margins (x < 0 and
+  // x > 24) so the hourly line runs edge to edge from the baseline. These
+  // points have no hour, so touches ignore them. Each side is only drawn
+  // when the real data reaches that edge (first reading by 1 AM, last from
+  // 11 PM), so days with offline gaps near midnight aren't bridged; for
+  // today the line stops at the latest hour.
+  static const Color _fillerLineColor = Color(0x99FFE3C4);
+  static const double _chartMinX = -4;
+  static const double _chartMaxX = 28;
+
+  List<FlSpot> _generateFillerSpots() {
+    final real = _generateHourlySpots();
+    if (real.isEmpty) return const [];
+    // Seeded by the selected day so the ridges stay put across rebuilds.
+    final rng = Random(
+      _selectedDate.year * 10000 +
+          _selectedDate.month * 100 +
+          _selectedDate.day,
+    );
+    final spots = <FlSpot>[];
+    if (real.first.x <= 1) {
+      spots.addAll([
+        ..._fillerRidge(_chartMinX, 0, real.first.y, rng),
+        real.first,
+      ]);
+    }
+    if (real.last.x >= 23) {
+      if (spots.isNotEmpty) spots.add(FlSpot.nullSpot);
+      spots
+        ..add(real.last)
+        ..addAll(_fillerRidge(_chartMaxX, 24, real.last.y, rng).reversed);
+    }
+    return spots;
+  }
+
+  // Low, slightly bumpy run from the baseline at [edgeX] toward [innerX],
+  // climbing gently so it meets the real line at [anchorY] without one long
+  // diagonal. Points are ordered from the edge inward.
+  List<FlSpot> _fillerRidge(
+    double edgeX,
+    double innerX,
+    double anchorY,
+    Random rng,
+  ) {
+    const step = 0.5;
+    final span = innerX - edgeX;
+    final n = (span.abs() / step).round();
+    final points = [FlSpot(edgeX, 0)];
+    for (var i = 1; i < n; i++) {
+      final t = i / n;
+      final level = 0.12 + 0.4 * t * t;
+      final jitter = 0.7 + 0.6 * rng.nextDouble();
+      points.add(FlSpot(edgeX + span * t, anchorY * level * jitter));
+    }
+    return points;
+  }
+
   double _getHourlyMaxY() {
     if (_hourlyKwh.isEmpty) return 1.0;
     final maxVal = _hourlyKwh.values.reduce((a, b) => a > b ? a : b);
@@ -1027,62 +1084,49 @@ class _DashboardState extends State<Dashboard> {
                       letterSpacing: -0.5,
                     ),
                   ),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(24),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 6.0, sigmaY: 6.0),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(24),
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.35),
-                            width: 0.8,
+                  _Glass(
+                    radius: 24,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        GestureDetector(
+                          onTap: () => _changeDate(-1),
+                          child: const Icon(
+                            Icons.chevron_left,
+                            color: Colors.white,
+                            size: 18,
                           ),
                         ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            GestureDetector(
-                              onTap: () => _changeDate(-1),
-                              child: const Icon(
-                                Icons.chevron_left,
-                                color: Colors.white,
-                                size: 18,
-                              ),
+                        const SizedBox(width: 4),
+                        GestureDetector(
+                          onTap: () => _pickDate(context),
+                          child: Text(
+                            _isTodaySelected
+                                ? 'Today'
+                                : DateFormat('EEE MMM d').format(_selectedDate),
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
                             ),
-                            const SizedBox(width: 4),
-                            GestureDetector(
-                              onTap: () => _pickDate(context),
-                              child: Text(
-                                _isTodaySelected
-                                    ? 'Today'
-                                    : DateFormat('EEE MMM d').format(_selectedDate),
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 4),
-                            GestureDetector(
-                              onTap: _isTodaySelected ? null : () => _changeDate(1),
-                              child: Icon(
-                                Icons.chevron_right,
-                                color: Colors.white.withValues(
-                                  alpha: _isTodaySelected ? 0.3 : 1.0,
-                                ),
-                                size: 18,
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 4),
+                        GestureDetector(
+                          onTap: _isTodaySelected ? null : () => _changeDate(1),
+                          child: Icon(
+                            Icons.chevron_right,
+                            color: Colors.white.withValues(
+                              alpha: _isTodaySelected ? 0.3 : 1.0,
+                            ),
+                            size: 18,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -1095,18 +1139,11 @@ class _DashboardState extends State<Dashboard> {
                 children: [
                   // Left Card: Total Used
                   Expanded(
-                    child: Container(
+                    child: _Glass(
+                      radius: 20,
                       padding: const EdgeInsets.symmetric(
                         horizontal: 16,
                         vertical: 18,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.25),
-                          width: 1,
-                        ),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1166,18 +1203,11 @@ class _DashboardState extends State<Dashboard> {
 
                   // Right Card: Est. Total Bill
                   Expanded(
-                    child: Container(
+                    child: _Glass(
+                      radius: 20,
                       padding: const EdgeInsets.symmetric(
                         horizontal: 16,
                         vertical: 18,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.25),
-                          width: 1,
-                        ),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1236,18 +1266,11 @@ class _DashboardState extends State<Dashboard> {
                     ),
                   ),
                   if (_isTodaySelected && _todayTotalKwh != null)
-                    Container(
+                    _Glass(
+                      radius: 20,
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
                         vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.18),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.25),
-                          width: 0.8,
-                        ),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -1289,8 +1312,8 @@ class _DashboardState extends State<Dashboard> {
                               children: [
                                 LineChart(
                                   LineChartData(
-                                    minX: -2,
-                                    maxX: 26,
+                                    minX: _chartMinX,
+                                    maxX: _chartMaxX,
                                     minY: 0,
                                     maxY: chartMaxY,
                                     gridData: FlGridData(
@@ -1319,6 +1342,19 @@ class _DashboardState extends State<Dashboard> {
                                     // --- Tooltip: shows hour (12-hr + AM/PM) and kWh on touch ---
                                     lineTouchData: LineTouchData(
                                       enabled: true,
+                                      getTouchedSpotIndicator:
+                                          (barData, spotIndexes) => spotIndexes
+                                              .map(
+                                                (i) =>
+                                                    barData.color ==
+                                                        _fillerLineColor
+                                                    ? null
+                                                    : defaultTouchedIndicators(
+                                                        barData,
+                                                        [i],
+                                                      ).first,
+                                              )
+                                              .toList(),
                                       touchTooltipData: LineTouchTooltipData(
                                         fitInsideHorizontally: true,
                                         fitInsideVertically: true,
@@ -1331,6 +1367,10 @@ class _DashboardState extends State<Dashboard> {
                                                 );
 
                                           return touchedSpots.map((spot) {
+                                            if (spot.bar.color ==
+                                                _fillerLineColor) {
+                                              return null;
+                                            }
                                             final hour = spot.x.round();
                                             final isLatestHour =
                                                 _isTodaySelected &&
@@ -1460,33 +1500,6 @@ class _DashboardState extends State<Dashboard> {
                                               ),
                                             );
 
-                                            // The "12 AM" ticks sit exactly at the left
-                                            // (x = 0) and right (x = 24) edges of the
-                                            // chart, so their centered labels get
-                                            // clipped. Nudge them inward instead of
-                                            // centering on the tick.
-                                            if (value == 0) {
-                                              return SideTitleWidget(
-                                                meta: meta,
-                                                space: 8,
-                                                child: Transform.translate(
-                                                  offset: const Offset(16, 0),
-                                                  child: textWidget,
-                                                ),
-                                              );
-                                            }
-
-                                            if (value == 24) {
-                                              return SideTitleWidget(
-                                                meta: meta,
-                                                space: 8,
-                                                child: Transform.translate(
-                                                  offset: const Offset(-16, 0),
-                                                  child: textWidget,
-                                                ),
-                                              );
-                                            }
-
                                             return SideTitleWidget(
                                               meta: meta,
                                               space: 8,
@@ -1497,6 +1510,30 @@ class _DashboardState extends State<Dashboard> {
                                       ),
                                     ),
                                     lineBarsData: [
+                                      // Filler first so the real line draws on top
+                                      LineChartBarData(
+                                        spots: _generateFillerSpots(),
+                                        isCurved: false,
+                                        color: _fillerLineColor,
+                                        barWidth: 1.5,
+                                        isStrokeCapRound: true,
+                                        dotData: const FlDotData(show: false),
+                                        belowBarData: BarAreaData(
+                                          show: true,
+                                          gradient: LinearGradient(
+                                            colors: [
+                                              Colors.white.withValues(
+                                                alpha: 0.10,
+                                              ),
+                                              Colors.white.withValues(
+                                                alpha: 0.0,
+                                              ),
+                                            ],
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                          ),
+                                        ),
+                                      ),
                                       LineChartBarData(
                                         spots: _generateHourlySpots(),
                                         isCurved: false,
@@ -2000,4 +2037,48 @@ class _MetricInfo {
     required this.title,
     required this.description,
   });
+}
+
+/// Frosted-glass surface used by the header pills and cards: blurred
+/// backdrop, translucent white gradient fill and a light edge.
+class _Glass extends StatelessWidget {
+  final double radius;
+  final EdgeInsetsGeometry padding;
+  final Widget child;
+
+  const _Glass({
+    required this.radius,
+    required this.padding,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final borderRadius = BorderRadius.circular(radius);
+    return ClipRRect(
+      borderRadius: borderRadius,
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            borderRadius: borderRadius,
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Colors.white.withValues(alpha: 0.30),
+                Colors.white.withValues(alpha: 0.08),
+              ],
+            ),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.40),
+              width: 1,
+            ),
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
 }
