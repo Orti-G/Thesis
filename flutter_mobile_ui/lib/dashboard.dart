@@ -204,8 +204,9 @@ class _DashboardState extends State<Dashboard> {
           ChartDataPoint(timestamp: timestamp, value: _currentAmps),
         );
 
-        if (_voltageHistory.length >= maxDataPoints)
+        if (_voltageHistory.length >= maxDataPoints) {
           _voltageHistory.removeAt(0);
+        }
         _voltageHistory.add(
           ChartDataPoint(timestamp: timestamp, value: _currentVoltage),
         );
@@ -919,7 +920,7 @@ class _DashboardState extends State<Dashboard> {
                 child: ListView.separated(
                   controller: scrollController,
                   itemCount: metrics.length,
-                  separatorBuilder: (_, __) => Divider(
+                  separatorBuilder: (_, _) => Divider(
                     height: 32,
                     thickness: 1,
                     color: Colors.grey[200],

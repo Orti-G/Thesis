@@ -34,7 +34,7 @@ class DisclaimerDialog extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: brandOrange.withOpacity(0.1),
+                      color: brandOrange.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: const Icon(

@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:flutter/physics.dart' show Simulation;
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
@@ -480,8 +479,9 @@ class _BillingScreenState extends State<BillingScreen> {
                   peso: value,
                 );
                 final kwhResult = (data['kwh'] as num?)?.toDouble();
-                if (kwhResult == null)
+                if (kwhResult == null) {
                   throw Exception('Missing kwh in response');
+                }
                 if (!innerContext.mounted) return;
                 setSheetState(() {
                   loading = false;
@@ -1369,8 +1369,9 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   Widget _buildLineItemRow(_BillLineItem item) {
-    if (item.amount == 0 && item.subItems.isEmpty)
+    if (item.amount == 0 && item.subItems.isEmpty) {
       return const SizedBox.shrink();
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2659,33 +2660,6 @@ class _BillLineItem {
   const _BillLineItem(this.label, this.amount, [this.subItems = const []]);
 }
 
-class _DiagonalHatchPainter extends CustomPainter {
-  final Color color;
-  final double lineSpacing;
-
-  const _DiagonalHatchPainter({required this.color, this.lineSpacing = 12.0});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 1.2
-      ..strokeCap = StrokeCap.round;
-
-    for (double i = -size.height; i < size.width; i += lineSpacing) {
-      canvas.drawLine(
-        Offset(i, 0),
-        Offset(i + size.height, size.height),
-        paint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _DiagonalHatchPainter oldDelegate) =>
-      oldDelegate.color != color || oldDelegate.lineSpacing != lineSpacing;
-}
-
 class CardCirclePainter extends CustomPainter {
   final Color ringColor;
 
@@ -2716,16 +2690,11 @@ class CardCirclePainter extends CustomPainter {
 
 class _TicketDashedTearLine extends StatelessWidget {
   final Color color;
-  final double height;
-  final double dashWidth;
-  final double dashSpace;
+  static const double height = 1.5;
+  static const double dashWidth = 6;
+  static const double dashSpace = 4;
 
-  const _TicketDashedTearLine({
-    this.color = const Color(0xFFE2E8F0),
-    this.height = 1.5,
-    this.dashWidth = 6,
-    this.dashSpace = 4,
-  });
+  const _TicketDashedTearLine({this.color = const Color(0xFFE2E8F0)});
 
   @override
   Widget build(BuildContext context) {
@@ -3099,13 +3068,12 @@ class _PromoBannerState extends State<_PromoBanner> {
 class _ModeSlide extends StatelessWidget {
   final Object modeKey;
   final int direction;
-  final double distance;
+  static const double distance = 0.35;
   final Widget child;
 
   const _ModeSlide({
     required this.modeKey,
     required this.direction,
-    this.distance = 0.35,
     required this.child,
   });
 

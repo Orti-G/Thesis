@@ -295,7 +295,7 @@ class _MainScreenState extends State<MainScreen> {
               borderRadius: BorderRadius.circular(navBorderRadius),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.10),
+                  color: Colors.black.withValues(alpha: 0.10),
                   blurRadius: 24,
                   offset: const Offset(0, 6),
                 ),
@@ -309,7 +309,7 @@ class _MainScreenState extends State<MainScreen> {
               child: Container(
                 height: navHeight,
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.80),
+                  color: Colors.white.withValues(alpha: 0.80),
                   borderRadius: BorderRadius.circular(navBorderRadius),
                 ),
                 child: Row(

@@ -271,7 +271,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ignoring: locked,
                     child: Switch.adaptive(
                       value: _testMode,
-                      activeColor: primaryOrange,
+                      activeThumbColor: primaryOrange,
                       onChanged: locked ? null : _onTestModeChanged,
                     ),
                   ),
@@ -314,7 +314,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textDark),
               ),
             ),
-            if (trailing != null) trailing,
+            ?trailing,
           ],
         ),
       ),
