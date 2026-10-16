@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
@@ -274,6 +275,57 @@ class _BillingScreenState extends State<BillingScreen> {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
+  /// There is no "list schedules" endpoint, so probe /calculator/convert for
+  /// each candidate month (12 back, 2 ahead) and keep the ones the backend
+  /// can answer. Returns {label: filename}, oldest first.
+  Future<Map<String, String>> _fetchRatePeriods() async {
+    const names = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
+    final now = DateTime.now();
+    final candidates = <(String, String)>[];
+    for (var offset = -12; offset <= 2; offset++) {
+      final d = DateTime(now.year, now.month + offset);
+      final file =
+          '${d.month.toString().padLeft(2, '0')}-${d.year}_rate_schedule.pdf';
+      candidates.add(('${names[d.month - 1]} ${d.year}', file));
+    }
+
+    final results = await Future.wait(
+      candidates.map((c) async {
+        try {
+          await _fetchCalculatorConvert(period: c.$2, kwh: 1);
+          return c;
+        } catch (_) {
+          return null;
+        }
+      }),
+    );
+    return {
+      for (final r in results)
+        if (r != null) r.$1: r.$2,
+    };
+  }
+
+  bool _sameMap(Map<String, String> a, Map<String, String> b) {
+    if (a.length != b.length) return false;
+    for (final e in a.entries) {
+      if (b[e.key] != e.value) return false;
+    }
+    return true;
+  }
+
   List<_BillLineItem> _buildBreakdownItems(Map<String, dynamic> data) {
     double num_(dynamic v) => (v as num?)?.toDouble() ?? 0.0;
     Map<String, dynamic> map_(dynamic v) =>
@@ -421,12 +473,44 @@ class _BillingScreenState extends State<BillingScreen> {
     double? pesoResultAmount;
 
     // --- RATE MONTH STATE ---
-    String selectedMonth = 'August';
-    final Map<String, String> monthPeriods = {
-      'August': '08-2026_rate_schedule.pdf',
-      'September': '09-2026_rate_schedule.pdf',
+    // Seeded with a fallback, then replaced by the backend's list (and kept
+    // fresh while the sheet is open) so new schedules show up automatically.
+    Map<String, String> monthPeriods = {
+      'August 2026': '08-2026_rate_schedule.pdf',
+      'September 2026': '09-2026_rate_schedule.pdf',
     };
-    final List<String> availableMonths = monthPeriods.keys.toList();
+    String selectedMonth = monthPeriods.keys.last;
+    StateSetter? sheetSetState;
+    bool sheetOpen = true;
+
+    Future<void> refreshPeriods() async {
+      try {
+        final fetched = await _fetchRatePeriods();
+        if (!sheetOpen || fetched.isEmpty) return;
+        if (_sameMap(fetched, monthPeriods)) return;
+        void apply() {
+          monthPeriods = fetched;
+          if (!monthPeriods.containsKey(selectedMonth)) {
+            selectedMonth = monthPeriods.keys.last;
+            pesoResultKwh = null;
+          }
+        }
+
+        if (sheetSetState != null) {
+          sheetSetState!(apply);
+        } else {
+          apply();
+        }
+      } catch (_) {
+        // Keep the current list if the backend is unreachable.
+      }
+    }
+
+    refreshPeriods();
+    final periodsTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => refreshPeriods(),
+    );
     // ------------------------
 
     showModalBottomSheet(
@@ -436,6 +520,8 @@ class _BillingScreenState extends State<BillingScreen> {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (innerContext, setSheetState) {
+            sheetSetState = setSheetState;
+            final List<String> availableMonths = monthPeriods.keys.toList();
             Future<void> compute() async {
               if (loading) return;
 
@@ -952,7 +1038,10 @@ class _BillingScreenState extends State<BillingScreen> {
           },
         );
       },
-    );
+    ).whenComplete(() {
+      sheetOpen = false;
+      periodsTimer.cancel();
+    });
   }
 
   void _showBillBreakdown(
@@ -1430,6 +1519,223 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+  void _showRefreshInfo(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.refresh_rounded, color: brandOrangeText, size: 18),
+                const SizedBox(width: 8),
+                Text(
+                  'Refresh forecast',
+                  style: TextStyle(
+                    color: textDark,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
+              style: TextStyle(
+                color: textDark.withValues(alpha: 0.7),
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _heroStat(String label, String value, {bool alignEnd = false}) {
+    const shadow = [
+      Shadow(color: Color(0x40000000), blurRadius: 6, offset: Offset(0, 1)),
+    ];
+    return Column(
+      crossAxisAlignment: alignEnd
+          ? CrossAxisAlignment.end
+          : CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            shadows: shadow,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 19,
+            fontWeight: FontWeight.w700,
+            shadows: shadow,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Hero: headline in the sky, the house as the focal object, and the month
+  /// laid along the ground as a track from "used so far" to "projected".
+  Widget _buildBillingHero({
+    required BuildContext context,
+    required bool isCurrentMode,
+    required double predictedDayTotal,
+    required double cumulativeEnergy,
+    required double estimatedMonthEnd,
+    required double estimatedCostLive,
+    required Map<String, double> rates,
+  }) {
+    final double heroKwh = isCurrentMode ? cumulativeEnergy : estimatedMonthEnd;
+
+    return FutureBuilder<Map<String, dynamic>>(
+      future: !isCurrentMode && estimatedMonthEnd > 0
+          ? _fetchBillBreakdownCached(estimatedMonthEnd)
+          : null,
+      builder: (context, billSnapshot) {
+        final double billPeso = isCurrentMode
+            ? estimatedCostLive
+            : ((billSnapshot.data?['total_energy_amount'] as num?)
+                      ?.toDouble() ??
+                  _calculateBill(estimatedMonthEnd, rates));
+
+        final String headline = isCurrentMode
+            ? "Here's your usage so far"
+            : "Your month is shaping up";
+
+        return Stack(
+          children: [
+            Image.asset(
+              'assets/billingbg.png',
+              width: double.infinity,
+              fit: BoxFit.fitWidth,
+            ),
+            SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => _showRefreshInfo(context),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    _lastRefreshedAt != null
+                                        ? 'Updated ${_formatLastRefreshed(_lastRefreshedAt!)}'
+                                        : 'About this forecast',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: brandOrangeText.withValues(
+                                        alpha: 0.8,
+                                      ),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Icon(
+                                  Icons.info_outline_rounded,
+                                  size: 15,
+                                  color: brandOrangeText.withValues(alpha: 0.6),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _buildModeToggle(),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      child: Text(
+                        headline,
+                        key: ValueKey(headline),
+                        style: TextStyle(
+                          color: brandOrangeText,
+                          fontSize: 28,
+                          height: 1.15,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.3,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Expecting ${predictedDayTotal.toStringAsFixed(2)} kWh by end of day',
+                      style: TextStyle(
+                        color: brandOrangeText.withValues(alpha: 0.85),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Positioned(
+              left: 24,
+              right: 24,
+              bottom: 10,
+              child: _ModeSlide(
+                modeKey: _mode,
+                direction: _slideDir,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _heroStat(
+                      isCurrentMode ? "Today's usage" : 'Projected this month',
+                      '${heroKwh.toStringAsFixed(2)} kWh',
+                    ),
+                    _heroStat(
+                      'Estimated bill',
+                      '₱${billPeso.toStringAsFixed(2)}',
+                      alignEnd: true,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Widget _buildModeToggle() {
     final bool isEom = _mode == _BillMode.endOfMonth;
 
@@ -1569,13 +1875,6 @@ class _BillingScreenState extends State<BillingScreen> {
           }
 
           final bool isCurrentMode = _mode == _BillMode.current;
-          final double heroKwh = isCurrentMode ? todayKwh : estimatedMonthEnd;
-          final String heroKwhLabel = isCurrentMode
-              ? "TODAY'S USAGE"
-              : 'PROJECTED END OF MONTH';
-          final String heroBillLabel = isCurrentMode
-              ? 'EST. TOTAL BILL'
-              : 'ESTIMATED BILL';
 
           final double tierCardEnergy = isCurrentMode
               ? cumulativeEnergy
@@ -1744,284 +2043,14 @@ class _BillingScreenState extends State<BillingScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Stack(
-                    children: [
-                      Image.asset(
-                        'assets/billingbg.png',
-                        width: double.infinity,
-                        fit: BoxFit.fitWidth,
-                      ),
-                      SafeArea(
-                        bottom: false,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 24.0,
-                            vertical: 20.0,
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const SizedBox(height: 5),
-                              Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Flexible(
-                                              child: Text(
-                                                'END OF DAY CONSUMPTION',
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: TextStyle(
-                                                  color: brandOrangeText
-                                                      .withValues(alpha: 0.85),
-                                                  fontSize: 11,
-                                                  fontWeight: FontWeight.w700,
-                                                  letterSpacing: 0.4,
-                                                ),
-                                              ),
-                                            ),
-                                            const SizedBox(width: 4),
-                                            GestureDetector(
-                                              onTap: () {
-                                                showModalBottomSheet(
-                                                  context: context,
-                                                  backgroundColor: Colors.white,
-                                                  shape: const RoundedRectangleBorder(
-                                                    borderRadius:
-                                                        BorderRadius.vertical(
-                                                          top: Radius.circular(
-                                                            20,
-                                                          ),
-                                                        ),
-                                                  ),
-                                                  builder: (context) => Padding(
-                                                    padding:
-                                                        const EdgeInsets.all(
-                                                          24.0,
-                                                        ),
-                                                    child: Column(
-                                                      mainAxisSize:
-                                                          MainAxisSize.min,
-                                                      crossAxisAlignment:
-                                                          CrossAxisAlignment
-                                                              .start,
-                                                      children: [
-                                                        Row(
-                                                          children: [
-                                                            Icon(
-                                                              Icons
-                                                                  .refresh_rounded,
-                                                              color:
-                                                                  brandOrangeText,
-                                                              size: 18,
-                                                            ),
-                                                            const SizedBox(
-                                                              width: 8,
-                                                            ),
-                                                            Text(
-                                                              'Refresh forecast',
-                                                              style: TextStyle(
-                                                                color: textDark,
-                                                                fontSize: 16,
-                                                                fontWeight:
-                                                                    FontWeight
-                                                                        .w800,
-                                                              ),
-                                                            ),
-                                                          ],
-                                                        ),
-                                                        const SizedBox(
-                                                          height: 10,
-                                                        ),
-                                                        Text(
-                                                          'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
-                                                          style: TextStyle(
-                                                            color: textDark
-                                                                .withValues(
-                                                                  alpha: 0.7,
-                                                                ),
-                                                            fontSize: 13,
-                                                            fontWeight:
-                                                                FontWeight.w500,
-                                                            height: 1.4,
-                                                          ),
-                                                        ),
-                                                        const SizedBox(
-                                                          height: 12,
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                );
-                                              },
-                                              child: Icon(
-                                                Icons.info_outline_rounded,
-                                                size: 14,
-                                                color: brandOrangeText
-                                                    .withValues(alpha: 0.5),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        // Last Refresh Timestamp Label
-                                        if (_lastRefreshedAt != null) ...[
-                                          const SizedBox(height: 2),
-                                          Text(
-                                            'Last refreshed: ${_formatLastRefreshed(_lastRefreshedAt!)}',
-                                            style: TextStyle(
-                                              color: brandOrangeText.withValues(
-                                                alpha: 0.65,
-                                              ),
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  _buildModeToggle(),
-                                ],
-                              ),
-                              Text(
-                                '${predictedDayTotal.toStringAsFixed(2)} kWh',
-                                style: TextStyle(
-                                  color: brandOrangeText,
-                                  fontSize: 44,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: -0.5,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        bottom: 10.0,
-                        left: 24.0,
-                        right: 24.0,
-                        child: _ModeSlide(
-                          modeKey: _mode,
-                          direction: _slideDir,
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            crossAxisAlignment: CrossAxisAlignment.end,
-                            children: [
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(
-                                        Icons.trending_up_rounded,
-                                        color: Colors.greenAccent,
-                                        size: 15,
-                                      ),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        heroKwhLabel,
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(
-                                            alpha: 0.95,
-                                          ),
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    '${heroKwh.toStringAsFixed(2)} kWh',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 19,
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(
-                                        Icons.payments_rounded,
-                                        color: Colors.greenAccent,
-                                        size: 15,
-                                      ),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        heroBillLabel,
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(
-                                            alpha: 0.95,
-                                          ),
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 2),
-                                  if (isCurrentMode)
-                                    Text(
-                                      '₱${estimatedCostLive.toStringAsFixed(2)}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 19,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    )
-                                  else
-                                    FutureBuilder<Map<String, dynamic>>(
-                                      future: estimatedMonthEnd > 0
-                                          ? _fetchBillBreakdownCached(
-                                              estimatedMonthEnd,
-                                            )
-                                          : null,
-                                      builder: (context, billSnapshot) {
-                                        final totalEnergyAmount =
-                                            (billSnapshot
-                                                        .data?['total_energy_amount']
-                                                    as num?)
-                                                ?.toDouble();
-                                        final double estimatedBillPeso =
-                                            totalEnergyAmount ??
-                                            _calculateBill(
-                                              estimatedMonthEnd,
-                                              rates,
-                                            );
-                                        return Text(
-                                          '₱${estimatedBillPeso.toStringAsFixed(2)}',
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 19,
-                                            fontWeight: FontWeight.w800,
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
+                  _buildBillingHero(
+                    context: context,
+                    isCurrentMode: isCurrentMode,
+                    predictedDayTotal: predictedDayTotal,
+                    cumulativeEnergy: cumulativeEnergy,
+                    estimatedMonthEnd: estimatedMonthEnd,
+                    estimatedCostLive: estimatedCostLive,
+                    rates: rates,
                   ),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 24.0),
@@ -2055,8 +2084,8 @@ class _BillingScreenState extends State<BillingScreen> {
                           eomCard: tierCard(
                             estimatedMonthEnd,
                             _tierInfoFor(estimatedMonthEnd, rates),
-                            color: const Color(0xFFF59F4E),
-                            ringColor: const Color(0xFFE07A25),
+                            color: const Color(0xFFFCC089),
+                            ringColor: const Color(0xFFF59A48),
                           ),
                           currentCard: tierCard(
                             cumulativeEnergy,
@@ -2110,6 +2139,7 @@ class _BillingScreenState extends State<BillingScreen> {
                             sourceFile: sourceFile,
                           ),
                         ),
+
                         Padding(
                           padding: const EdgeInsets.symmetric(vertical: 24.0),
                           child: Divider(
@@ -2149,6 +2179,7 @@ class _BillingScreenState extends State<BillingScreen> {
                   _buildStackedRateCards(
                     rates: rates,
                     cumulativeEnergy: tierCardEnergy,
+                    projected: !isCurrentMode,
                   ),
                   const SizedBox(height: 120),
                 ],
@@ -2160,26 +2191,65 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+  // ── Tier rate cards ──────────────────────────────────────────────────
+  static const List<String> _tierTitles = [
+    'TIER 1',
+    'TIER 2',
+    'TIER 3',
+    'TIER 4',
+  ];
+  static const List<String> _tierBands = [
+    'First 200 kWh',
+    '201 - 300 kWh',
+    '301 - 400 kWh',
+    'Over 400 kWh',
+  ];
+  static const List<String> _tierRateKeys = [
+    '0-200',
+    '201-300',
+    '301-400',
+    'over-400',
+  ];
+
+  int _activeTierIndex(double kwh) {
+    if (kwh <= 200) return 0;
+    if (kwh <= 300) return 1;
+    if (kwh <= 400) return 2;
+    return 3;
+  }
+
+  double _tierRate(Map<String, double> rates, int i) =>
+      rates[_tierRateKeys[i]] ?? _fallbackRates[_tierRateKeys[i]] ?? 0.0;
+
+  String _tierCaption(double kwh, Map<String, double> rates, bool projected) {
+    final i = _activeTierIndex(kwh);
+    final rate = _tierRate(rates, i).toStringAsFixed(2);
+    final used = kwh.toStringAsFixed(kwh >= 100 ? 0 : 1);
+    final who = projected
+        ? "You're projected to use $used kWh by month end."
+        : "You've used $used kWh so far.";
+    final String scope;
+    if (i == 0) {
+      scope = 'Each of your first 200 kWh costs ₱$rate.';
+    } else if (i == 3) {
+      scope = 'Each kWh over 400 costs ₱$rate.';
+    } else {
+      scope =
+          'Each kWh from ${i * 100 + 101} to ${i * 100 + 200} costs ₱$rate.';
+    }
+    return '$who $scope';
+  }
+
   void _openTierCardsHero(
     BuildContext context,
     double cumulativeEnergy,
     Map<String, double> rates,
+    bool projected,
   ) {
-    final tierData = [
-      {'tierTitle': 'TIER 1', 'isActive': cumulativeEnergy <= 200},
-      {
-        'tierTitle': 'TIER 2',
-        'isActive': cumulativeEnergy > 200 && cumulativeEnergy <= 300,
-      },
-      {
-        'tierTitle': 'TIER 3',
-        'isActive': cumulativeEnergy > 300 && cumulativeEnergy <= 400,
-      },
-      {'tierTitle': 'TIER 4', 'isActive': cumulativeEnergy > 400},
-    ];
-
-    final int activeIndex = tierData.indexWhere((t) => t['isActive'] as bool);
-    final int initialPage = activeIndex == -1 ? 0 : activeIndex;
+    final int activeIndex = _activeTierIndex(cumulativeEnergy);
+    final int initialPage = activeIndex;
+    final ValueNotifier<int> currentPage = ValueNotifier<int>(initialPage);
+    final String caption = _tierCaption(cumulativeEnergy, rates, projected);
 
     final double screenWidth = MediaQuery.of(context).size.width;
     final double viewportFraction = (screenWidth - 20) / screenWidth;
@@ -2190,173 +2260,250 @@ class _BillingScreenState extends State<BillingScreen> {
       viewportFraction: viewportFraction,
     );
 
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        opaque: false,
-        barrierDismissible: true,
-        barrierColor: Colors.transparent,
-        transitionDuration: const Duration(milliseconds: 350),
-        reverseTransitionDuration: const Duration(milliseconds: 300),
-        pageBuilder: (context, animation, secondaryAnimation) {
-          return Scaffold(
-            backgroundColor: Colors.transparent,
-            body: Stack(
-              children: [
-                Positioned.fill(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => Navigator.of(context).pop(),
-                    child: AnimatedBuilder(
-                      animation: animation,
-                      builder: (context, _) {
-                        final t = Curves.easeOut.transform(animation.value);
-                        return BackdropFilter(
-                          filter: ImageFilter.blur(
-                            sigmaX: 14 * t,
-                            sigmaY: 14 * t,
-                          ),
-                          child: Container(
-                            color: Colors.black.withValues(alpha: 0.40 * t),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ),
-                Align(
-                  alignment: const Alignment(0, 0.5),
-                  child: SafeArea(
-                    child: FadeTransition(
-                      opacity: CurvedAnimation(
-                        parent: animation,
-                        curve: const Interval(0.3, 1.0, curve: Curves.easeOut),
+    Navigator.of(context)
+        .push(
+          PageRouteBuilder(
+            opaque: false,
+            barrierDismissible: true,
+            barrierColor: Colors.transparent,
+            transitionDuration: const Duration(milliseconds: 350),
+            reverseTransitionDuration: const Duration(milliseconds: 300),
+            pageBuilder: (context, animation, secondaryAnimation) {
+              return Scaffold(
+                backgroundColor: Colors.transparent,
+                body: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => Navigator.of(context).pop(),
+                        child: AnimatedBuilder(
+                          animation: animation,
+                          builder: (context, _) {
+                            final t = Curves.easeOut.transform(animation.value);
+                            return BackdropFilter(
+                              filter: ImageFilter.blur(
+                                sigmaX: 14 * t,
+                                sigmaY: 14 * t,
+                              ),
+                              child: Container(
+                                color: Colors.black.withValues(alpha: 0.40 * t),
+                              ),
+                            );
+                          },
+                        ),
                       ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          GestureDetector(
-                            behavior: HitTestBehavior.translucent,
-                            onVerticalDragUpdate: (d) {
-                              dragDy += d.delta.dy;
-                            },
-                            onVerticalDragEnd: (d) {
-                              if (dragDy > 50 ||
-                                  (d.primaryVelocity ?? 0) > 400) {
-                                Navigator.of(context).pop();
-                              }
-                              dragDy = 0;
-                            },
-                            child: SizedBox(
-                              height: (screenWidth - 36) / 1.586 + 40,
-                              child: PageView.builder(
-                                controller: pageController,
-                                physics: const BouncingScrollPhysics(),
-                                itemCount: tierData.length,
-                                itemBuilder: (context, index) {
-                                  final tier = tierData[index];
-
-                                  Widget card = Container(
-                                    height: (screenWidth - 36) / 1.586,
-                                    width: double.infinity,
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(22),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withValues(
-                                            alpha: 0.12,
+                    ),
+                    Align(
+                      alignment: const Alignment(0, 0.5),
+                      child: SafeArea(
+                        child: FadeTransition(
+                          opacity: CurvedAnimation(
+                            parent: animation,
+                            curve: const Interval(
+                              0.3,
+                              1.0,
+                              curve: Curves.easeOut,
+                            ),
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(22, 0, 4, 6),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(top: 12),
+                                        child: Text(
+                                          caption,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w600,
+                                            height: 1.35,
                                           ),
-                                          blurRadius: 20,
-                                          spreadRadius: -4,
-                                          offset: const Offset(0, 10),
                                         ),
-                                      ],
-                                    ),
-                                    child: _buildRateCard(
-                                      tierTitle: tier['tierTitle'] as String,
-                                      isActive: tier['isActive'] as bool,
-                                      index: index,
-                                      rates: rates,
-                                    ),
-                                  );
-
-                                  if (index == initialPage) {
-                                    card = Hero(
-                                      tag: 'tier_card_hero',
-                                      child: Material(
-                                        type: MaterialType.transparency,
-                                        child: card,
                                       ),
-                                    );
+                                    ),
+                                    IconButton(
+                                      tooltip: 'Close',
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(),
+                                      icon: const Icon(
+                                        Icons.close_rounded,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              GestureDetector(
+                                behavior: HitTestBehavior.translucent,
+                                onVerticalDragUpdate: (d) {
+                                  dragDy += d.delta.dy;
+                                },
+                                onVerticalDragEnd: (d) {
+                                  if (dragDy > 50 ||
+                                      (d.primaryVelocity ?? 0) > 400) {
+                                    Navigator.of(context).pop();
                                   }
+                                  dragDy = 0;
+                                },
+                                child: SizedBox(
+                                  height: (screenWidth - 36) / 1.586 + 40,
+                                  child: PageView.builder(
+                                    controller: pageController,
+                                    physics: const BouncingScrollPhysics(),
+                                    onPageChanged: (p) => currentPage.value = p,
+                                    itemCount: _tierTitles.length,
+                                    itemBuilder: (context, index) {
+                                      Widget card = Container(
+                                        height: (screenWidth - 36) / 1.586,
+                                        width: double.infinity,
+                                        decoration: BoxDecoration(
+                                          borderRadius: BorderRadius.circular(
+                                            22,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(
+                                                alpha: 0.12,
+                                              ),
+                                              blurRadius: 20,
+                                              spreadRadius: -4,
+                                              offset: const Offset(0, 10),
+                                            ),
+                                          ],
+                                        ),
+                                        child: _buildRateCard(
+                                          tierTitle: _tierTitles[index],
+                                          isActive: index == activeIndex,
+                                          index: index,
+                                          rates: rates,
+                                        ),
+                                      );
 
-                                  return AnimatedBuilder(
-                                    animation: pageController,
-                                    builder: (context, child) {
-                                      double value = 1.0;
-                                      if (pageController
-                                          .position
-                                          .haveDimensions) {
-                                        value = pageController.page! - index;
-                                        value = (1 - (value.abs() * 0.12))
-                                            .clamp(0.85, 1.0);
+                                      if (index == initialPage) {
+                                        card = Hero(
+                                          tag: 'tier_card_hero',
+                                          child: Material(
+                                            type: MaterialType.transparency,
+                                            child: card,
+                                          ),
+                                        );
                                       }
-                                      return Center(
-                                        child: Transform.scale(
-                                          scale: value,
-                                          child: child,
+
+                                      return AnimatedBuilder(
+                                        animation: pageController,
+                                        builder: (context, child) {
+                                          double value = 1.0;
+                                          if (pageController
+                                              .position
+                                              .haveDimensions) {
+                                            value =
+                                                pageController.page! - index;
+                                            value = (1 - (value.abs() * 0.12))
+                                                .clamp(0.85, 1.0);
+                                          }
+                                          return Center(
+                                            child: Transform.scale(
+                                              scale: value,
+                                              child: child,
+                                            ),
+                                          );
+                                        },
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8.0,
+                                          ),
+                                          child: card,
                                         ),
                                       );
                                     },
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8.0,
+                                  ),
+                                ),
+                              ),
+                              ValueListenableBuilder<int>(
+                                valueListenable: currentPage,
+                                builder: (context, page, _) {
+                                  return Semantics(
+                                    label:
+                                        'Tier ${page + 1} of ${_tierTitles.length}',
+                                    child: ExcludeSemantics(
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          for (
+                                            var i = 0;
+                                            i < _tierTitles.length;
+                                            i++
+                                          )
+                                            Container(
+                                              margin:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 3,
+                                                  ),
+                                              width: i == page ? 20 : 8,
+                                              height: 8,
+                                              decoration: BoxDecoration(
+                                                color: i == page
+                                                    ? Colors.white
+                                                    : Colors.white.withValues(
+                                                        alpha: 0.45,
+                                                      ),
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
+                                              ),
+                                            ),
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            '${page + 1} / ${_tierTitles.length}',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ],
                                       ),
-                                      child: card,
                                     ),
                                   );
                                 },
                               ),
-                            ),
+                            ],
                           ),
-                        ],
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
-            ),
-          );
-        },
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          return child;
-        },
-      ),
-    );
+              );
+            },
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+                  return child;
+                },
+          ),
+        )
+        .then((_) {
+          pageController.dispose();
+          currentPage.dispose();
+        });
   }
 
   Widget _buildStackedRateCards({
     required Map<String, double> rates,
     required double cumulativeEnergy,
+    required bool projected,
   }) {
-    final tierData = [
-      {'tierTitle': 'TIER 1', 'isActive': cumulativeEnergy <= 200},
-      {
-        'tierTitle': 'TIER 2',
-        'isActive': cumulativeEnergy > 200 && cumulativeEnergy <= 300,
-      },
-      {
-        'tierTitle': 'TIER 3',
-        'isActive': cumulativeEnergy > 300 && cumulativeEnergy <= 400,
-      },
-      {'tierTitle': 'TIER 4', 'isActive': cumulativeEnergy > 400},
-    ];
+    final frontIndex = _activeTierIndex(cumulativeEnergy);
 
-    final activeIndex = tierData.indexWhere((t) => t['isActive'] as bool);
-    final frontIndex = activeIndex == -1 ? 0 : activeIndex;
-    final frontTier = tierData[frontIndex];
-
-    const double stackHeight = 95.0;
-    const double maskTop = 76.0;
+    const double stackHeight = 107.0;
+    const double maskTop = 88.0;
 
     return Padding(
       padding: const EdgeInsets.only(top: 24.0, left: 18.0, right: 18.0),
@@ -2370,77 +2517,98 @@ class _BillingScreenState extends State<BillingScreen> {
             child: Stack(
               clipBehavior: Clip.none,
               children: [
-                Positioned(
-                  top: -12,
-                  left: 12,
-                  right: 12,
-                  child: Transform.rotate(
-                    angle: -0.05,
-                    alignment: Alignment.topRight,
-                    child: Container(
-                      height: cardHeight,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFA8B39).withValues(alpha: 0.50),
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.15),
-                            blurRadius: 20,
-                            spreadRadius: -2,
-                            offset: const Offset(0, 8),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  top: 14,
-                  left: 0,
-                  right: 0,
-                  child: GestureDetector(
-                    onTap: () =>
-                        _openTierCardsHero(context, cumulativeEnergy, rates),
-                    child: Hero(
-                      tag: 'tier_card_hero',
-                      flightShuttleBuilder:
-                          (
-                            flightContext,
-                            animation,
-                            flightDirection,
-                            fromHeroContext,
-                            toHeroContext,
-                          ) {
-                            return Material(
-                              type: MaterialType.transparency,
-                              child: toHeroContext.widget,
-                            );
-                          },
-                      child: Material(
-                        type: MaterialType.transparency,
+                // The original angled ghost card, repeated for the other three
+                // tiers so the deck reads as four cards (back to front).
+                // Solid tints (lighter toward the back) so each card reads as
+                // its own layer; each also sits a little higher and tilts a
+                // little more than the one in front.
+                for (var k = _tierTitles.length - 1; k >= 1; k--)
+                  Positioned(
+                    top: const [0.0, 16.0, 6.0, -4.0][k],
+                    left: 6.0 * k,
+                    right: 6.0 * k,
+                    child: ExcludeSemantics(
+                      child: Transform.rotate(
+                        angle: -const [0.0, 0.02, 0.035, 0.05][k],
+                        alignment: Alignment.topRight,
                         child: Container(
                           height: cardHeight,
                           decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(22),
+                            color: const [
+                              Colors.transparent,
+                              Color(0xFFF59A4D),
+                              Color(0xFFF8B07A),
+                              Color(0xFFFAC8A0),
+                            ][k],
+                            borderRadius: BorderRadius.circular(20),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.22),
-                                blurRadius: 28,
-                                spreadRadius: -4,
-                                offset: const Offset(0, 14),
-                              ),
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.08),
-                                blurRadius: 8,
+                                color: Colors.black.withValues(alpha: 0.14),
+                                blurRadius: 12,
+                                spreadRadius: -2,
                                 offset: const Offset(0, 4),
                               ),
                             ],
                           ),
-                          child: _buildRateCard(
-                            tierTitle: frontTier['tierTitle'] as String,
-                            isActive: frontTier['isActive'] as bool,
-                            index: frontIndex,
-                            rates: rates,
+                        ),
+                      ),
+                    ),
+                  ),
+                Positioned(
+                  top: 26,
+                  left: 0,
+                  right: 0,
+                  child: Semantics(
+                    button: true,
+                    hint: 'Shows all four rate tiers',
+                    child: GestureDetector(
+                      onTap: () => _openTierCardsHero(
+                        context,
+                        cumulativeEnergy,
+                        rates,
+                        projected,
+                      ),
+                      child: Hero(
+                        tag: 'tier_card_hero',
+                        flightShuttleBuilder:
+                            (
+                              flightContext,
+                              animation,
+                              flightDirection,
+                              fromHeroContext,
+                              toHeroContext,
+                            ) {
+                              return Material(
+                                type: MaterialType.transparency,
+                                child: toHeroContext.widget,
+                              );
+                            },
+                        child: Material(
+                          type: MaterialType.transparency,
+                          child: Container(
+                            height: cardHeight,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(22),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.22),
+                                  blurRadius: 28,
+                                  spreadRadius: -4,
+                                  offset: const Offset(0, 14),
+                                ),
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.08),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: _buildRateCard(
+                              tierTitle: _tierTitles[frontIndex],
+                              isActive: true,
+                              index: frontIndex,
+                              rates: rates,
+                            ),
                           ),
                         ),
                       ),
@@ -2483,171 +2651,172 @@ class _BillingScreenState extends State<BillingScreen> {
     required int index,
     required Map<String, double> rates,
   }) {
-    const bracketKeys = ['0-200', '201-300', '301-400', 'over-400'];
-    final dummySubtext = [
-      'First 200 kWh',
-      '201 - 300 kWh',
-      '301 - 400 kWh',
-      'Over 400 kWh',
-    ];
-
-    final rateKey = bracketKeys[index % bracketKeys.length];
-    final rateValue = rates[rateKey] ?? _fallbackRates[rateKey] ?? 0.0;
+    final tier = index % _tierTitles.length;
+    final rateValue = _tierRate(rates, tier);
     final rate = '₱ ${rateValue.toStringAsFixed(4)}';
-    final subtext = dummySubtext[index % dummySubtext.length];
+    final subtext = _tierBands[tier];
 
-    final bgColor = isActive ? const Color(0xFFFA8B39) : Colors.white;
+    // Mid orange between the brand FA8B39 and the old dark D4620C: light
+    // enough to feel on-brand, deep enough that white text still reads.
+    final bgColor = isActive ? const Color(0xFFEF7A22) : Colors.white;
     final textColor = isActive ? Colors.white : const Color(0xFF2D3142);
-    final subtitleColor = isActive
-        ? Colors.white.withValues(alpha: 0.8)
-        : Colors.grey.shade500;
+    final subtitleColor = isActive ? Colors.white : const Color(0xFF5F6368);
     final shapeColor = isActive
-        ? Colors.white.withValues(alpha: 0.15)
+        ? Colors.white.withValues(alpha: 0.18)
         : Colors.black.withValues(alpha: 0.04);
 
-    return Container(
-      decoration: BoxDecoration(
-        color: bgColor,
-        borderRadius: BorderRadius.circular(22),
-        border: isActive
-            ? null
-            : Border.all(color: Colors.grey.shade200, width: 1.5),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Stack(
-        children: [
-          if (index % 4 == 0) ...[
-            Positioned(
-              top: -30,
-              right: -20,
-              child: CircleAvatar(radius: 75, backgroundColor: shapeColor),
-            ),
-            Positioned(
-              bottom: -40,
-              left: -10,
-              child: CircleAvatar(radius: 50, backgroundColor: shapeColor),
-            ),
-          ] else if (index % 4 == 1) ...[
-            Positioned(
-              top: 30,
-              right: -30,
-              child: Transform.rotate(
-                angle: 0.4,
-                child: Container(
-                  width: 120,
-                  height: 120,
-                  decoration: BoxDecoration(
-                    color: shapeColor,
-                    borderRadius: BorderRadius.circular(30),
+    return Semantics(
+      container: true,
+      label:
+          '$tierTitle, $subtext, ${rateValue.toStringAsFixed(2)} pesos per '
+          'kWh${isActive ? ', your current tier' : ''}',
+      selected: isActive,
+      child: ExcludeSemantics(
+        child: Container(
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(22),
+            border: isActive
+                ? null
+                : Border.all(color: Colors.grey.shade200, width: 1.5),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            children: [
+              if (index % 4 == 0) ...[
+                Positioned(
+                  top: -30,
+                  right: -20,
+                  child: CircleAvatar(radius: 75, backgroundColor: shapeColor),
+                ),
+                Positioned(
+                  bottom: -40,
+                  left: -10,
+                  child: CircleAvatar(radius: 50, backgroundColor: shapeColor),
+                ),
+              ] else if (index % 4 == 1) ...[
+                Positioned(
+                  top: 30,
+                  right: -30,
+                  child: Transform.rotate(
+                    angle: 0.4,
+                    child: Container(
+                      width: 120,
+                      height: 120,
+                      decoration: BoxDecoration(
+                        color: shapeColor,
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-          ] else if (index % 4 == 2) ...[
-            Positioned(
-              top: -40,
-              left: -20,
-              child: CircleAvatar(radius: 80, backgroundColor: shapeColor),
-            ),
-            Positioned(
-              top: 10,
-              left: 60,
-              child: CircleAvatar(radius: 40, backgroundColor: shapeColor),
-            ),
-          ] else ...[
-            Positioned(
-              bottom: -60,
-              right: 10,
-              child: CircleAvatar(radius: 90, backgroundColor: shapeColor),
-            ),
-            Positioned(
-              top: 20,
-              right: 20,
-              child: Icon(Icons.bolt_rounded, size: 90, color: shapeColor),
-            ),
-          ],
-          Padding(
-            padding: const EdgeInsets.all(22.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
+              ] else if (index % 4 == 2) ...[
+                Positioned(
+                  top: -40,
+                  left: -20,
+                  child: CircleAvatar(radius: 80, backgroundColor: shapeColor),
+                ),
+                Positioned(
+                  top: 10,
+                  left: 60,
+                  child: CircleAvatar(radius: 40, backgroundColor: shapeColor),
+                ),
+              ] else ...[
+                Positioned(
+                  bottom: -60,
+                  right: 10,
+                  child: CircleAvatar(radius: 90, backgroundColor: shapeColor),
+                ),
+                Positioned(
+                  top: 20,
+                  right: 20,
+                  child: Icon(Icons.bolt_rounded, size: 90, color: shapeColor),
+                ),
+              ],
+              Padding(
+                padding: const EdgeInsets.all(22.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: isActive
-                            ? Colors.white.withValues(alpha: 0.25)
-                            : Colors.grey.shade100,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        tierTitle,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: textColor,
-                          letterSpacing: 0.5,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
-                    if (isActive)
-                      const Icon(
-                        Icons.check_circle_rounded,
-                        color: Colors.white,
-                        size: 26,
-                      ),
-                  ],
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      subtext,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: subtitleColor,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
                     Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(
-                          rate,
-                          style: TextStyle(
-                            fontSize: 34,
-                            fontWeight: FontWeight.w900,
-                            color: textColor,
-                            height: 1.1,
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
                           ),
-                        ),
-                        const SizedBox(width: 4),
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 4.0),
+                          decoration: BoxDecoration(
+                            color: isActive
+                                ? Colors.white.withValues(alpha: 0.22)
+                                : Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
                           child: Text(
-                            '/ kWh',
+                            tierTitle,
                             style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                              color: subtitleColor,
+                              fontWeight: FontWeight.w800,
+                              color: textColor,
+                              letterSpacing: 0.5,
+                              fontSize: 13,
                             ),
                           ),
+                        ),
+                        if (isActive)
+                          const Icon(
+                            Icons.check_circle_rounded,
+                            color: Colors.white,
+                            size: 26,
+                          ),
+                      ],
+                    ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          subtext,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: subtitleColor,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              rate,
+                              style: TextStyle(
+                                fontSize: 34,
+                                fontWeight: FontWeight.w900,
+                                color: textColor,
+                                height: 1.1,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 4.0),
+                              child: Text(
+                                '/ kWh',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                  color: subtitleColor,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
                   ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -2843,6 +3012,119 @@ class _TicketShadowPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
+/// Slides + fades its child out/in whenever [modeKey] changes, moving toward
+/// [direction] (1 = new content from the right, -1 = from the left).
+class _ModeSlide extends StatelessWidget {
+  final Object modeKey;
+  final int direction;
+  static const double distance = 0.35;
+  final Widget child;
+
+  const _ModeSlide({
+    required this.modeKey,
+    required this.direction,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 280),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      layoutBuilder: (current, previous) => Stack(
+        alignment: Alignment.topLeft,
+        children: [...previous, ?current],
+      ),
+      transitionBuilder: (child, animation) {
+        final incoming = child.key == ValueKey(modeKey);
+        final dx = (incoming ? direction : -direction) * distance;
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: Offset(dx, 0),
+              end: Offset.zero,
+            ).animate(animation),
+            child: child,
+          ),
+        );
+      },
+      child: KeyedSubtree(key: ValueKey(modeKey), child: child),
+    );
+  }
+}
+
+/// Two tier cards side by side: the active one fills the width and the other
+/// peeks in from the screen edge, so switching modes slides between real cards.
+class _TierCardPager extends StatelessWidget {
+  final bool isCurrent;
+  final ValueChanged<bool> onSwipe;
+  final Widget eomCard;
+  final Widget currentCard;
+
+  const _TierCardPager({
+    required this.isCurrent,
+    required this.onSwipe,
+    required this.eomCard,
+    required this.currentCard,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const duration = Duration(milliseconds: 420);
+    const curve = Curves.easeInOutCubic;
+    const gap = 1.04; // card widths between centres (small gutter)
+
+    Widget slot(Widget card, Offset offset, bool active) {
+      return AnimatedSlide(
+        offset: offset,
+        duration: duration,
+        curve: curve,
+        child: AnimatedScale(
+          scale: active ? 1.0 : 0.94,
+          duration: duration,
+          curve: curve,
+          child: AnimatedOpacity(
+            opacity: active ? 1.0 : 0.85,
+            duration: duration,
+            curve: curve,
+            child: card,
+          ),
+        ),
+      );
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragEnd: (d) {
+        final v = d.primaryVelocity ?? 0;
+        if (v < -200) {
+          onSwipe(true);
+        }
+        if (v > 200) {
+          onSwipe(false);
+        }
+      },
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          slot(
+            eomCard,
+            isCurrent ? const Offset(-gap, 0) : Offset.zero,
+            !isCurrent,
+          ),
+          slot(
+            currentCard,
+            isCurrent ? Offset.zero : const Offset(gap, 0),
+            isCurrent,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 enum _PromoArt { receipt, calculator }
 
 /// Promo-style banner with layered, depth-shifted 3D art that moves with
@@ -2989,8 +3271,18 @@ class _PromoBannerState extends State<_PromoBanner> {
                   ),
                   // mid: small items
                   if (isReceipt) ...[
-                    _layer(10, _art('coin', 24, angle: -0.3), right: 96, top: 8),
-                    _layer(12, _art('coin', 18, angle: 0.5), right: 80, bottom: 6),
+                    _layer(
+                      10,
+                      _art('coin', 24, angle: -0.3),
+                      right: 96,
+                      top: 8,
+                    ),
+                    _layer(
+                      12,
+                      _art('coin', 18, angle: 0.5),
+                      right: 80,
+                      bottom: 6,
+                    ),
                   ] else ...[
                     _layer(
                       10,
@@ -3058,119 +3350,6 @@ class _PromoBannerState extends State<_PromoBanner> {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// Slides + fades its child out/in whenever [modeKey] changes, moving toward
-/// [direction] (1 = new content from the right, -1 = from the left).
-class _ModeSlide extends StatelessWidget {
-  final Object modeKey;
-  final int direction;
-  static const double distance = 0.35;
-  final Widget child;
-
-  const _ModeSlide({
-    required this.modeKey,
-    required this.direction,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 280),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      layoutBuilder: (current, previous) => Stack(
-        alignment: Alignment.topLeft,
-        children: [...previous, ?current],
-      ),
-      transitionBuilder: (child, animation) {
-        final incoming = child.key == ValueKey(modeKey);
-        final dx = (incoming ? direction : -direction) * distance;
-        return FadeTransition(
-          opacity: animation,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: Offset(dx, 0),
-              end: Offset.zero,
-            ).animate(animation),
-            child: child,
-          ),
-        );
-      },
-      child: KeyedSubtree(key: ValueKey(modeKey), child: child),
-    );
-  }
-}
-
-/// Two tier cards side by side: the active one fills the width and the other
-/// peeks in from the screen edge, so switching modes slides between real cards.
-class _TierCardPager extends StatelessWidget {
-  final bool isCurrent;
-  final ValueChanged<bool> onSwipe;
-  final Widget eomCard;
-  final Widget currentCard;
-
-  const _TierCardPager({
-    required this.isCurrent,
-    required this.onSwipe,
-    required this.eomCard,
-    required this.currentCard,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    const duration = Duration(milliseconds: 420);
-    const curve = Curves.easeInOutCubic;
-    const gap = 1.04; // card widths between centres (small gutter)
-
-    Widget slot(Widget card, Offset offset, bool active) {
-      return AnimatedSlide(
-        offset: offset,
-        duration: duration,
-        curve: curve,
-        child: AnimatedScale(
-          scale: active ? 1.0 : 0.94,
-          duration: duration,
-          curve: curve,
-          child: AnimatedOpacity(
-            opacity: active ? 1.0 : 0.85,
-            duration: duration,
-            curve: curve,
-            child: card,
-          ),
-        ),
-      );
-    }
-
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onHorizontalDragEnd: (d) {
-        final v = d.primaryVelocity ?? 0;
-        if (v < -200) {
-          onSwipe(true);
-        }
-        if (v > 200) {
-          onSwipe(false);
-        }
-      },
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          slot(
-            eomCard,
-            isCurrent ? const Offset(-gap, 0) : Offset.zero,
-            !isCurrent,
-          ),
-          slot(
-            currentCard,
-            isCurrent ? Offset.zero : const Offset(gap, 0),
-            isCurrent,
-          ),
-        ],
       ),
     );
   }
