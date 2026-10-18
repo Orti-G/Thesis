@@ -16,6 +16,8 @@ import firebase_admin
 from firebase_admin import credentials, db as firebase_db, messaging
 import asyncio
 import threading
+import anomaly_retrain as ar    # shared with GRID_Anomaly_Drift_Check.ipynb
+import forecast_retrain as fr   # shared with GRID_Forecast_Check.ipynb
 
 app = FastAPI()
 
@@ -41,23 +43,26 @@ DB_CONFIG = {
 # ── Load ML Models ─────────────────────────────────────────────────────────────
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
 
-forecast_bundle   = joblib.load(os.path.join(MODEL_DIR, "forecast_model.pkl"))
-FORECAST_MODEL    = forecast_bundle["model"]
-FORECAST_SCALER   = forecast_bundle["scaler"]        # None for Random Forest
-FORECAST_FEATURES = forecast_bundle["feature_cols"]
+# Forecast model (SVR, level-normalised inputs) + end-of-month settings in ONE bundle,
+# swapped in one assignment like the anomaly model.
+FORECAST_BUNDLE = fr.load_bundle(MODEL_DIR)
+fr.validate_bundle(FORECAST_BUNDLE)
 # ['today_kwh_so_far', 'frac_day_elapsed', 'Interval kWh', 'Hour', 'dow', 'Weekend']
 
-anomaly_bundle    = joblib.load(os.path.join(MODEL_DIR, "anomaly_model.pkl"))
-ANOMALY_MODEL     = anomaly_bundle["model"]
-ANOMALY_SCALER    = anomaly_bundle["scaler"]
-ANOMALY_FEATURES  = anomaly_bundle["features"]
-TIME_BASELINE    = anomaly_bundle["time_baseline"]
-MIN_STD_TIME     = anomaly_bundle["min_std_time"]
-# ['Interval kWh', 'Dev 1hr', 'Power Delta', 'Roll mean 1hr', 'Roll mean 24hr', 'time_zscore', 'is_weekend', 'Voltage (V)', 'hour_cos', 'hour_sin']
+# Anomaly model: the whole bundle is kept in ONE global and swapped in one assignment
+# when a new model is installed (hot reload, no API restart). run_anomaly() reads it once
+# per call, so a reading is always scored by a single, complete model.
+# Features (12): Power Delta, Dev 1hr, is_weekend, Roll mean 1hr, time_zscore, Current (A),
+#                Dev 24hr, Interval kWh, Power (W), hour_cos, hour_sin, Roll mean 24hr
+ANOMALY_BUNDLE = joblib.load(os.path.join(MODEL_DIR, "anomaly_model.pkl"))
+ar.validate_bundle(ANOMALY_BUNDLE)
 
-# Rolling window sizes (5-min intervals)
-WINDOW_1HR  = 12
-WINDOW_24HR = 288
+AUTO_REFIT_FORECAST   = True   # weekly SVR refit + refit after an anomaly-model change
+AUTO_REFIT            = True   # False = only report drift; refit manually on the VM: python anomaly_retrain.py --refit
+MODEL_WATCH_SECONDS   = 60     # how often models/incoming/ is checked
+DRIFT_CHECK_HOUR      = 0      # daily drift check at 00:15 PH time (yesterday is complete)
+DRIFT_CHECK_MINUTE    = 15
+last_drift_check_date = ""
 
 # ── In-Memory 5-Minute Buffer ──────────────────────────────────────────────────
 reading_buffer = []   # list of dicts: {voltage, current, power, cumul_kwh, ts}
@@ -193,6 +198,7 @@ def startup_event():
     state = load_billing_state()
 
     asyncio.create_task(sync_watchdog())
+    asyncio.create_task(anomaly_model_watcher())
 
     if state and state.get("billing_cutoff_date") == computed_cutoff:
         # Same billing cycle as before restart — resume as-is
@@ -677,12 +683,7 @@ def flush_buffer():
             conn.commit()
 
         # Run anomaly detection
-        anomaly_result = run_anomaly(
-            voltage=avg_voltage,
-            power=avg_power,
-            interval_kwh=interval_kwh,
-            timestamp=window_ts,
-        )
+        anomaly_result = run_anomaly()
 
         # Log anomaly to DB if detected (acknowledged = NULL)
         if anomaly_result.get("is_anomaly"):
@@ -732,66 +733,115 @@ def flush_buffer():
     finally:
         _flush_lock.release()      # always releases the lock
 
-def run_anomaly(voltage, power, interval_kwh, timestamp):
+def run_anomaly():
     """
-    Compute rolling + cyclical + time-baseline features from DB history
-    and run Isolation Forest.
+    Score the newest 5-min reading with the current anomaly bundle.
+    Features are built by anomaly_retrain.score_latest(), the same code the
+    VM refit trains with (time-based 1 h / 24 h rolling means, Power Delta = 0
+    after a gap > 60 min, time_zscore from the bundle's 48-bucket baseline).
 
-    the current reading has already been saved to the DB before
-    this runs, so `rows` includes it as the most recent row.
+    The current reading has already been saved to the DB before this runs,
+    so the last 25 h of rows include it as the most recent row.
     """
-    rows = get_recent_averaged_readings(WINDOW_24HR)
+    bundle = ANOMALY_BUNDLE          # read once: a hot reload mid-call cannot mix two models
+
+    with get_conn() as conn:
+        rows = ar.fetch_recent_rows_db(conn, hours=25)
 
     if len(rows) < 2:
         return {"status": "collecting_data", "is_anomaly": False, "score": None}
 
-    df = pd.DataFrame(rows)
-    power_series = df["power_avg"]  # current reading is already the last row — no append needed
+    return ar.score_latest(rows, bundle)
 
-    roll_mean_1hr  = power_series.rolling(WINDOW_1HR,  min_periods=1).mean().iloc[-1]
-    roll_mean_24hr = power_series.rolling(WINDOW_24HR, min_periods=1).mean().iloc[-1]
-    dev_1hr        = power - roll_mean_1hr
-    dev_24hr       = power - roll_mean_24hr
 
-    power_delta = power - power_series.iloc[-2]  # compare to the reading before this one
+# ── Anomaly model: hot reload + daily drift check ──────────────────────────────
+def _install_new_model_if_any():
+    """Install waiting models from models/incoming/ (written by the refits on this VM).
+    Anomaly first; a new anomaly model changes what counts as clean energy, so the
+    forecasting model is refit right after (it lands in incoming/ and installs next tick)."""
+    global ANOMALY_BUNDLE, FORECAST_BUNDLE
+    with get_conn() as conn:
+        sample = ar.fetch_recent_rows_db(conn, hours=25)
+    new = ar.install_incoming(MODEL_DIR, sample)      # None if nothing is waiting
+    if new is not None:
+        ANOMALY_BUNDLE = new                         # single assignment = atomic swap
+        firebase_db.reference("/anomaly_model/version").set(new.get("version", "unknown"))
+        firebase_db.reference("/anomaly_model/train_window").set(list(new["train_window"]))
+        print(f"✅ Anomaly model installed: {new.get('version')} {new['train_window']}")
+        _forecast_refit_if_due()
 
-    hour = timestamp.hour
-    hour_sin = np.sin(2 * np.pi * hour / 24)
-    hour_cos = np.cos(2 * np.pi * hour / 24)
-    is_weekend = int(timestamp.weekday() >= 5)
+    fnew = fr.install_incoming(MODEL_DIR)
+    if fnew is not None:
+        FORECAST_BUNDLE = fnew
+        firebase_db.reference("/forecast_model").set({
+            "version": fnew.get("version"), "train_window": list(fnew["train_window"]),
+            "anomaly_version": fnew.get("anomaly_version"), "reason": fnew.get("refit_reason")})
+        print(f"✅ Forecast model installed: {fnew.get('version')} {fnew['train_window']} ({fnew.get('refit_reason')})")
 
-    key = (int(hour), int(is_weekend))  # ← force int not numpy int64
-    tb_mean, tb_std = TIME_BASELINE.get(key, (roll_mean_24hr, MIN_STD_TIME))
-    time_zscore = (power - tb_mean) / tb_std
 
-    feature_row = pd.DataFrame([{
-        "Interval kWh":   interval_kwh,
-        "Dev 1hr":        float(dev_1hr),
-        "Power Delta":    float(power_delta),
-        "Roll mean 1hr":  float(roll_mean_1hr),
-        "Roll mean 24hr": float(roll_mean_24hr),
-        "time_zscore":    float(time_zscore),
-        "is_weekend":     is_weekend,
-        "Voltage (V)":    voltage,
-        "hour_cos":       float(hour_cos),
-        "hour_sin":       float(hour_sin),
-    }])[ANOMALY_FEATURES]
+def _forecast_refit_if_due(force_reason=None):
+    """Weekly, or when the anomaly model changed. Writes to incoming/; the watcher installs it."""
+    if not AUTO_REFIT_FORECAST and not force_reason:
+        return
+    today = datetime.now(PH_TZ).date()
+    with get_conn() as conn:
+        status = fr.run_refit_if_due(conn, FORECAST_BUNDLE, ANOMALY_BUNDLE, MODEL_DIR, today, force_reason)
+    print(f"📈 Forecast refit check: {status}")
 
-    scaled = ANOMALY_SCALER.transform(feature_row)
-    pred   = ANOMALY_MODEL.predict(scaled)[0]
-    score  = ANOMALY_MODEL.score_samples(scaled)[0]
 
+def _daily_drift_check():
+    with get_conn() as conn:
+        status = ar.run_daily_check(conn, ANOMALY_BUNDLE, MODEL_DIR, auto_refit=AUTO_REFIT)
+    firebase_db.reference("/anomaly_model/drift").set({k: str(v) for k, v in status.items()})
+    print(f"🔎 Drift check: {status}")
+    # If the anomaly model was refit, the forecast refit follows its install (next tick).
+    # Otherwise check the weekly forecast refit now.
+    if not status.get("refit"):
+        _forecast_refit_if_due()
+
+
+async def anomaly_model_watcher():
+    """Background task. Every minute: install a waiting model (hot reload).
+    Once a day after midnight: drift check; a refit drops its pkl in incoming/,
+    which the next tick installs. Heavy work runs in a thread, not on the event loop."""
+    global last_drift_check_date
+    while True:
+        await asyncio.sleep(MODEL_WATCH_SECONDS)
+        try:
+            await asyncio.to_thread(_install_new_model_if_any)
+        except Exception as e:
+            print(f"❌ Model install failed (old model kept): {e}")
+
+        now = datetime.now(PH_TZ)
+        today = now.strftime("%Y-%m-%d")
+        due = (now.hour, now.minute) >= (DRIFT_CHECK_HOUR, DRIFT_CHECK_MINUTE)
+        if due and today != last_drift_check_date:
+            last_drift_check_date = today
+            try:
+                await asyncio.to_thread(_daily_drift_check)
+            except Exception as e:
+                print(f"❌ Drift check failed: {e}")
+
+
+@app.get("/anomaly-model")
+def anomaly_model_info():
+    """Which anomaly model is live, and the latest drift check (for debugging / the app)."""
+    b = ANOMALY_BUNDLE
     return {
-        "status":         "ok",
-        "is_anomaly":     bool(pred == -1),
-        "score":          round(float(score), 4),
-        "roll_mean_1hr":  round(float(roll_mean_1hr), 4),
-        "roll_mean_24hr": round(float(roll_mean_24hr), 4),
-        "dev_1hr":        round(float(dev_1hr), 4),
-        "dev_24hr":       round(float(dev_24hr), 4),
-        "power_delta":    round(float(power_delta), 4),
-        "time_zscore":    round(float(time_zscore), 4),
+        "version":      b.get("version", "june-v2"),
+        "train_window": b.get("train_window"),
+        "drift_level":  b["drift"]["train_mean_daily_kwh"],
+        "last_refit":   b["drift"].get("last_refit"),
+        "features":     b["features"],
+        "drift":        firebase_db.reference("/anomaly_model/drift").get(),
     }
+
+
+@app.post("/anomaly-model/check-drift")
+def anomaly_model_check_now():
+    """Run the drift check now (same as the daily job)."""
+    _daily_drift_check()
+    return firebase_db.reference("/anomaly_model/drift").get()
 
 def get_current_schedule_filename():
     """Picks the PDF whose filename encodes the latest year-month, e.g.
@@ -892,95 +942,85 @@ def refresh_rates():
 @app.post("/forecast")
 def forecast():
     """
-    User-triggered endpoint.
-    Predicts today's day_total_kWh and estimates month-end consumption.
-    Option B: month_end = consumed_so_far + (predicted_day x remaining_days)
+    User-triggered endpoint. Same computation as the paper (Chapter III) and
+    GRID_Forecast_Check.ipynb, via forecast_retrain.py:
+      clean total today  = SVR on level-normalised inputs (anomalous readings excluded)
+      day total          = clean total + anomalous so far + expected anomalous energy still to come
+      projected EOM      = past days metered + day total + remaining days x EWMA(true daily kWh)
+      calibrated EOM     = k x projected EOM  ->  bracket and itemized bill
     """
     latest = get_latest_averaged_reading()
     if latest is None:
         raise HTTPException(status_code=503, detail="No data available yet.")
 
-    now      = datetime.now(PH_TZ)
-    hour     = now.hour
-    dow      = now.weekday()        # 0=Mon, 6=Sun
-    weekend  = 1 if dow >= 5 else 0
-    frac_day = (now.hour * 3600 + now.minute * 60 + now.second) / 86400
+    fb, ab = FORECAST_BUNDLE, ANOMALY_BUNDLE          # read once (hot reload safe)
+    now = datetime.now(PH_TZ)
 
-    # Compute today_kwh_so_far = SUM(interval_kwh) for today
     with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COALESCE(SUM(interval_kwh), 0)
-                FROM readings
-                WHERE DATE(timestamp) = (now() AT TIME ZONE 'Asia/Manila')::date
-                """
-            )
-            today_kwh_so_far = float(cur.fetchone()[0])
+        raw = fr.fetch_all_readings_db(conn)
+    F = fr.build_frame(raw, ab, fb, today=now.date())
 
-    feature_row = pd.DataFrame([{
-        "today_kwh_so_far": today_kwh_so_far,
-        "frac_day_elapsed": frac_day,
-        "Interval kWh":     latest["interval_kwh"],
-        "Hour":             hour,
-        "dow":              dow,
-        "Weekend":          weekend,
-    }])[FORECAST_FEATURES]
-
-    if FORECAST_SCALER is not None:
-        feature_row = FORECAST_SCALER.transform(feature_row)
-
-    predicted_day_kwh = float(FORECAST_MODEL.predict(feature_row)[0])
-
-    # Month-end estimate (Option B)
-    # accumulated_kwh = the same adjusted cumul_kwh shown on the dashboard —
-    # total consumption since BILLING_CUTOFF_DATE up to the latest reading.
-    accumulated_kwh = float(latest["cumul_kwh"])
-
-    # Past-days total = accumulated so far MINUS today's so-far total.
-    # Avoids a separate day-by-day GROUP BY query, which was vulnerable to
-    # a timezone mismatch between Postgres' CURRENT_DATE and Asia/Manila "today".
-    kwh_past_days = round(max(accumulated_kwh - today_kwh_so_far, 0.0), 4)
-
-    # Days elapsed this cycle (cutoff day excluded, today included)
+    # Billing cycle: 28th -> 27th. accumulated = adjusted cumul_kwh (same as the dashboard)
     cutoff_dt   = datetime.strptime(BILLING_CUTOFF_DATE, "%Y-%m-%d").date()
     days_so_far = (now.date() - cutoff_dt).days
-
-    # Step 1: Combined kWh = Accumulated Past kWh + Today's ML Prediction
-    combined_kwh = kwh_past_days + predicted_day_kwh
-
-    # Step 2: Average daily kWh = Combined kWh / Days so far
-    avg_daily_kwh = combined_kwh / days_so_far if days_so_far > 0 else 0.0
-
-    # Step 3: Remaining days after today until billing end (27th)
-    billing_end   = now.replace(day=27) if now.day <= 27 else (
+    billing_end = now.replace(day=27) if now.day <= 27 else (
         now.replace(month=now.month + 1, day=27) if now.month < 12
         else now.replace(year=now.year + 1, month=1, day=27)
     )
-    remaining_days = (billing_end.date() - now.date()).days
+    accumulated_kwh = float(latest["cumul_kwh"])
 
-    # Step 4: Projected EOM = Combined kWh + (Average Daily kWh x Remaining Days)
-    projected_eom = combined_kwh + (avg_daily_kwh * remaining_days)
+    f = fr.forecast_now(F, fb, accumulated_kwh, now.replace(tzinfo=None), billing_end.date())
+
+    # Itemized bill on the calibrated, whole-kWh projection (as on the actual bill)
+    try:
+        bill = compute_bill(get_current_schedule_filename(), round(f["projected_eom_calibrated_kWh"]))
+    except Exception as e:
+        bill = {"error": str(e)}
 
     result = {
-        "status":                    "ok",
-        "timestamp":                 now.isoformat(),
-        "billing_cycle_start":       BILLING_CUTOFF_DATE,
-        "predicted_day_total_kWh":   round(predicted_day_kwh, 4),
-        "accumulated_past_kWh":      round(kwh_past_days, 4),
-        "combined_kWh":              round(combined_kwh, 4),
-        "days_so_far":               days_so_far,
-        "avg_daily_kWh":             round(avg_daily_kwh, 4),
-        "days_remaining":            remaining_days,
-        "projected_eom_kWh":         round(projected_eom, 4),
+        "status":                  "ok",
+        "timestamp":               now.isoformat(),
+        "billing_cycle_start":     BILLING_CUTOFF_DATE,
+        "days_so_far":             days_so_far,
+        # same keys the app already reads
+        "predicted_day_total_kWh": f["predicted_day_total_kWh"],
+        "accumulated_past_kWh":    f["accumulated_past_kWh"],
+        "combined_kWh":            f["combined_kWh"],
+        "avg_daily_kWh":           f["ewma_daily_kWh"],      # now the EWMA used for the remaining days
+        "days_remaining":          f["days_remaining"],
+        "projected_eom_kWh":       f["projected_eom_kWh"],
+        # new
+        "predicted_clean_kWh":          f["predicted_clean_kWh"],
+        "anomalous_so_far_kWh":         f["anomalous_so_far_kWh"],
+        "expected_rest_anomalous_kWh":  f["expected_rest_anomalous_kWh"],
+        "calibration_k":                f["calibration_k"],
+        "projected_eom_calibrated_kWh": f["projected_eom_calibrated_kWh"],
+        "bracket":                      f["bracket"],
+        "projected_bill":               bill,
+        "forecast_version":             f["forecast_version"],
+        "anomaly_version":              ab.get("version", "june-v2"),
     }
 
     firebase_db.reference("/forecast").set(result)
-
-    # Log forecast to PostgreSQL
-    log_forecast(result, datetime.now(PH_TZ).replace(tzinfo=None))
-
+    log_forecast(result, now.replace(tzinfo=None))
     return result
+
+
+@app.get("/forecast-model")
+def forecast_model_info():
+    b = FORECAST_BUNDLE
+    return {"version": b.get("version"), "train_window": b.get("train_window"),
+            "last_refit": b.get("last_refit"), "refit_reason": b.get("refit_reason"),
+            "anomaly_version": b.get("anomaly_version"), "inputs": b["ln_columns"],
+            "svr": {k: b["svr"].get_params()[k] for k in ("C", "epsilon", "gamma")},
+            "calibration_k": b["eom"]["k_pooled"]}
+
+
+@app.post("/forecast-model/refit")
+def forecast_model_refit_now():
+    """Refit the forecasting model now (installs within a minute)."""
+    _forecast_refit_if_due(force_reason="manual")
+    return {"status": "refit written to models/incoming/, installs within a minute"}
 
 
 # ── Weekly Comparison Endpoint ────────────────────────────────────────────────
