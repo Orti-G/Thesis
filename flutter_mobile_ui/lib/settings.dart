@@ -130,8 +130,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 16),
             _buildAboutRow(
               icon: Icons.bolt_outlined,
-              label: 'KURO',
-              value: 'Kuryente Usage and Residential Observation',
+              label: 'App name',
+              value: 'GRID',
             ),
             const Divider(height: 24),
             _buildAboutRow(

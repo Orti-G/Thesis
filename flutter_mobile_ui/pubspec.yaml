@@ -81,6 +81,8 @@ flutter:
       - assets/Comp 1.json
       - assets/billingbg.png
       - assets/spark loading.json
+      - assets/locate restart.json
+      - assets/restart.json
       - assets/grid_animation.mp4
       - assets/3d/
 

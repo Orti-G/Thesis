@@ -1679,27 +1679,54 @@ class _BillingScreenState extends State<BillingScreen> {
                       ],
                     ),
                     const SizedBox(height: 24),
+                    // The end-of-day forecast is the app's headline feature,
+                    // so it carries the size; the greeting just leads into it.
                     AnimatedSwitcher(
                       duration: const Duration(milliseconds: 220),
                       child: Text(
                         headline,
                         key: ValueKey(headline),
                         style: TextStyle(
-                          color: brandOrangeText,
-                          fontSize: 28,
-                          height: 1.15,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.3,
+                          color: brandOrangeText.withValues(alpha: 0.9),
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 2),
+                    RichText(
+                      text: TextSpan(
+                        style: TextStyle(
+                          color: brandOrangeText,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                        children: [
+                          TextSpan(
+                            text: predictedDayTotal.toStringAsFixed(2),
+                            style: const TextStyle(
+                              fontSize: 56,
+                              height: 1.05,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -1.5,
+                            ),
+                          ),
+                          const TextSpan(
+                            text: ' kWh',
+                            style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 2),
                     Text(
-                      'Expecting ${predictedDayTotal.toStringAsFixed(2)} kWh by end of day',
+                      'expected by end of day',
                       style: TextStyle(
-                        color: brandOrangeText.withValues(alpha: 0.85),
+                        color: brandOrangeText.withValues(alpha: 0.8),
                         fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ],

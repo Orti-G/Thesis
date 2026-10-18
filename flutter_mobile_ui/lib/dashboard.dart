@@ -6,6 +6,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'package:lottie/lottie.dart';
 import 'dart:math';
 import 'main.dart';
 
@@ -65,6 +66,19 @@ class _DashboardState extends State<Dashboard> {
   StreamSubscription<DatabaseEvent>? _syncSubscription;
   bool _isIotConnected = true;
   DateTime? _lastLiveDataTime;
+  // Set when the device drops while the splash is still up; the sheet is
+  // shown once the splash clears instead of landing on top of it.
+  bool _offlineSheetQueued = false;
+
+  // --- FIRST-LOAD READINESS ---
+  // The dashboard is built behind the splash; the splash stays up until
+  // each of these initial reads has answered once (see main.dart).
+  final Set<String> _pendingFirstLoads = {'live', 'history', 'sync'};
+
+  void _markFirstLoad(String part) {
+    _pendingFirstLoads.remove(part);
+    if (_pendingFirstLoads.isEmpty) dashboardReadyNotifier.value = true;
+  }
 
   bool get _isTodaySelected {
     final now = DateTime.now();
@@ -118,6 +132,7 @@ class _DashboardState extends State<Dashboard> {
 
     testModeNotifier.addListener(_onTestModeChanged);
     nicknameNotifier.addListener(_onNicknameChanged);
+    splashDoneNotifier.addListener(_onSplashDone);
 
     if (_isTestMode) {
       _startDemoMode();
@@ -131,6 +146,12 @@ class _DashboardState extends State<Dashboard> {
   void _onNicknameChanged() {
     if (!mounted) return;
     setState(() => _nickname = nicknameNotifier.value);
+  }
+
+  void _onSplashDone() {
+    if (!splashDoneNotifier.value || !_offlineSheetQueued) return;
+    _offlineSheetQueued = false;
+    if (mounted && !_isIotConnected) _showNoConnectionDialog();
   }
 
   void _onTestModeChanged() {
@@ -177,6 +198,8 @@ class _DashboardState extends State<Dashboard> {
     _demoTimer?.cancel();
     _demoTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
+      // Demo data is all local — ready as soon as the live values exist.
+      dashboardReadyNotifier.value = true;
       setState(() {
         _currentWatts = 800 + rand.nextInt(400).toDouble();
         _currentAmps = double.parse((_currentWatts / 220).toStringAsFixed(2));
@@ -222,6 +245,7 @@ class _DashboardState extends State<Dashboard> {
     DatabaseReference ref = FirebaseDatabase.instance.ref('live_reading');
 
     _dbSubscription = ref.onValue.listen((event) {
+      _markFirstLoad('live');
       if (event.snapshot.value != null) {
         try {
           final data = Map<String, dynamic>.from(event.snapshot.value as Map);
@@ -329,6 +353,7 @@ class _DashboardState extends State<Dashboard> {
     final ref = FirebaseDatabase.instance.ref('history/today');
     _historySubscription = ref.onValue.listen((event) {
       if (!mounted) return;
+      _markFirstLoad('history');
       if (event.snapshot.value == null) {
         setState(() {
           _hourlyKwh = {};
@@ -575,11 +600,17 @@ class _DashboardState extends State<Dashboard> {
       final bool wasConnected = _isIotConnected;
 
       setState(() => _isIotConnected = isConnected);
+      _markFirstLoad('sync');
 
       // Only pop the sheet on the transition into "disconnected" so it
-      // doesn't spam the user while `sync` stays false.
+      // doesn't spam the user while `sync` stays false. While the splash
+      // is still up it's queued for when the splash clears.
       if (!isConnected && wasConnected) {
-        _showNoConnectionDialog();
+        if (splashDoneNotifier.value) {
+          _showNoConnectionDialog();
+        } else {
+          _offlineSheetQueued = true;
+        }
       }
     });
   }
@@ -605,6 +636,10 @@ class _DashboardState extends State<Dashboard> {
     final lastSeen = _lastLiveDataTime;
     final downtime = lastSeen != null ? now.difference(lastSeen) : Duration.zero;
 
+    // Kept outside the builder so the sheet remembers whether the user has
+    // moved on to the restart walkthrough across route rebuilds.
+    bool showRestartGuide = false;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -615,184 +650,247 @@ class _DashboardState extends State<Dashboard> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Drag handle
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 20),
-                  decoration: BoxDecoration(
-                    color: Colors.grey[300],
-                    borderRadius: BorderRadius.circular(2),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (_, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Drag handle
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 20),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
-              ),
 
-              // Badge
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.red.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  'NO CONNECTION',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.5,
-                    color: Colors.red[700],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
+                // Overview ⇄ restart walkthrough. The incoming view alone sets
+                // the height (the outgoing one is positioned), and
+                // AnimatedSize eases the sheet between the two.
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.topCenter,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    layoutBuilder: (current, previous) => Stack(
+                      alignment: Alignment.topCenter,
+                      children: [
+                        for (final child in previous)
+                          Positioned(top: 0, left: 0, right: 0, child: child),
+                        ?current,
+                      ],
+                    ),
+                    child: showRestartGuide
+                        ? _RestartGuide(
+                            key: const ValueKey('restart-guide'),
+                            accent: primaryOrange,
+                            onBack: () =>
+                                setSheetState(() => showRestartGuide = false),
+                            onDone: () => Navigator.of(sheetContext).pop(),
+                          )
+                        : Column(
+                            key: const ValueKey('offline-overview'),
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Badge
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  'NO CONNECTION',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 0.5,
+                                    color: Colors.red[700],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
 
-              // Timestamp
-              Text(
-                DateFormat('MMM d, yyyy · HH:mm').format(now),
-                style: TextStyle(fontSize: 13, color: Colors.grey[500]),
-              ),
-              const SizedBox(height: 12),
+                              // Timestamp
+                              Text(
+                                DateFormat('MMM d, yyyy · HH:mm').format(now),
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: Colors.grey[500],
+                                ),
+                              ),
+                              const SizedBox(height: 12),
 
-              // Title
-              const Text(
-                'Device Went Offline',
-                style: TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w800,
-                  height: 1.15,
-                  color: Colors.black,
-                ),
-              ),
-              const SizedBox(height: 20),
+                              // Title
+                              const Text(
+                                'Device Went Offline',
+                                style: TextStyle(
+                                  fontSize: 28,
+                                  fontWeight: FontWeight.w800,
+                                  height: 1.15,
+                                  color: Colors.black,
+                                ),
+                              ),
+                              const SizedBox(height: 20),
 
-              // Stats row
-              Container(
-                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-                decoration: BoxDecoration(
-                  color: Colors.grey[100],
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Last Reading',
-                            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                              // Stats row
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                  horizontal: 16,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[100],
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Last Reading',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              color: Colors.grey[500],
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            lastSeen != null
+                                                ? DateFormat(
+                                                    'h:mm a',
+                                                  ).format(lastSeen)
+                                                : '—',
+                                            style: const TextStyle(
+                                              fontSize: 17,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    Container(
+                                      width: 1,
+                                      height: 32,
+                                      color: Colors.grey[300],
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Downtime',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              color: Colors.grey[500],
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            lastSeen != null
+                                                ? '${downtime.inMinutes}m ${downtime.inSeconds % 60}s'
+                                                : '—',
+                                            style: const TextStyle(
+                                              fontSize: 17,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+
+                              const Text(
+                                'Would you like to restart the device?',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.black,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+
+                              // Primary action — opens the step-by-step guide
+                              // (there's no remote-restart command yet).
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.black,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 16,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(30),
+                                    ),
+                                    elevation: 0,
+                                  ),
+                                  onPressed: () => setSheetState(
+                                    () => showRestartGuide = true,
+                                  ),
+                                  child: const Text(
+                                    'Restart Manually',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+
+                              // Secondary action
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton(
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 16,
+                                    ),
+                                    side: BorderSide(color: Colors.grey[300]!),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(30),
+                                    ),
+                                  ),
+                                  onPressed: () =>
+                                      Navigator.of(sheetContext).pop(),
+                                  child: const Text(
+                                    'Dismiss',
+                                    style: TextStyle(
+                                      color: Colors.black,
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            lastSeen != null
-                                ? DateFormat('h:mm a').format(lastSeen)
-                                : '—',
-                            style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(width: 1, height: 32, color: Colors.grey[300]),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Downtime',
-                            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            lastSeen != null
-                                ? '${downtime.inMinutes}m ${downtime.inSeconds % 60}s'
-                                : '—',
-                            style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-
-              const Text(
-                'Would you like to restart the device?',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.black,
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // Primary action
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                    elevation: 0,
-                  ),
-                  onPressed: () {
-                    Navigator.of(sheetContext).pop();
-                    // TODO: hook this up to an actual remote-restart command
-                    // if/when the firmware supports one.
-                  },
-                  child: const Text(
-                    'Restart Device',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 12),
-
-              // Secondary action
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    side: BorderSide(color: Colors.grey[300]!),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                  ),
-                  onPressed: () => Navigator.of(sheetContext).pop(),
-                  child: const Text(
-                    'Dismiss',
-                    style: TextStyle(
-                      color: Colors.black,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -975,6 +1073,7 @@ class _DashboardState extends State<Dashboard> {
     _demoTimer?.cancel();
     testModeNotifier.removeListener(_onTestModeChanged);
     nicknameNotifier.removeListener(_onNicknameChanged);
+    splashDoneNotifier.removeListener(_onSplashDone);
     super.dispose();
   }
 
@@ -2038,6 +2137,239 @@ class _MetricInfo {
     required this.title,
     required this.description,
   });
+}
+
+/// Two-step manual-restart walkthrough shown inside the "device went
+/// offline" sheet: spot the switch on the meter, then flip it.
+/// Both Lottie files are drawn on the same 1080×1080 canvas, so they're
+/// stacked in one stage and cross-faded — the device stays in place
+/// between steps and only the highlight / switch motion changes.
+class _RestartGuide extends StatefulWidget {
+  final Color accent;
+  final VoidCallback onBack;
+  final VoidCallback onDone;
+
+  const _RestartGuide({
+    super.key,
+    required this.accent,
+    required this.onBack,
+    required this.onDone,
+  });
+
+  @override
+  State<_RestartGuide> createState() => _RestartGuideState();
+}
+
+class _RestartGuideState extends State<_RestartGuide>
+    with TickerProviderStateMixin {
+  static const _steps = [
+    (
+      asset: 'assets/locate restart.json',
+      title: 'Locate the switch',
+      body:
+          'Find the power switch on your GRID device. '
+          "It's outlined in orange above.",
+      action: 'I found it',
+    ),
+    (
+      asset: 'assets/restart.json',
+      title: 'Restart the device',
+      body:
+          'Flip the switch off, wait a few seconds, then flip it back on. '
+          'The status will change to Connected once the device is back online.',
+      action: 'Done',
+    ),
+  ];
+
+  late final List<AnimationController> _controllers = [
+    for (var i = 0; i < _steps.length; i++) AnimationController(vsync: this),
+  ];
+  int _step = 0;
+
+  @override
+  void dispose() {
+    for (final c in _controllers) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  // The visible step's clip loops from its first frame; hidden ones pause.
+  void _goTo(int step) {
+    setState(() => _step = step);
+    for (var i = 0; i < _controllers.length; i++) {
+      final c = _controllers[i];
+      if (i != step) {
+        c.stop();
+      } else if (c.duration != null) {
+        c
+          ..reset()
+          ..repeat();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isLast = _step == _steps.length - 1;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Step progress
+        Row(
+          children: [
+            Text(
+              'STEP ${_step + 1} OF ${_steps.length}',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+                color: widget.accent,
+              ),
+            ),
+            const SizedBox(width: 12),
+            for (var i = 0; i < _steps.length; i++) ...[
+              if (i > 0) const SizedBox(width: 6),
+              Expanded(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: i <= _step ? widget.accent : Colors.grey[200],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // Stage — every clip fills the same box with the same fit, so the
+        // illustration lines up exactly when the steps cross-fade. The art
+        // spans the canvas width and sits low with an empty band above it,
+        // so a slightly wide box with `cover` anchored to the bottom sizes
+        // it to the full sheet width and trims only that top band.
+        AspectRatio(
+          aspectRatio: 1.05,
+          child: ClipRect(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                for (var i = 0; i < _steps.length; i++)
+                  AnimatedOpacity(
+                    opacity: i == _step ? 1 : 0,
+                    duration: const Duration(milliseconds: 220),
+                    child: Lottie.asset(
+                      _steps[i].asset,
+                      controller: _controllers[i],
+                      fit: BoxFit.cover,
+                      alignment: Alignment.bottomCenter,
+                      onLoaded: (composition) {
+                        if (!mounted) return;
+                        _controllers[i].duration = composition.duration;
+                        if (i == _step) _controllers[i].repeat();
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        // The canvas keeps a little air below the box, so less gap here.
+        const SizedBox(height: 8),
+
+        // Copy for every step is laid out at once so the block keeps the
+        // tallest step's height and the buttons below never jump.
+        Stack(
+          children: [
+            for (var i = 0; i < _steps.length; i++)
+              ExcludeSemantics(
+                excluding: i != _step,
+                child: AnimatedOpacity(
+                  opacity: i == _step ? 1 : 0,
+                  duration: const Duration(milliseconds: 220),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _steps[i].title,
+                        style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                          height: 1.2,
+                          color: Colors.black,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _steps[i].body,
+                        style: TextStyle(
+                          fontSize: 14,
+                          height: 1.45,
+                          color: Colors.grey[600],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 24),
+
+        // Primary action
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(30),
+              ),
+              elevation: 0,
+            ),
+            onPressed: isLast ? widget.onDone : () => _goTo(_step + 1),
+            child: Text(
+              _steps[_step].action,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // Secondary action — first step goes back to the offline summary
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              side: BorderSide(color: Colors.grey[300]!),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(30),
+              ),
+            ),
+            onPressed: _step == 0 ? widget.onBack : () => _goTo(_step - 1),
+            child: const Text(
+              'Back',
+              style: TextStyle(
+                color: Colors.black,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 /// Frosted-glass surface used by the header pills and cards: blurred

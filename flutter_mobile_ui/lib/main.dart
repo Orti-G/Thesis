@@ -20,6 +20,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 final ValueNotifier<bool> testModeNotifier = ValueNotifier(false);
 final ValueNotifier<String> nicknameNotifier = ValueNotifier('My Home'); // <-- Your separate splash layout file
 
+// Startup handshake between the splash and the main screen built behind it:
+// the dashboard flips `dashboardReadyNotifier` once its first Firebase reads
+// have answered, and `splashDoneNotifier` flips once the splash has faded
+// away — anything that pops up UI on its own waits for that.
+final ValueNotifier<bool> dashboardReadyNotifier = ValueNotifier(false);
+final ValueNotifier<bool> splashDoneNotifier = ValueNotifier(false);
+
 // ── FCM / LOCAL NOTIFICATIONS SETUP ───────────────────────────────────────
 const String kBackendBaseUrl = 'http://35.209.250.46:8000'; // TODO: move to config if this changes per env
 
@@ -82,8 +89,52 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      // Setting this to OnboardingScreen makes it the first thing that opens
-      home: OnboardingScreen(videoController: videoController),
+      // Splash video on top, main screen already loading underneath
+      home: _AppRoot(videoController: videoController),
+    );
+  }
+}
+
+/// Builds the main screen straight away, underneath the splash, so the
+/// dashboard loads its data while the video plays. The splash only fades
+/// out once it reports finished (video, disclaimer and dashboard data).
+class _AppRoot extends StatefulWidget {
+  final VideoPlayerController videoController;
+
+  const _AppRoot({required this.videoController});
+
+  @override
+  State<_AppRoot> createState() => _AppRootState();
+}
+
+class _AppRootState extends State<_AppRoot> {
+  bool _fadingOut = false;
+  bool _splashGone = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const MainScreen(),
+        if (!_splashGone)
+          IgnorePointer(
+            ignoring: _fadingOut,
+            child: AnimatedOpacity(
+              opacity: _fadingOut ? 0 : 1,
+              duration: const Duration(milliseconds: 400),
+              curve: Curves.easeOut,
+              onEnd: () {
+                setState(() => _splashGone = true);
+                splashDoneNotifier.value = true;
+              },
+              child: OnboardingScreen(
+                videoController: widget.videoController,
+                onFinished: () => setState(() => _fadingOut = true),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -122,7 +173,25 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    // Built behind the splash now, so hold the notification-permission
+    // prompt until the splash has cleared.
+    if (splashDoneNotifier.value) {
+      _setupFCM();
+    } else {
+      splashDoneNotifier.addListener(_onSplashDone);
+    }
+  }
+
+  void _onSplashDone() {
+    if (!splashDoneNotifier.value) return;
+    splashDoneNotifier.removeListener(_onSplashDone);
     _setupFCM();
+  }
+
+  @override
+  void dispose() {
+    splashDoneNotifier.removeListener(_onSplashDone);
+    super.dispose();
   }
 
   // ── FCM SETUP ────────────────────────────────────────────────────────
