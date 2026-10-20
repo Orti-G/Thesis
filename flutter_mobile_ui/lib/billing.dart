@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart' show DateFormat;
 import 'package:lottie/lottie.dart';
 import 'package:custom_refresh_indicator/custom_refresh_indicator.dart';
 
@@ -159,7 +160,13 @@ class _BillingScreenState extends State<BillingScreen> {
         : (dateTime.hour > 12 ? dateTime.hour - 12 : dateTime.hour);
     final minute = dateTime.minute.toString().padLeft(2, '0');
     final period = dateTime.hour >= 12 ? 'PM' : 'AM';
-    return '$hour:$minute $period';
+    final now = DateTime.now();
+    final isToday = dateTime.year == now.year &&
+        dateTime.month == now.month &&
+        dateTime.day == now.day;
+    // An older forecast says which day, so it never passes for today's.
+    final day = isToday ? '' : '${DateFormat('MMM d').format(dateTime)}, ';
+    return '$day$hour:$minute $period';
   }
 
   Map<String, double> _parseRates(dynamic meralcoRatesNode) {
@@ -415,27 +422,32 @@ class _BillingScreenState extends State<BillingScreen> {
     ];
   }
 
-  _TierInfo _tierInfoFor(double kwh, Map<String, double> rates) {
+  _TierInfo _tierInfoFor(
+    double kwh,
+    Map<String, double> rates, [
+    String? bracket,
+  ]) {
+    final int tier = _activeTierIndex(kwh, bracket);
     String title;
     String rate;
     double max;
     String remainingText;
 
-    if (kwh <= 200) {
+    if (tier == 0) {
       title = 'TIER 1 STATUS';
       rate = _formatRate(rates, '0-200');
       max = 200.0;
       final remaining = (200.0 - kwh).clamp(0.0, 200.0);
       remainingText =
           '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
-    } else if (kwh <= 300) {
+    } else if (tier == 1) {
       title = 'TIER 2 STATUS';
       rate = _formatRate(rates, '201-300');
       max = 300.0;
       final remaining = (300.0 - kwh).clamp(0.0, 100.0);
       remainingText =
           '${remaining.toStringAsFixed(2)} kWh na lang bago umakyat ang tier';
-    } else if (kwh <= 400) {
+    } else if (tier == 2) {
       title = 'TIER 3 STATUS';
       rate = _formatRate(rates, '301-400');
       max = 400.0;
@@ -1537,7 +1549,7 @@ class _BillingScreenState extends State<BillingScreen> {
                 Icon(Icons.refresh_rounded, color: brandOrangeText, size: 18),
                 const SizedBox(width: 8),
                 Text(
-                  'Refresh forecast',
+                  'About this forecast',
                   style: TextStyle(
                     color: textDark,
                     fontSize: 16,
@@ -1548,7 +1560,7 @@ class _BillingScreenState extends State<BillingScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              'Pull down on this screen anytime to recalculate your forecast based on current consumption trajectory.',
+              'Your forecast updates on its own at 9 AM, 3 PM and 9 PM. Pull down on this screen anytime to recalculate it from your latest usage.',
               style: TextStyle(
                 color: textDark.withValues(alpha: 0.7),
                 fontSize: 13,
@@ -1604,21 +1616,26 @@ class _BillingScreenState extends State<BillingScreen> {
     required double predictedDayTotal,
     required double cumulativeEnergy,
     required double estimatedMonthEnd,
+    required double eomBilledKwh,
     required double estimatedCostLive,
     required Map<String, double> rates,
+    DateTime? forecastAt,
   }) {
     final double heroKwh = isCurrentMode ? cumulativeEnergy : estimatedMonthEnd;
+    // The forecast's own time when known; it also updates on a schedule,
+    // not only when this phone pulls to refresh.
+    final DateTime? updatedAt = forecastAt ?? _lastRefreshedAt;
 
     return FutureBuilder<Map<String, dynamic>>(
-      future: !isCurrentMode && estimatedMonthEnd > 0
-          ? _fetchBillBreakdownCached(estimatedMonthEnd)
+      future: !isCurrentMode && eomBilledKwh > 0
+          ? _fetchBillBreakdownCached(eomBilledKwh)
           : null,
       builder: (context, billSnapshot) {
         final double billPeso = isCurrentMode
             ? estimatedCostLive
             : ((billSnapshot.data?['total_energy_amount'] as num?)
                       ?.toDouble() ??
-                  _calculateBill(estimatedMonthEnd, rates));
+                  _calculateBill(eomBilledKwh, rates));
 
         final String headline = isCurrentMode
             ? "Here's your usage so far"
@@ -1650,8 +1667,8 @@ class _BillingScreenState extends State<BillingScreen> {
                               children: [
                                 Flexible(
                                   child: Text(
-                                    _lastRefreshedAt != null
-                                        ? 'Updated ${_formatLastRefreshed(_lastRefreshedAt!)}'
+                                    updatedAt != null
+                                        ? 'Updated ${_formatLastRefreshed(updatedAt)}'
                                         : 'About this forecast',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
@@ -1866,8 +1883,16 @@ class _BillingScreenState extends State<BillingScreen> {
           double estimatedMonthEnd = 0.0;
           double predictedDayTotal = 0.0;
           double cumulativeEnergy = 0.0;
-          double todayKwh = 0.0;
           double estimatedCostLive = 0.0;
+          DateTime? forecastAt;
+
+          // Billed kWh (raw × the backend's Meralco calibration) is what
+          // the cost and the bracket are worked out from, so the tier
+          // cards and the bill breakdown use it. Usage figures stay raw.
+          double liveBilledKwh = 0.0;
+          String? liveBracket;
+          double eomBilledKwh = 0.0;
+          String? eomBracket;
 
           Map<String, double> rates = Map.of(_fallbackRates);
           String effectivePeriod = '';
@@ -1883,6 +1908,14 @@ class _BillingScreenState extends State<BillingScreen> {
                   .toDouble();
               predictedDayTotal = (forecastData['predicted_day_total_kWh'] ?? 0)
                   .toDouble();
+              eomBilledKwh = (forecastData['projected_eom_calibrated_kWh'] ??
+                      estimatedMonthEnd)
+                  .toDouble();
+              eomBracket = forecastData['bracket'] as String?;
+              // Also refreshed by the backend at 9 AM, 3 PM and 9 PM.
+              forecastAt = DateTime.tryParse(
+                '${forecastData['timestamp'] ?? ''}',
+              )?.toLocal();
             }
 
             final liveReading = data['live_reading'] as Map<dynamic, dynamic>?;
@@ -1892,7 +1925,9 @@ class _BillingScreenState extends State<BillingScreen> {
                       .toDouble();
               estimatedCostLive = (liveReading['estimated_cost'] ?? 0)
                   .toDouble();
-              todayKwh = cumulativeEnergy;
+              liveBilledKwh =
+                  (liveReading['billed_kwh'] ?? cumulativeEnergy).toDouble();
+              liveBracket = liveReading['bracket'] as String?;
             }
 
             rates = _parseRates(data['meralco_rates']);
@@ -1904,10 +1939,14 @@ class _BillingScreenState extends State<BillingScreen> {
           final bool isCurrentMode = _mode == _BillMode.current;
 
           final double tierCardEnergy = isCurrentMode
-              ? cumulativeEnergy
-              : estimatedMonthEnd;
+              ? liveBilledKwh
+              : eomBilledKwh;
+          final String? tierCardBracket = isCurrentMode
+              ? liveBracket
+              : eomBracket;
 
-          final _TierInfo liveTier = _tierInfoFor(tierCardEnergy, rates);
+          final _TierInfo liveTier =
+              _tierInfoFor(tierCardEnergy, rates, tierCardBracket);
 
           final String currentTierTitle = liveTier.title;
           final String currentTierRate = liveTier.rate;
@@ -1998,7 +2037,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'TOTAL KWH CONSUMPTION',
+                          'KWH FOR BILLING',
                           style: TextStyle(
                             color: tierTextColor.withValues(alpha: 0.75),
                             fontSize: 10,
@@ -2076,8 +2115,10 @@ class _BillingScreenState extends State<BillingScreen> {
                     predictedDayTotal: predictedDayTotal,
                     cumulativeEnergy: cumulativeEnergy,
                     estimatedMonthEnd: estimatedMonthEnd,
+                    eomBilledKwh: eomBilledKwh,
                     estimatedCostLive: estimatedCostLive,
                     rates: rates,
+                    forecastAt: forecastAt,
                   ),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 24.0),
@@ -2109,14 +2150,14 @@ class _BillingScreenState extends State<BillingScreen> {
                             }
                           },
                           eomCard: tierCard(
-                            estimatedMonthEnd,
-                            _tierInfoFor(estimatedMonthEnd, rates),
+                            eomBilledKwh,
+                            _tierInfoFor(eomBilledKwh, rates, eomBracket),
                             color: const Color(0xFFFCC089),
                             ringColor: const Color(0xFFF59A48),
                           ),
                           currentCard: tierCard(
-                            cumulativeEnergy,
-                            _tierInfoFor(cumulativeEnergy, rates),
+                            liveBilledKwh,
+                            _tierInfoFor(liveBilledKwh, rates, liveBracket),
                           ),
                         ),
                         const SizedBox(height: 14),
@@ -2135,7 +2176,7 @@ class _BillingScreenState extends State<BillingScreen> {
                           textColor: const Color(0xFF4A2018),
                           onTap: () => _showBillBreakdown(
                             context,
-                            kwh: isCurrentMode ? todayKwh : estimatedMonthEnd,
+                            kwh: tierCardEnergy,
                             tierTitle: currentTierTitle,
                             tierRate: currentTierRate,
                             tierMax: currentTierMax,
@@ -2207,6 +2248,7 @@ class _BillingScreenState extends State<BillingScreen> {
                     rates: rates,
                     cumulativeEnergy: tierCardEnergy,
                     projected: !isCurrentMode,
+                    bracket: tierCardBracket,
                   ),
                   const SizedBox(height: 120),
                 ],
@@ -2238,7 +2280,12 @@ class _BillingScreenState extends State<BillingScreen> {
     'over-400',
   ];
 
-  int _activeTierIndex(double kwh) {
+  // The backend's `bracket` ("0-200" ... "over-400") is worked out from
+  // billed kWh, so when present it decides the tier and the badge always
+  // matches the cost. The kWh thresholds are only a fallback.
+  int _activeTierIndex(double kwh, [String? bracket]) {
+    final int fromBracket = _tierRateKeys.indexOf(bracket ?? '');
+    if (fromBracket >= 0) return fromBracket;
     if (kwh <= 200) return 0;
     if (kwh <= 300) return 1;
     if (kwh <= 400) return 2;
@@ -2248,13 +2295,18 @@ class _BillingScreenState extends State<BillingScreen> {
   double _tierRate(Map<String, double> rates, int i) =>
       rates[_tierRateKeys[i]] ?? _fallbackRates[_tierRateKeys[i]] ?? 0.0;
 
-  String _tierCaption(double kwh, Map<String, double> rates, bool projected) {
-    final i = _activeTierIndex(kwh);
+  String _tierCaption(
+    double kwh,
+    Map<String, double> rates,
+    bool projected, [
+    String? bracket,
+  ]) {
+    final i = _activeTierIndex(kwh, bracket);
     final rate = _tierRate(rates, i).toStringAsFixed(2);
     final used = kwh.toStringAsFixed(kwh >= 100 ? 0 : 1);
     final who = projected
-        ? "You're projected to use $used kWh by month end."
-        : "You've used $used kWh so far.";
+        ? '$used kWh is projected to count toward your bill by month end.'
+        : '$used kWh counts toward your bill so far.';
     final String scope;
     if (i == 0) {
       scope = 'Each of your first 200 kWh costs ₱$rate.';
@@ -2271,12 +2323,14 @@ class _BillingScreenState extends State<BillingScreen> {
     BuildContext context,
     double cumulativeEnergy,
     Map<String, double> rates,
-    bool projected,
-  ) {
-    final int activeIndex = _activeTierIndex(cumulativeEnergy);
+    bool projected, [
+    String? bracket,
+  ]) {
+    final int activeIndex = _activeTierIndex(cumulativeEnergy, bracket);
     final int initialPage = activeIndex;
     final ValueNotifier<int> currentPage = ValueNotifier<int>(initialPage);
-    final String caption = _tierCaption(cumulativeEnergy, rates, projected);
+    final String caption =
+        _tierCaption(cumulativeEnergy, rates, projected, bracket);
 
     final double screenWidth = MediaQuery.of(context).size.width;
     final double viewportFraction = (screenWidth - 20) / screenWidth;
@@ -2526,8 +2580,9 @@ class _BillingScreenState extends State<BillingScreen> {
     required Map<String, double> rates,
     required double cumulativeEnergy,
     required bool projected,
+    String? bracket,
   }) {
-    final frontIndex = _activeTierIndex(cumulativeEnergy);
+    final frontIndex = _activeTierIndex(cumulativeEnergy, bracket);
 
     const double stackHeight = 107.0;
     const double maskTop = 88.0;
@@ -2594,6 +2649,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         cumulativeEnergy,
                         rates,
                         projected,
+                        bracket,
                       ),
                       child: Hero(
                         tag: 'tier_card_hero',

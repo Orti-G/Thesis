@@ -35,22 +35,22 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 
 const AndroidNotificationChannel highChannel = AndroidNotificationChannel(
   'high_channel',
-  'Anomaly Alerts',
-  description: 'Notifications for detected energy anomalies',
+  'Urgent Alerts',
+  description: 'Severe energy anomalies and the GRID device going offline',
   importance: Importance.high,
 );
 
 const AndroidNotificationChannel mediumChannel = AndroidNotificationChannel(
   'medium_channel',
-  'Billing Warnings',
-  description: 'Notifications for Meralco tier-crossing warnings',
+  'Billing & Reviews',
+  description: 'Meralco bracket warnings and anomalies waiting for your answer',
   importance: Importance.defaultImportance,
 );
 
 const AndroidNotificationChannel lowChannel = AndroidNotificationChannel(
   'low_channel',
-  'Bill Forecasts',
-  description: 'Notifications for projected bill estimates',
+  'Info & Rates',
+  description: 'Monthly Meralco rate changes and other updates',
   importance: Importance.low,
 );
 
@@ -217,9 +217,15 @@ class _MainScreenState extends State<MainScreen> {
     await flutterLocalNotificationsPlugin.initialize(
       settings: const InitializationSettings(android: androidSettings),
       onDidReceiveNotificationResponse: (details) {
-        // Local (foreground-shown) notification tapped.
-        // payload carries the same "type" string sent from the backend.
-        _handleNotificationTap({'type': details.payload});
+        // Local (foreground-shown) notification tapped. The payload is the
+        // push's JSON-encoded data map (older builds sent just the type).
+        Map<String, dynamic> data;
+        try {
+          data = jsonDecode(details.payload ?? '') as Map<String, dynamic>;
+        } catch (_) {
+          data = {'type': details.payload};
+        }
+        _handleNotificationTap(data);
       },
     );
 
@@ -247,14 +253,19 @@ class _MainScreenState extends State<MainScreen> {
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       debugPrint('📩 Foreground message: ${message.notification?.title}');
 
-      final AndroidNotificationChannel channel =
-          _channelForType(message.data['type']);
+      final String? type = message.data['type'];
+      final AndroidNotificationChannel channel = _channelForType(type);
+
+      // Keep an open review list current without pulling the user away.
+      if (type == 'anomaly' || type == 'review') {
+        anomalyReviewRequest.value = AnomalyReviewRequest(showInbox: false);
+      }
 
       flutterLocalNotificationsPlugin.show(
         id: message.hashCode,
         title: message.notification?.title ?? '⚠️ Anomalya',
         body: message.notification?.body ?? '',
-        payload: message.data['type'],
+        payload: jsonEncode(message.data),
         notificationDetails: NotificationDetails(
           android: AndroidNotificationDetails(
             channel.id,
@@ -296,36 +307,61 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   // Maps a push payload's "type" field to the Android channel it should
-  // display on. Falls back to highChannel if type is missing/unrecognized.
+  // display on. Falls back to mediumChannel if type is missing/unrecognized.
   AndroidNotificationChannel _channelForType(String? type) {
     switch (type) {
-      case 'tier_warning':
-        return mediumChannel;
+      case 'anomaly':
+      case 'device':
+        return highChannel;
+      case 'rates':
       case 'forecast':
         return lowChannel;
-      case 'anomaly':
+      case 'review':
+      case 'bracket':
+      case 'tier_warning':
       default:
-        return highChannel;
+        return mediumChannel;
     }
   }
 
   // Notification tap → route to the relevant tab based on type.
   // Uses the IndexedStack, not Navigator, since MainScreen owns navigation
-  // via _selectedNavIndex rather than routes.
+  // via _selectedNavIndex rather than routes. All data values are strings.
   void _handleNotificationTap(Map<String, dynamic> data) {
+    debugPrint('Notification tapped — type: ${data['type']}');
     switch (data['type']) {
       case 'anomaly':
-        debugPrint(
-            'Navigate to anomaly screen — Power: ${data['power_avg']}W at ${data['timestamp']}');
         _goToTab(2); // Alerts
+        anomalyReviewRequest.value = AnomalyReviewRequest(
+          focusEventId: int.tryParse('${data['event_id']}'),
+        );
         break;
+      case 'review':
+        // "12,15": open the list; jump to the card only when there's one.
+        final ids = '${data['event_ids'] ?? ''}'
+            .split(',')
+            .map((id) => int.tryParse(id.trim()))
+            .whereType<int>()
+            .toList();
+        _goToTab(2); // Alerts
+        anomalyReviewRequest.value = AnomalyReviewRequest(
+          focusEventId: ids.length == 1 ? ids.single : null,
+        );
+        break;
+      case 'bracket':
       case 'tier_warning':
       case 'forecast':
-        debugPrint('Navigate to billing screen — type: ${data['type']}');
         _goToTab(1); // Billing
         break;
+      case 'rates':
+        _goToTab(4); // Analytics: rates advisory + news feed
+        break;
+      case 'device':
+        _goToTab(0); // Dashboard, which shows the offline sheet if needed
+        deviceStatusRequest.value++;
+        break;
       default:
-        _goToTab(2); // Alerts as a safe default
+        _goToTab(0);
     }
   }
 

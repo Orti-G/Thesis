@@ -1,9 +1,26 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart' hide TextDirection;
+import 'bakit_expander.dart';
 
 const String kApiBaseUrl = 'http://35.209.250.46:8000';
+
+/// Sent by push handling in main.dart: refresh the review list and, when
+/// [focusEventId] is set, open that event's card once it's loaded. A push
+/// that merely arrives (no tap) refreshes without [showInbox].
+class AnomalyReviewRequest {
+  final int? focusEventId;
+  final bool showInbox;
+
+  AnomalyReviewRequest({this.focusEventId, this.showInbox = true});
+}
+
+final ValueNotifier<AnomalyReviewRequest?> anomalyReviewRequest =
+    ValueNotifier(null);
 
 class AlertsScreen extends StatefulWidget {
   const AlertsScreen({super.key});
@@ -12,7 +29,8 @@ class AlertsScreen extends StatefulWidget {
   State<AlertsScreen> createState() => _AlertsScreenState();
 }
 
-class _AlertsScreenState extends State<AlertsScreen> {
+class _AlertsScreenState extends State<AlertsScreen>
+    with WidgetsBindingObserver {
   // Brand Colors
   final Color primaryOrange = const Color(0xFFF26E22);
   final Color topCardColor = const Color(0xFFFA8B39);
@@ -24,26 +42,62 @@ class _AlertsScreenState extends State<AlertsScreen> {
   // Tab state for toggling between Inbox and Info
   int _selectedTab = 0;
 
-  List<Map<String, dynamic>> _anomalyEntries = [];
-  bool _loadingAnomalies = true;
-  String? _anomalyError;
-  int? _acknowledgingId;
+  // One entry per anomaly event (flagged readings ≤ 10 min apart), newest
+  // first. `open` events are still happening and can't be answered yet.
+  List<Map<String, dynamic>> _events = [];
+  bool _loadingEvents = true;
+  String? _eventsError;
+
+  int get _closedCount => _events.where((e) => e['status'] == 'closed').length;
+  int get _openCount => _events.length - _closedCount;
 
   @override
   void initState() {
     super.initState();
-    _fetchPendingAnomalies();
+    WidgetsBinding.instance.addObserver(this);
+    anomalyReviewRequest.addListener(_onReviewRequest);
+    _fetchEvents();
   }
 
-  Future<void> _fetchPendingAnomalies() async {
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    anomalyReviewRequest.removeListener(_onReviewRequest);
+    super.dispose();
+  }
+
+  // Open events may have closed while the app was in the background.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _fetchEvents();
+  }
+
+  Future<void> _onReviewRequest() async {
+    final request = anomalyReviewRequest.value;
+    if (request == null || !mounted) return;
+
+    if (request.showInbox) setState(() => _selectedTab = 0);
+    await _fetchEvents();
+
+    final focusId = request.focusEventId;
+    if (focusId == null || !mounted) return;
+    final event = _events.where((e) => e['event_id'] == focusId).firstOrNull;
+    if (event == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _showAnomalyDetail(context, event);
+    });
+  }
+
+  Future<void> _fetchEvents() async {
+    if (!mounted) return;
     setState(() {
-      _loadingAnomalies = true;
-      _anomalyError = null;
+      _loadingEvents = true;
+      _eventsError = null;
     });
 
     try {
       final res = await http
-          .get(Uri.parse('$kApiBaseUrl/anomaly-logs/pending'))
+          .get(Uri.parse('$kApiBaseUrl/anomaly-events/pending'))
           .timeout(const Duration(seconds: 10));
 
       if (res.statusCode != 200) {
@@ -53,14 +107,16 @@ class _AlertsScreenState extends State<AlertsScreen> {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       final data = (body['data'] as List).cast<Map<String, dynamic>>();
 
+      if (!mounted) return;
       setState(() {
-        _anomalyEntries = data;
-        _loadingAnomalies = false;
+        _events = data;
+        _loadingEvents = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
-        _anomalyError = 'Failed to load anomalies: $e';
-        _loadingAnomalies = false;
+        _eventsError = 'Failed to load anomalies: $e';
+        _loadingEvents = false;
       });
     }
   }
@@ -134,84 +190,79 @@ class _AlertsScreenState extends State<AlertsScreen> {
     );
   }
 
-  Future<void> _acknowledgeAnomaly(int logId, bool acknowledged) async {
-    setState(() => _acknowledgingId = logId);
+  // One answer covers the whole event. The card leaves right away; the
+  // refresh afterwards brings it back if the answer didn't stick.
+  Future<void> _reviewEvent(int eventId, String answer) async {
+    Navigator.of(context).pop();
+    setState(() => _events.removeWhere((e) => e['event_id'] == eventId));
 
+    String? toast;
     try {
       final res = await http
-          .patch(
-            Uri.parse('$kApiBaseUrl/anomaly-logs/$logId/acknowledge'),
+          .post(
+            Uri.parse('$kApiBaseUrl/anomaly-events/$eventId/review'),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'acknowledged': acknowledged}),
+            body: jsonEncode({'answer': answer}),
           )
           .timeout(const Duration(seconds: 10));
 
-      if (res.statusCode != 200) {
+      if (res.statusCode == 200) {
+        final status = (jsonDecode(res.body) as Map<String, dynamic>)['status'];
+        toast = status == 'already_reviewed'
+            ? 'Already answered on another phone.'
+            : 'Answer saved. Thank you!';
+      } else if (res.statusCode != 404) {
+        // 404 means the event no longer exists; the refresh sorts it out.
         throw Exception('Server returned ${res.statusCode}');
       }
-
-      setState(() {
-        _anomalyEntries.removeWhere((e) => e['id'] == logId);
-        _acknowledgingId = null;
-      });
-
-      if (mounted) {
-        Navigator.of(context).pop();
-        _showGlassmorphicToast(
-          context,
-          acknowledged
-              ? 'Marked as a real anomaly.'
-              : 'Marked as a false alarm.',
-        );
-      }
     } catch (e) {
-      setState(() => _acknowledgingId = null);
-      if (mounted) {
-        _showGlassmorphicToast(context, 'Failed to update: $e');
-      }
+      toast = "Couldn't save your answer. Please try again.";
+    }
+
+    if (!mounted) return;
+    if (toast != null) _showGlassmorphicToast(context, toast);
+    await _fetchEvents();
+  }
+
+  // Event times are Philippine local time with no zone, so they are used
+  // exactly as written; never convert them from UTC.
+  static final DateFormat _clockFormat = DateFormat('h:mm a');
+
+  Color _severityColor(String? severity) {
+    switch (severity) {
+      case 'severe':
+        return criticalText;
+      case 'moderate':
+        return primaryOrange;
+      case 'mild':
+        return const Color(0xFFE0A000);
+      default: // pattern
+        return const Color(0xFF64748B);
     }
   }
 
-  static const List<String> _monthNames = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-
-  String _formatFullDateTime(dynamic raw) {
-    if (raw == null) return 'Just now';
-    try {
-      final parsed = DateTime.parse(raw.toString());
-      final hh = parsed.hour.toString().padLeft(2, '0');
-      final mm = parsed.minute.toString().padLeft(2, '0');
-      final month = _monthNames[parsed.month - 1];
-      return '$month ${parsed.day}, ${parsed.year} · $hh:$mm';
-    } catch (_) {
-      return raw.toString();
+  String _severityLabel(String? severity) {
+    switch (severity) {
+      case 'severe':
+        return 'SEVERE';
+      case 'moderate':
+        return 'MODERATE';
+      case 'mild':
+        return 'MILD';
+      default:
+        return 'UNUSUAL PATTERN';
     }
   }
 
-  String _formatTimestamp(dynamic raw) {
-    if (raw == null) return '';
-    try {
-      final parsed = DateTime.parse(raw.toString());
-      final now = DateTime.now();
-      final sameDay = parsed.year == now.year &&
-          parsed.month == now.month &&
-          parsed.day == now.day;
-      
-      int hour = parsed.hour;
-      final mm = parsed.minute.toString().padLeft(2, '0');
-      final ampm = hour >= 12 ? 'PM' : 'AM';
-      
-      if (hour > 12) hour -= 12;
-      if (hour == 0) hour = 12;
-      
-      final timeStr = '$hour:$mm $ampm';
-      
-      if (sameDay) return timeStr;
-      return '${_monthNames[parsed.month - 1]} ${parsed.day}';
-    } catch (_) {
-      return raw.toString();
+  // hour = high for this time of day, rise/drop = sudden change.
+  IconData _kindIcon(String? kind) {
+    switch (kind) {
+      case 'rise':
+        return Icons.arrow_upward_rounded;
+      case 'drop':
+        return Icons.arrow_downward_rounded;
+      default:
+        return Icons.schedule_rounded;
     }
   }
 
@@ -280,7 +331,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
             child: SafeArea(
               bottom: false,
               child: RefreshIndicator(
-                onRefresh: _fetchPendingAnomalies,
+                onRefresh: _fetchEvents,
                 color: primaryOrange,
                 backgroundColor: Colors.white,
                 child: SingleChildScrollView(
@@ -318,7 +369,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
                               index: 0,
                               title: 'Inbox',
                               icon: Icons.all_inbox_rounded,
-                              hasBadge: _anomalyEntries.isNotEmpty,
+                              hasBadge: _events.isNotEmpty,
                               isIconOnly: false,
                             ),
                             const SizedBox(width: 12),
@@ -374,7 +425,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        '${_anomalyEntries.length} Pending',
+                                        '$_closedCount Pending',
                                         style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 22,
@@ -384,7 +435,9 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                       ),
                                       const SizedBox(height: 2),
                                       Text(
-                                        'anomalies awaiting your review',
+                                        _openCount > 0
+                                            ? 'events awaiting your review · $_openCount ongoing'
+                                            : 'events awaiting your review',
                                         style: TextStyle(
                                           color: Colors.white.withValues(alpha: 0.85),
                                           fontSize: 13,
@@ -394,7 +447,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                     ],
                                   ),
                                 ),
-                                if (_loadingAnomalies)
+                                if (_loadingEvents)
                                   const SizedBox(
                                     width: 18,
                                     height: 18,
@@ -416,7 +469,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Text(
-                                'PENDING LOGS',
+                                'PENDING EVENTS',
                                 style: TextStyle(
                                   color: Colors.grey[600],
                                   fontSize: 13,
@@ -424,9 +477,9 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                   letterSpacing: 0.5,
                                 ),
                               ),
-                              if (!_loadingAnomalies && _anomalyEntries.isNotEmpty)
+                              if (!_loadingEvents && _events.isNotEmpty)
                                 Text(
-                                  '${_anomalyEntries.length}',
+                                  '${_events.length}',
                                   style: TextStyle(
                                     color: Colors.grey[500],
                                     fontSize: 13,
@@ -623,7 +676,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
   }
 
   Widget _buildAnomaliesListContent() {
-    if (_anomalyError != null) {
+    if (_eventsError != null) {
       return Container(
         key: const ValueKey('error'),
         width: double.infinity,
@@ -635,14 +688,14 @@ class _AlertsScreenState extends State<AlertsScreen> {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                _anomalyError!,
+                _eventsError!,
                 style: TextStyle(color: criticalText, fontSize: 14),
               ),
             ),
           ],
         ),
       );
-    } else if (!_loadingAnomalies && _anomalyEntries.isEmpty) {
+    } else if (!_loadingEvents && _events.isEmpty) {
       return Container(
         key: const ValueKey('empty'),
         width: double.infinity,
@@ -670,24 +723,42 @@ class _AlertsScreenState extends State<AlertsScreen> {
     } else {
       return Column(
         key: const ValueKey('list'),
-        children: _anomalyEntries
-            .map((entry) => _buildAnomalyItem(context, entry: entry))
+        children: _events
+            .map((event) => _buildAnomalyItem(context, event: event))
             .toList(),
       );
     }
   }
 
+  Widget _buildOngoingPill() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: primaryOrange.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        'Ongoing',
+        style: TextStyle(
+          color: primaryOrange,
+          fontSize: 11.5,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
   Widget _buildAnomalyItem(
     BuildContext context, {
-    required Map<String, dynamic> entry,
+    required Map<String, dynamic> event,
   }) {
-    final title = (entry['title'] as String?) ?? 'System Alert';
-    final powerAvg = entry['power_avg'] ?? 0;
-    
-    final description = 'Unexpected power pattern detected. Requires review.';
+    final title = event['title_tl'] as String?;
+    final time = event['time_tl'] as String?;
+    final message = event['message_tl'] as String?;
+    final accent = _severityColor(event['severity'] as String?);
 
     return InkWell(
-      onTap: () => _showAnomalyDetail(context, entry),
+      onTap: () => _showAnomalyDetail(context, event),
       splashColor: Colors.grey.withValues(alpha: 0.1),
       highlightColor: Colors.transparent,
       child: Padding(
@@ -699,12 +770,12 @@ class _AlertsScreenState extends State<AlertsScreen> {
               width: 38,
               height: 38,
               decoration: BoxDecoration(
-                color: primaryOrange.withValues(alpha: 0.08),
+                color: accent.withValues(alpha: 0.10),
                 shape: BoxShape.circle,
               ),
               child: Icon(
-                Icons.insights_rounded,
-                color: primaryOrange.withValues(alpha: 0.6),
+                _kindIcon(event['kind'] as String?),
+                color: accent,
                 size: 20,
               ),
             ),
@@ -714,58 +785,52 @@ class _AlertsScreenState extends State<AlertsScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Flexible(
-                        child: Text(
-                          title,
-                          style: TextStyle(
-                            color: textDark,
-                            fontSize: 16.5,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: -0.3,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.grey[200],
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          '$powerAvg W',
-                          style: TextStyle(
-                            color: Colors.grey[700],
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w600,
+                      if (title != null)
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: TextStyle(
+                              color: textDark,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -0.3,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                      ),
-                      const Spacer(),
-                      Text(
-                        _formatTimestamp(entry['timestamp']),
-                        style: TextStyle(
-                          color: Colors.grey[400],
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
+                      if (event['status'] == 'open') ...[
+                        const SizedBox(width: 8),
+                        _buildOngoingPill(),
+                      ],
                     ],
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    description,
-                    style: TextStyle(
-                      color: Colors.grey[500],
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w400,
+                  if (time != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      time,
+                      style: TextStyle(
+                        color: Colors.grey[500],
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  ],
+                  if (message != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      message,
+                      style: TextStyle(
+                        color: Colors.grey[600],
+                        fontSize: 14,
+                        height: 1.35,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -892,9 +957,9 @@ class _AlertsScreenState extends State<AlertsScreen> {
                 ),
               ),
               child: DraggableScrollableSheet(
-                initialChildSize: 0.6,
+                initialChildSize: 0.8,
                 minChildSize: 0.4,
-                maxChildSize: 0.9,
+                maxChildSize: 0.95,
                 expand: false,
                 builder: (context, scrollController) {
                   return SingleChildScrollView(
@@ -927,11 +992,19 @@ class _AlertsScreenState extends State<AlertsScreen> {
     );
   }
 
-  Widget _buildActionPanel(Map<String, dynamic> data) {
-    final logId = data['id'] as int?;
-    final powerAvg = data['power_avg'] ?? 0;
-    final score = (data['anomaly_score'] as num?) ?? 0.0;
-    final isBusy = logId != null && _acknowledgingId == logId;
+  Widget _buildActionPanel(Map<String, dynamic> event) {
+    final eventId = event['event_id'] as int?;
+    final isClosed = event['status'] == 'closed';
+    final severity = event['severity'] as String?;
+    final accent = _severityColor(severity);
+    final time = event['time_tl'] as String?;
+    final title = event['title_tl'] as String?;
+    final message = event['message_tl'] as String?;
+    final summary = event['summary_tl'] as String?;
+    final prompt = event['prompt_tl'] as String?;
+    final chart = event['chart'] as Map<String, dynamic>?;
+    final options = ((event['options'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -941,144 +1014,355 @@ class _AlertsScreenState extends State<AlertsScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
-                color: criticalText.withValues(alpha: 0.1),
+                color: accent.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Text(
-                'CRITICAL ALERT',
-                style: TextStyle(
-                  color: criticalText,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 1.2,
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _kindIcon(event['kind'] as String?),
+                    color: accent,
+                    size: 14,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    _severityLabel(severity),
+                    style: TextStyle(
+                      color: accent,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ],
               ),
             ),
+            if (!isClosed) ...[
+              const SizedBox(width: 8),
+              _buildOngoingPill(),
+            ],
           ],
         ),
-        const SizedBox(height: 14),
-        Text(
-          _formatFullDateTime(data['timestamp']),
-          style: TextStyle(
-            color: Colors.grey[500],
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 20),
-        Text(
-          'Unusual Pattern\nDetected',
-          style: TextStyle(
-            color: textDark,
-            fontSize: 32,
-            height: 1.15,
-            fontWeight: FontWeight.w900,
-            letterSpacing: -1.0,
-          ),
-        ),
-        const SizedBox(height: 20),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: const Color(0xFFF8F8F6),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Power Avg',
-                      style: TextStyle(color: Colors.grey[500], fontSize: 12, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '$powerAvg W',
-                      style: TextStyle(color: textDark, fontSize: 18, fontWeight: FontWeight.w700),
-                    ),
-                  ],
-                ),
-              ),
-              Container(width: 1, height: 32, color: Colors.grey.withValues(alpha: 0.25)),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Anomaly Score',
-                      style: TextStyle(color: Colors.grey[500], fontSize: 12, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      score.toStringAsFixed(2),
-                      style: TextStyle(color: textDark, fontSize: 18, fontWeight: FontWeight.w700),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 36),
-        Text(
-          'Was this expected behavior?',
-          style: TextStyle(color: textDark, fontSize: 16, fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 16),
-        SizedBox(
-          width: double.infinity,
-          height: 58,
-          child: FilledButton(
-            onPressed: (logId == null || isBusy)
-                ? null
-                : () => _acknowledgeAnomaly(logId, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: textDark,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(100),
-              ),
-            ),
-            child: isBusy
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
-                  )
-                : const Text(
-                    'No, Investigate',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                  ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        SizedBox(
-          width: double.infinity,
-          height: 58,
-          child: OutlinedButton(
-            onPressed: (logId == null || isBusy)
-                ? null
-                : () => _acknowledgeAnomaly(logId, false),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: textDark,
-              side: BorderSide(color: Colors.grey[300]!, width: 1.5),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(100),
-              ),
-            ),
-            child: const Text(
-              'Yes, It Was Me',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+        if (time != null) ...[
+          const SizedBox(height: 14),
+          Text(
+            time,
+            style: TextStyle(
+              color: Colors.grey[500],
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
             ),
           ),
+        ],
+        if (title != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            title,
+            style: TextStyle(
+              color: textDark,
+              fontSize: 26,
+              height: 1.15,
+              fontWeight: FontWeight.w900,
+              letterSpacing: -0.8,
+            ),
+          ),
+        ],
+        if (message != null) ...[
+          const SizedBox(height: 14),
+          Text(
+            message,
+            style: TextStyle(
+              color: Colors.grey[800],
+              fontSize: 15,
+              height: 1.45,
+            ),
+          ),
+        ],
+        if (summary != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            summary,
+            style: TextStyle(
+              color: Colors.grey[600],
+              fontSize: 14,
+              height: 1.4,
+            ),
+          ),
+        ],
+        if (chart != null) ...[
+          const SizedBox(height: 20),
+          _buildEventChart(chart),
+        ],
+        const SizedBox(height: 8),
+        BakitExpander(
+          text: event['explain_tl'] as String?,
+          accent: primaryOrange,
         ),
+        // Open events are still happening, so there's nothing to answer yet.
+        if (isClosed && eventId != null && options.isNotEmpty) ...[
+          const SizedBox(height: 28),
+          if (prompt != null) ...[
+            Text(
+              prompt,
+              style: TextStyle(
+                color: textDark,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+          for (var i = 0; i < options.length; i++) ...[
+            if (i > 0) const SizedBox(height: 12),
+            _buildAnswerButton(
+              label: (options[i]['label_tl'] as String?) ?? '',
+              filled: i == 0,
+              onPressed: () =>
+                  _reviewEvent(eventId, options[i]['answer'] as String),
+            ),
+          ],
+        ],
       ],
     );
+  }
+
+  Widget _buildAnswerButton({
+    required String label,
+    required bool filled,
+    required VoidCallback onPressed,
+  }) {
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(100),
+    );
+    const textStyle = TextStyle(fontSize: 16, fontWeight: FontWeight.w700);
+
+    return SizedBox(
+      width: double.infinity,
+      height: 58,
+      child: filled
+          ? FilledButton(
+              onPressed: onPressed,
+              style: FilledButton.styleFrom(
+                backgroundColor: textDark,
+                shape: shape,
+              ),
+              child: Text(label, style: textStyle),
+            )
+          : OutlinedButton(
+              onPressed: onPressed,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: textDark,
+                side: BorderSide(color: Colors.grey[300]!, width: 1.5),
+                shape: shape,
+              ),
+              child: Text(label, style: textStyle),
+            ),
+    );
+  }
+
+  // Power around the event: flagged readings get a red dot, and the usual
+  // power for the past hour is a dashed line.
+  Widget _buildEventChart(Map<String, dynamic> chart) {
+    final points = ((chart['points'] as List?) ?? const []).cast<Map>();
+
+    DateTime? origin;
+    final spots = <FlSpot>[];
+    final flaggedX = <double>{};
+    for (final p in points) {
+      final t = DateTime.tryParse('${p['t']}');
+      final w = (p['w'] as num?)?.toDouble();
+      if (t == null || w == null) continue;
+      origin ??= t;
+      final x = t.difference(origin).inSeconds / 60.0;
+      spots.add(FlSpot(x, w));
+      if (p['flagged'] == true) flaggedX.add(x);
+    }
+    if (origin == null) return const SizedBox.shrink();
+    final start = origin;
+
+    final baselineLabel = chart['baseline_label_tl'] as String?;
+    final baseline = baselineLabel == null
+        ? null
+        : (chart['baseline_w'] as num?)?.toDouble();
+
+    final peak = [for (final s in spots) s.y, ?baseline].reduce(max);
+    final step = _niceStep(peak / 3);
+    final maxY = step * (peak * 1.1 / step).ceil();
+    final minX = spots.first.x;
+    final maxX = spots.last.x > minX ? spots.last.x : minX + 1;
+
+    String clockAt(double x) =>
+        _clockFormat.format(start.add(Duration(seconds: (x * 60).round())));
+    final axisStyle = TextStyle(
+      color: Colors.grey[500],
+      fontSize: 10.5,
+      fontWeight: FontWeight.w600,
+    );
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(8, 18, 16, 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F8F6),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            height: 170,
+            child: LineChart(
+              LineChartData(
+                minX: minX,
+                maxX: maxX,
+                minY: 0,
+                maxY: maxY,
+                gridData: FlGridData(
+                  drawVerticalLine: false,
+                  horizontalInterval: step,
+                  getDrawingHorizontalLine: (_) => FlLine(
+                    color: Colors.grey.withValues(alpha: 0.15),
+                    strokeWidth: 1,
+                  ),
+                ),
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  rightTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 48,
+                      interval: step,
+                      getTitlesWidget: (value, meta) => SideTitleWidget(
+                        meta: meta,
+                        child: Text('${value.round()} W', style: axisStyle),
+                      ),
+                    ),
+                  ),
+                  // Only the first and last times, so labels never collide.
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 24,
+                      interval: maxX - minX,
+                      getTitlesWidget: (value, meta) => SideTitleWidget(
+                        meta: meta,
+                        space: 6,
+                        fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+                        child: Text(clockAt(value), style: axisStyle),
+                      ),
+                    ),
+                  ),
+                ),
+                extraLinesData: ExtraLinesData(
+                  horizontalLines: [
+                    if (baseline != null)
+                      HorizontalLine(
+                        y: baseline,
+                        color: Colors.grey[600],
+                        strokeWidth: 1.5,
+                        dashArray: const [6, 4],
+                      ),
+                  ],
+                ),
+                lineTouchData: LineTouchData(
+                  touchTooltipData: LineTouchTooltipData(
+                    getTooltipColor: (_) => textDark,
+                    getTooltipItems: (touched) => touched
+                        .map(
+                          (s) => LineTooltipItem(
+                            '${clockAt(s.x)}\n${s.y.round()} W',
+                            const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ),
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: spots,
+                    color: primaryOrange,
+                    barWidth: 2.5,
+                    isStrokeCapRound: true,
+                    belowBarData: BarAreaData(
+                      show: true,
+                      color: primaryOrange.withValues(alpha: 0.08),
+                    ),
+                    dotData: FlDotData(
+                      checkToShowDot: (spot, _) => flaggedX.contains(spot.x),
+                      getDotPainter: (spot, percent, bar, index) =>
+                          FlDotCirclePainter(
+                        radius: 5,
+                        color: criticalText,
+                        strokeWidth: 2,
+                        strokeColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: Wrap(
+              spacing: 16,
+              runSpacing: 6,
+              children: [
+                _buildLegendDot(criticalText, 'Flagged'),
+                if (baseline != null && baselineLabel != null)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 18,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: List.generate(
+                            3,
+                            (_) => Container(
+                              width: 4,
+                              height: 2,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        baselineLabel,
+                        style: TextStyle(
+                          color: Colors.grey[600],
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Rounds a raw gridline spacing up to a readable step (50, 100, 250 W...).
+  double _niceStep(double raw) {
+    for (final step in const [50.0, 100.0, 200.0, 250.0, 500.0, 1000.0, 2000.0]) {
+      if (raw <= step) return step;
+    }
+    return 5000.0;
   }
 }

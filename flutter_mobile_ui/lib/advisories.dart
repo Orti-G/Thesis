@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
+import 'bakit_expander.dart';
 
 class AdvisoriesScreen extends StatefulWidget {
   const AdvisoriesScreen({super.key});
@@ -51,15 +53,26 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
   StreamSubscription<DatabaseEvent>? _todaySubscription;
   int _todayIndex = 0; // 0=Sun ... 6=Sat
 
+  // ── ADVISORIES + NEWS FEED (Firebase, written only by the backend) ─────
+  // Both arrive in Tagalog, ready to show; the app never rewrites them.
+  StreamSubscription<DatabaseEvent>? _advisoriesSubscription;
+  StreamSubscription<DatabaseEvent>? _newsSubscription;
+  List<Map<String, dynamic>> _advisories = [];
+  List<Map<String, dynamic>> _newsItems = [];
+  bool _isLoadingNews = true;
+
   @override
   void initState() {
     super.initState();
     _loadWeeklyData();
+    _attachFeedListeners();
   }
 
   @override
   void dispose() {
     _todaySubscription?.cancel();
+    _advisoriesSubscription?.cancel();
+    _newsSubscription?.cancel();
     super.dispose();
   }
 
@@ -185,45 +198,86 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
     });
   }
 
-  // ── PLACEHOLDER: LOGS, shown as a real news feed (featured + list) ──────
-  // 'image' is a placeholder network image until a real source/CDN is wired
-  // up — swap for the actual advisory/report photo URL from the backend.
-  // First entry is the "Breaking"-style featured item; the rest are the list.
-  final List<Map<String, dynamic>> _logEntries = const [
-    {
-      'image': 'https://picsum.photos/seed/tier-warning/900/700',
-      'category': 'Babala',
-      'categoryColor': Color(0xFFE53935),
-      'title': 'Papalapit ka na sa Tier 2 batay sa kasalukuyang paggamit',
-      'source': 'EnergyWatch PH',
-      'timestamp': '5m ago',
-      'featured': true,
-    },
-    {
-      'image': 'https://picsum.photos/seed/efficiency-report/500/500',
-      'category': 'Ulat',
-      'categoryColor': Color(0xFF2E7D32),
-      'title': 'Bumuti ng 5% ang energy efficiency mo kahapon',
-      'source': 'EnergyWatch PH',
-      'timestamp': 'Kahapon',
-    },
-    {
-      'image': 'https://picsum.photos/seed/unplug-tip/500/500',
-      'category': 'Tip',
-      'categoryColor': Color(0xFFF26E22),
-      'title': 'I-unplug ang mga aparatong idle para makatipid',
-      'source': 'EnergyWatch PH',
-      'timestamp': 'Aug 12, 2026',
-    },
-    {
-      'image': 'https://picsum.photos/seed/night-usage/500/500',
-      'category': 'Babala',
-      'categoryColor': Color(0xFFE53935),
-      'title': 'Hindi pangkaraniwang paggamit noong gabi',
-      'source': 'EnergyWatch PH',
-      'timestamp': 'Aug 10, 2026',
-    },
-  ];
+  // `/advisories/{category}` holds the latest message per topic. anomaly and
+  // review are answered on the Alerts tab and device lives on the Dashboard,
+  // so only these are shown here.
+  static const Set<String> _advisoryCategories = {
+    'bracket', 'cycle', 'daily', 'rates', 'weekly',
+  };
+
+  void _attachFeedListeners() {
+    _advisoriesSubscription?.cancel();
+    _advisoriesSubscription =
+        FirebaseDatabase.instance.ref('advisories').onValue.listen((event) {
+      if (!mounted) return;
+      final records = <Map<String, dynamic>>[];
+      final raw = event.snapshot.value;
+      if (raw is Map) {
+        raw.forEach((category, value) {
+          if (value is Map && _advisoryCategories.contains(category)) {
+            records.add(Map<String, dynamic>.from(value));
+          }
+        });
+      }
+      // Most important first (priority 1), then newest.
+      records.sort((a, b) {
+        final byPriority =
+            _priorityOf(a['priority']).compareTo(_priorityOf(b['priority']));
+        if (byPriority != 0) return byPriority;
+        return _parseInstant(b['timestamp'])
+            .compareTo(_parseInstant(a['timestamp']));
+      });
+      setState(() => _advisories = records);
+    });
+
+    _newsSubscription?.cancel();
+    _newsSubscription =
+        FirebaseDatabase.instance.ref('cms/published').onValue.listen((event) {
+      if (!mounted) return;
+      final items = <Map<String, dynamic>>[];
+      final raw = event.snapshot.value;
+      if (raw is Map) {
+        raw.forEach((id, value) {
+          if (value is Map) items.add(Map<String, dynamic>.from(value));
+        });
+      }
+      // Pinned items on top, then newest first.
+      items.sort((a, b) {
+        final byPinned =
+            (b['pinned'] == true ? 1 : 0) - (a['pinned'] == true ? 1 : 0);
+        if (byPinned != 0) return byPinned;
+        final byPublished = _parseInstant(b['published_at'])
+            .compareTo(_parseInstant(a['published_at']));
+        if (byPublished != 0) return byPublished;
+        return _parseInstant(b['source_date'])
+            .compareTo(_parseInstant(a['source_date']));
+      });
+      setState(() {
+        _newsItems = items;
+        _isLoadingNews = false;
+      });
+    }, onError: (Object e) {
+      debugPrint("🔴 ERROR LOADING NEWS FEED: $e");
+      if (mounted) setState(() => _isLoadingNews = false);
+    });
+  }
+
+  int _priorityOf(dynamic raw) =>
+      raw is num ? raw.toInt() : int.tryParse('$raw') ?? 99;
+
+  // Advisory and feed timestamps carry a zone (+08:00 / UTC), so they're
+  // converted to the phone's local time. Unparseable values sort last.
+  DateTime _parseInstant(dynamic raw) =>
+      DateTime.tryParse('${raw ?? ''}')?.toLocal() ??
+      DateTime.fromMillisecondsSinceEpoch(0);
+
+  String _formatAge(DateTime t) {
+    final diff = DateTime.now().difference(t);
+    if (diff.inMinutes < 1) return 'Just now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
+    if (diff.inDays < 1) return '${diff.inHours}h ago';
+    return _formatDate(t);
+  }
 
   // ── DERIVED STATS ────────────────────────────────────────────────────
   // Only count days that have actually elapsed this week (today included)
@@ -274,12 +328,6 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
   @override
   Widget build(BuildContext context) {
     final isUp = _pctChange >= 0;
-    final featured = _logEntries.firstWhere(
-      (e) => e['featured'] == true,
-      orElse: () => _logEntries.first,
-    );
-    final restLogs =
-        _logEntries.where((e) => e != featured).toList(growable: false);
 
     return Scaffold(
       backgroundColor: creamBg,
@@ -346,6 +394,18 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                       ),
                     ),
                   ),
+
+                  // ── ADVISORY CARDS: latest backend message per topic ─────
+                  if (_advisories.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24.0, 0, 24.0, 4.0),
+                      child: Column(
+                        children: [
+                          for (final advisory in _advisories)
+                            _buildAdvisoryCard(advisory),
+                        ],
+                      ),
+                    ),
 
                   // ── STAT TILES: DAILY AVG + WEEK-OVER-WEEK ──────────────
                   Padding(
@@ -468,48 +528,23 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
                     ),
                   ),
 
-                  // ── LOGS: header ──────────────────────────────────────────
+                  // ── NEWS & TIPS: header ───────────────────────────────────
                   Padding(
                     padding: const EdgeInsets.fromLTRB(24.0, 16.0, 24.0, 12.0),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          'Logs',
-                          style: TextStyle(
-                            color: textDark,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        Text(
-                          'Tingnan Lahat',
-                          style: TextStyle(
-                            color: primaryOrange,
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
+                    child: Text(
+                      'News & Tips',
+                      style: TextStyle(
+                        color: textDark,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
 
-                  // ── LOGS: featured card ──────────────────────────────────
+                  // ── NEWS & TIPS: featured card + article-style list ──────
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                    child: _buildFeaturedLogCard(featured),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // ── LOGS: article-style list ─────────────────────────────
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                    child: Column(
-                      children: [
-                        for (final entry in restLogs) _buildLogListItem(entry),
-                      ],
-                    ),
+                    child: _buildNewsContent(),
                   ),
 
                   const SizedBox(height: 120),
@@ -718,20 +753,284 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
     );
   }
 
-  // ── Shared network-image loader with a spinner + graceful fallback ──────
-  // url is nullable: real log entries may not have a photo yet, so a null
-  // or empty url renders the same fallback tile instead of throwing.
-  Widget _networkImage(String? url, {required double? width, required double? height, BoxFit fit = BoxFit.cover}) {
-    if (url == null || url.isEmpty) {
-      return Container(
-        width: width,
-        height: height,
-        color: const Color(0xFFF4F5F7),
-        child: const Center(
-          child: Icon(Icons.image_outlined, color: Color(0xFFBDBDBD), size: 22),
-        ),
-      );
+  // ── ADVISORY CARD: backend title + message, "Bakit?" for the reasoning ──
+  Widget _buildAdvisoryCard(Map<String, dynamic> advisory) {
+    final title = advisory['title_tl'] as String?;
+    final message = advisory['message_tl'] as String?;
+    final timestamp = DateTime.tryParse('${advisory['timestamp']}')?.toLocal();
+    final (icon, accent) = _advisoryStyle(advisory['category'] as String?);
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.10),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: accent, size: 17),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    title ?? '',
+                    style: TextStyle(
+                      color: textDark,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      height: 1.25,
+                    ),
+                  ),
+                ),
+              ),
+              if (timestamp != null) ...[
+                const SizedBox(width: 8),
+                Padding(
+                  padding: const EdgeInsets.only(top: 7),
+                  child: Text(
+                    _formatAge(timestamp),
+                    style: TextStyle(
+                      color: Colors.grey[500],
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          if (message != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              message,
+              style: TextStyle(
+                color: Colors.grey[700],
+                fontSize: 13.5,
+                height: 1.45,
+              ),
+            ),
+          ],
+          const SizedBox(height: 4),
+          BakitExpander(
+            text: advisory['explain_tl'] as String?,
+            accent: primaryOrange,
+          ),
+        ],
+      ),
+    );
+  }
+
+  (IconData, Color) _advisoryStyle(String? category) {
+    switch (category) {
+      case 'bracket':
+        return (Icons.speed_rounded, upText);
+      case 'cycle':
+        return (Icons.calendar_month_rounded, primaryOrange);
+      case 'daily':
+        return (Icons.today_rounded, primaryOrange);
+      case 'rates':
+        return (Icons.price_change_rounded, primaryOrange);
+      default: // weekly
+        return (Icons.date_range_rounded, primaryOrange);
     }
+  }
+
+  // ── NEWS & TIPS: kind → chip label, colour and icon ────────────────────
+  String _newsLabel(String? kind) {
+    switch (kind) {
+      case 'rate_change':
+        return 'RATES';
+      case 'news':
+        return 'NEWS';
+      case 'advisory':
+        return 'ADVISORY';
+      case 'maintenance':
+        return 'MAINTENANCE';
+      default: // note: GRID's own
+        return 'GRID TIP';
+    }
+  }
+
+  Color _newsColor(String? kind) {
+    switch (kind) {
+      case 'rate_change':
+        return primaryOrange;
+      case 'news':
+        return const Color(0xFF1E6FD9);
+      case 'advisory':
+      case 'maintenance':
+        return const Color(0xFFB26A00);
+      default:
+        return downText;
+    }
+  }
+
+  // Rate changes are coloured by direction: up red, down green, flat grey.
+  Color _newsArtColor(Map<String, dynamic> item) {
+    if (item['kind'] != 'rate_change') return _newsColor(item['kind'] as String?);
+    switch ((item['card'] as Map?)?['direction']) {
+      case 'up':
+        return upText;
+      case 'down':
+        return downText;
+      case 'flat':
+        return const Color(0xFF78909C);
+      default:
+        return primaryOrange;
+    }
+  }
+
+  IconData _newsIcon(Map<String, dynamic> item) {
+    final card = item['card'] as Map?;
+    switch (card?['icon'] ?? item['kind']) {
+      case 'rate_change':
+        switch (card?['direction']) {
+          case 'up':
+            return Icons.trending_up_rounded;
+          case 'down':
+            return Icons.trending_down_rounded;
+          case 'flat':
+            return Icons.trending_flat_rounded;
+          default:
+            return Icons.price_change_rounded;
+        }
+      case 'news':
+        return Icons.newspaper_rounded;
+      case 'advisory':
+        return Icons.campaign_rounded;
+      case 'maintenance':
+        return Icons.engineering_rounded;
+      default:
+        return Icons.lightbulb_outline_rounded;
+    }
+  }
+
+  // The source's own date when there is one, otherwise when GRID published.
+  String _newsDate(Map<String, dynamic> item) {
+    final raw = item['source_date'] ?? item['published_at'];
+    final parsed = DateTime.tryParse('${raw ?? ''}')?.toLocal();
+    return parsed == null ? '' : _formatDate(parsed);
+  }
+
+  // ── NEWS ART: drawn from the item's facts when it has no image ─────────
+  // Large sizes show a rate change's figures (e.g. "+₱0.3191/kWh"); small
+  // thumbnails just show the icon.
+  Widget _buildNewsArt(
+    Map<String, dynamic> item, {
+    double? width,
+    required double height,
+    double factsTop = 52,
+  }) {
+    final color = _newsArtColor(item);
+    final card = item['card'] as Map?;
+    final change = card?['change_tl'] as String?;
+    final rateNew = card?['rate_new_tl'] as String?;
+    final direction = card?['direction'];
+    final isThumbnail = height < 100;
+    final showFacts =
+        !isThumbnail && item['kind'] == 'rate_change' && change != null;
+
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [color, Color.lerp(color, Colors.black, 0.3)!],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: isThumbnail
+          ? Center(child: Icon(_newsIcon(item), color: Colors.white, size: 30))
+          : Stack(
+              children: [
+                Positioned(
+                  right: -16,
+                  top: -8,
+                  child: Icon(
+                    _newsIcon(item),
+                    color: Colors.white.withValues(alpha: 0.16),
+                    size: height * 0.75,
+                  ),
+                ),
+                if (showFacts)
+                  Positioned(
+                    left: 18,
+                    top: factsTop,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            if (direction == 'up' || direction == 'down')
+                              Icon(
+                                direction == 'up'
+                                    ? Icons.arrow_upward_rounded
+                                    : Icons.arrow_downward_rounded,
+                                color: Colors.white,
+                                size: 26,
+                              ),
+                            Text(
+                              change,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 28,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (rateNew != null)
+                          Text(
+                            rateNew,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.85),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  // ── Shared network-image loader with a spinner + graceful fallback ──────
+  // A missing url or a failed load shows [fallback] (the drawn news art)
+  // instead, since feed images may not be set up in Firebase Storage yet.
+  Widget _networkImage(
+    String? url, {
+    required double? width,
+    required double? height,
+    required Widget fallback,
+    BoxFit fit = BoxFit.cover,
+  }) {
+    if (url == null || url.isEmpty) return fallback;
     return Image.network(
       url,
       width: width,
@@ -752,120 +1051,158 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
           ),
         );
       },
-      errorBuilder: (context, error, stack) {
-        return Container(
-          width: width,
-          height: height,
-          color: const Color(0xFFF4F5F7),
-          child: const Center(
-            child: Icon(Icons.image_not_supported_outlined,
-                color: Color(0xFFBDBDBD), size: 22),
-          ),
-        );
-      },
+      errorBuilder: (context, error, stack) => fallback,
     );
   }
 
-  // ── LOGS: "Breaking"-style featured card with a real photo background ───
-  Widget _buildFeaturedLogCard(Map<String, dynamic> entry) {
-    final categoryColor = entry['categoryColor'] as Color? ?? primaryOrange;
-    final category = entry['category'] as String? ?? 'Log';
-    final title = entry['title'] as String? ?? 'Walang pamagat';
-    final source = entry['source'] as String? ?? 'EnergyWatch PH';
-    final timestamp = entry['timestamp'] as String? ?? '';
+  Widget _buildNewsContent() {
+    if (_newsItems.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 32),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Center(
+          child: _isLoadingNews
+              ? const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Text(
+                  'No news yet',
+                  style: TextStyle(
+                    color: Colors.grey[500],
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+        ),
+      );
+    }
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(24),
-      child: Stack(
-        children: [
-          _networkImage(
-            entry['image'] as String?,
-            width: double.infinity,
-            height: 220,
-          ),
-          // Bottom gradient scrim so the white text stays legible.
-          Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    Colors.black.withValues(alpha: 0.0),
-                    Colors.black.withValues(alpha: 0.75),
-                  ],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  stops: const [0.3, 1.0],
+    return Column(
+      children: [
+        _buildFeaturedNewsCard(_newsItems.first),
+        const SizedBox(height: 20),
+        for (final item in _newsItems.skip(1)) _buildNewsListItem(item),
+      ],
+    );
+  }
+
+  // ── NEWS: featured card (pinned or newest), photo or drawn background ───
+  Widget _buildFeaturedNewsCard(Map<String, dynamic> item) {
+    final kind = item['kind'] as String?;
+
+    return GestureDetector(
+      onTap: () => _showNewsDetail(item),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: Stack(
+          children: [
+            _networkImage(
+              item['image_url'] as String?,
+              width: double.infinity,
+              height: 220,
+              fallback: _buildNewsArt(
+                item,
+                width: double.infinity,
+                height: 220,
+              ),
+            ),
+            // Bottom gradient scrim so the white text stays legible.
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      Colors.black.withValues(alpha: 0.0),
+                      Colors.black.withValues(alpha: 0.75),
+                    ],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    stops: const [0.3, 1.0],
+                  ),
                 ),
               ),
             ),
-          ),
-          // Category chip, top-left.
-          Positioned(
-            top: 14,
-            left: 14,
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration:
-                        BoxDecoration(color: categoryColor, shape: BoxShape.circle),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    category,
-                    style: TextStyle(
-                      color: textDark,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+            // Category chip, top-left.
+            Positioned(
+              top: 14,
+              left: 14,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (item['pinned'] == true) ...[
+                      Icon(Icons.push_pin_rounded, color: textDark, size: 11),
+                      const SizedBox(width: 4),
+                    ] else ...[
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: _newsColor(kind),
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    Text(
+                      _newsLabel(kind),
+                      style: TextStyle(
+                        color: textDark,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
+                  ],
+                ),
+              ),
+            ),
+            // Title + byline, bottom-left.
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 16,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item['title_tl'] as String? ?? '',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      height: 1.25,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  _buildByline(
+                    source: item['source_name'] as String? ?? 'GRID',
+                    timestamp: _newsDate(item),
+                    light: true,
                   ),
                 ],
               ),
             ),
-          ),
-          // Title + byline, bottom-left.
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 16,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
-                    height: 1.25,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                _buildByline(
-                  source: source,
-                  timestamp: timestamp,
-                  light: true,
-                ),
-              ],
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
-  // ── Small circular source badge + name + verified check + timestamp ─────
+  // ── Small circular source badge + name + date ──────────────────────────
   Widget _buildByline({
     required String source,
     required String timestamp,
@@ -895,102 +1232,294 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen> {
             fontWeight: FontWeight.w700,
           ),
         ),
-        const SizedBox(width: 3),
-        Icon(Icons.verified_rounded,
-            color: light ? Colors.white : primaryOrange, size: 13),
-        const SizedBox(width: 6),
-        Text('·', style: TextStyle(color: mutedColor, fontSize: 11)),
-        const SizedBox(width: 6),
-        Text(
-          timestamp,
-          style: TextStyle(
-            color: mutedColor,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
+        if (timestamp.isNotEmpty) ...[
+          const SizedBox(width: 6),
+          Text('·', style: TextStyle(color: mutedColor, fontSize: 11)),
+          const SizedBox(width: 6),
+          Text(
+            timestamp,
+            style: TextStyle(
+              color: mutedColor,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
 
-  // ── LOGS: article row — square photo, category tag, title, byline ───────
-  Widget _buildLogListItem(Map<String, dynamic> entry) {
-    final categoryColor = entry['categoryColor'] as Color? ?? primaryOrange;
-    final category = entry['category'] as String? ?? 'Log';
-    final title = entry['title'] as String? ?? 'Walang pamagat';
-    final source = entry['source'] as String? ?? 'EnergyWatch PH';
-    final timestamp = entry['timestamp'] as String? ?? '';
+  // ── NEWS: article row — square image or drawn tile, tag, title, byline ──
+  Widget _buildNewsListItem(Map<String, dynamic> item) {
+    final kind = item['kind'] as String?;
+    final categoryColor = _newsColor(kind);
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 14.0),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.03),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(14),
-            child: _networkImage(
-              entry['image'] as String?,
-              width: 72,
-              height: 72,
+    return GestureDetector(
+      onTap: () => _showNewsDetail(item),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 14.0),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.03),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
             ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: categoryColor.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(6),
+          ],
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: _networkImage(
+                item['image_url'] as String?,
+                width: 72,
+                height: 72,
+                fallback: _buildNewsArt(item, width: 72, height: 72),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: categoryColor.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      _newsLabel(kind),
+                      style: TextStyle(
+                        color: categoryColor,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
                   ),
-                  child: Text(
-                    category.toUpperCase(),
+                  const SizedBox(height: 8),
+                  Text(
+                    item['title_tl'] as String? ?? '',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: categoryColor,
-                      fontSize: 9.5,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.3,
+                      color: textDark,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w700,
+                      height: 1.3,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _buildByline(
+                    source: item['source_name'] as String? ?? 'GRID',
+                    timestamp: _newsDate(item),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── NEWS: full item in a bottom sheet, with a link to the source ───────
+  void _showNewsDetail(Map<String, dynamic> item) {
+    final kind = item['kind'] as String?;
+    final imageUrl = item['image_url'] as String?;
+    final imageCredit = item['image_credit'] as String?;
+    final body = item['body_tl'] as String?;
+    final adminNote = item['admin_note_tl'] as String?;
+    final attribution = item['attribution_tl'] as String?;
+    final sourceUrl = item['source_url'] as String?;
+    final sourceName = item['source_name'] as String? ?? 'Meralco';
+    final date = _newsDate(item);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) => DraggableScrollableSheet(
+        initialChildSize: 0.85,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => SingleChildScrollView(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(24, 16, 24, 36),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 20),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: _networkImage(
+                  imageUrl,
+                  width: double.infinity,
+                  height: 180,
+                  fallback: _buildNewsArt(
+                    item,
+                    width: double.infinity,
+                    height: 180,
+                    factsTop: 58,
+                  ),
+                ),
+              ),
+              if (imageUrl != null && imageCredit != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  imageCredit,
+                  style: TextStyle(color: Colors.grey[500], fontSize: 11.5),
+                ),
+              ],
+              const SizedBox(height: 18),
+              Text(
+                _newsLabel(kind),
+                style: TextStyle(
+                  color: _newsColor(kind),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                item['title_tl'] as String? ?? '',
+                style: TextStyle(
+                  color: textDark,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  height: 1.2,
+                  letterSpacing: -0.4,
+                ),
+              ),
+              if (date.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  date,
+                  style: TextStyle(
+                    color: Colors.grey[500],
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+              if (body != null) ...[
+                const SizedBox(height: 16),
+                Text(
+                  body,
+                  style: TextStyle(
+                    color: Colors.grey[800],
+                    fontSize: 15,
+                    height: 1.5,
+                  ),
+                ),
+              ],
+              if (adminNote != null) ...[
+                const SizedBox(height: 16),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: primaryOrange.withValues(alpha: 0.07),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.bolt_rounded, color: primaryOrange, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          adminNote,
+                          style: TextStyle(
+                            color: Colors.grey[800],
+                            fontSize: 14,
+                            height: 1.45,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              if (attribution != null) ...[
+                const SizedBox(height: 16),
+                Text(
+                  attribution,
+                  style: TextStyle(
+                    color: Colors.grey[500],
+                    fontSize: 12.5,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+              if (sourceUrl != null) ...[
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  height: 54,
+                  child: FilledButton.icon(
+                    onPressed: () => _openSource(sourceUrl),
+                    icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                    label: Text(
+                      'Basahin sa $sourceName',
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: textDark,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(100),
+                      ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: textDark,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w700,
-                    height: 1.3,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _buildByline(
-                  source: source,
-                  timestamp: timestamp,
-                ),
               ],
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
+  }
+
+  Future<void> _openSource(String url) async {
+    final uri = Uri.tryParse(url);
+    var opened = false;
+    if (uri != null) {
+      try {
+        opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } catch (e) {
+        debugPrint("🔴 ERROR OPENING SOURCE: $e");
+      }
+    }
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't open the link.")),
+      );
+    }
   }
 
   // ── WEEKLY BAR CHART (backed by data from the weekly-comparison endpoint,

@@ -16,6 +16,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:math';
 import 'main.dart';
 
+// Bumped by main.dart when a `device` push is tapped: the dashboard shows
+// the offline sheet if the GRID device is still offline.
+final ValueNotifier<int> deviceStatusRequest = ValueNotifier(0);
+
 // Wrapper class to store both the telemetry reading and its exact reception time
 class ChartDataPoint {
   final DateTime timestamp;
@@ -75,6 +79,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // Set when the device drops while the splash is still up; the sheet is
   // shown once the splash clears instead of landing on top of it.
   bool _offlineSheetQueued = false;
+  // True while the offline sheet is up, so a push tap can't stack another.
+  bool _offlineSheetOpen = false;
 
   // --- FIRST-LOAD READINESS ---
   // The dashboard is built behind the splash; the splash stays up until
@@ -202,6 +208,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     testModeNotifier.addListener(_onTestModeChanged);
     nicknameNotifier.addListener(_onNicknameChanged);
     splashDoneNotifier.addListener(_onSplashDone);
+    deviceStatusRequest.addListener(_onDeviceStatusRequest);
 
     if (_isTestMode) {
       _startDemoMode();
@@ -240,6 +247,11 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   void _onSplashDone() {
     if (!splashDoneNotifier.value || !_offlineSheetQueued) return;
     _offlineSheetQueued = false;
+    if (mounted && !_isIotConnected) _showNoConnectionDialog();
+  }
+
+  // When the device is back online the "Connected" badge already says so.
+  void _onDeviceStatusRequest() {
     if (mounted && !_isIotConnected) _showNoConnectionDialog();
   }
 
@@ -852,7 +864,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   }
 
   void _showNoConnectionDialog() {
-    if (!mounted) return;
+    if (!mounted || _offlineSheetOpen) return;
+    _offlineSheetOpen = true;
 
     final now = DateTime.now();
     final lastSeen = _lastLiveDataTime;
@@ -1118,7 +1131,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
           ),
         ),
       ),
-    );
+    ).whenComplete(() => _offlineSheetOpen = false);
   }
 
   // --- METRICS EXPLAINER ---
@@ -1300,6 +1313,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     testModeNotifier.removeListener(_onTestModeChanged);
     nicknameNotifier.removeListener(_onNicknameChanged);
     splashDoneNotifier.removeListener(_onSplashDone);
+    deviceStatusRequest.removeListener(_onDeviceStatusRequest);
     super.dispose();
   }
 

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
 
@@ -23,12 +24,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   int _aboutTapCount = 0;
   bool _devModeUnlocked = false;
 
+  // Read from the installed app, i.e. pubspec's `version:` plus the build
+  // number stamped by tool/build.ps1.
+  String _versionLabel = '…';
+
   @override
   void initState() {
     super.initState();
     _nickname = nicknameNotifier.value;
     _nicknameController = TextEditingController(text: _nickname);
     _testMode = testModeNotifier.value;
+    PackageInfo.fromPlatform().then((info) {
+      if (!mounted) return;
+      setState(() => _versionLabel =
+          '${info.version} (build ${info.buildNumber}) · Thesis Prototype');
+    });
   }
 
   @override
@@ -146,7 +156,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: _buildAboutRow(
                 icon: Icons.info_outline,
                 label: 'Version',
-                value: '1.0.0 (Thesis Prototype)',
+                value: _versionLabel,
               ),
             ),
             const Divider(height: 24),
