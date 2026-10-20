@@ -1,12 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
+import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
+import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:http/http.dart' as http;
-import 'package:intl/intl.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 import 'package:lottie/lottie.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:math';
 import 'main.dart';
 
@@ -25,7 +31,7 @@ class Dashboard extends StatefulWidget {
   State<Dashboard> createState() => _DashboardState();
 }
 
-class _DashboardState extends State<Dashboard> {
+class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // Firebase Subscription (live feed cards)
   StreamSubscription<DatabaseEvent>? _dbSubscription;
 
@@ -91,9 +97,72 @@ class _DashboardState extends State<Dashboard> {
   // reading for "today", otherwise the sum of that day's hourly buckets.
   double get _displayedTotal {
     if (_isTodaySelected) return _cumulativeEnergy;
-    if (_hourlyKwh.isEmpty) return 0.0;
-    return _hourlyKwh.values.fold(0.0, (sum, v) => sum + v);
+    return _hourlySum;
   }
+
+  double get _hourlySum => _hourlyKwh.values.fold(0.0, (sum, v) => sum + v);
+
+  // kWh used from midnight through the end of [hour] (only real readings).
+  double _cumulativeThrough(int hour) => _hourlyKwh.entries
+      .where((e) => e.key <= hour)
+      .fold(0.0, (sum, e) => sum + e.value);
+
+  static bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  // --- HOURLY CHART: scrub + swipe ---
+  // The header chart is painted by _HourlyChartPainter. Holding a finger on
+  // it scrubs hour by hour (the header cards re-read for that hour); a
+  // horizontal swipe moves to the previous/next day. The line morphs between
+  // _curveFrom and _curveTo whenever the data changes, live or by day.
+  _DayCurve _curveFrom = _DayCurve.empty;
+  _DayCurve _curveTo = _DayCurve.empty;
+  late final AnimationController _morph = AnimationController(
+    vsync: this,
+    value: 1,
+  );
+  late final CurvedAnimation _morphCurve = CurvedAnimation(
+    parent: _morph,
+    curve: Curves.easeOutCubic,
+  );
+  // Cursor position in hours (unbounded so the release spring can settle
+  // past the end) and its visibility.
+  late final AnimationController _cursorX = AnimationController.unbounded(
+    vsync: this,
+  );
+  late final AnimationController _cursorFade = AnimationController(vsync: this);
+  // Horizontal offset of the curve, in pixels, while it follows a swipe or
+  // slides between days.
+  late final AnimationController _swipeX = AnimationController.unbounded(
+    vsync: this,
+  );
+  static const _cursorSpring = SpringDescription(
+    mass: 1,
+    stiffness: 300,
+    damping: 30,
+  );
+  static const _swipeSpring = SpringDescription(
+    mass: 1,
+    stiffness: 420,
+    damping: 36,
+  );
+
+  int? _scrubHour; // hour under the finger; null when not scrubbing
+  Timer? _peekTimer; // releases a tap-to-peek after a moment
+  double _chartWidth = 0;
+  bool _dragging = false;
+  bool _reduceMotion = false;
+
+  // Day-change choreography: the old curve slides out (_exitDone), the new
+  // day's data lands (_arrivedCurve), then the new curve slides in.
+  int _dayDirection = 0; // -1 = earlier day, 1 = later day
+  bool _awaitingDay = false;
+  bool _exitDone = true;
+  _DayCurve? _arrivedCurve;
+
+  // First-run hint on the chart, hidden for good after the first scrub.
+  static const String _scrubHintKey = 'dashboard_scrub_hint_seen';
+  bool _showScrubHint = false;
 
   // State for collapsible Advanced Metrics
   bool _isAdvancedMetricsExpanded = false;
@@ -141,6 +210,26 @@ class _DashboardState extends State<Dashboard> {
       _attachTodayHistoryListener();
       _setupSyncListener();
     }
+
+    _loadScrubHint();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+  }
+
+  Future<void> _loadScrubHint() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _showScrubHint = !(prefs.getBool(_scrubHintKey) ?? false));
+  }
+
+  void _dismissScrubHint() {
+    if (!_showScrubHint) return;
+    setState(() => _showScrubHint = false);
+    SharedPreferences.getInstance().then((p) => p.setBool(_scrubHintKey, true));
   }
 
   void _onNicknameChanged() {
@@ -194,6 +283,7 @@ class _DashboardState extends State<Dashboard> {
       _cumulativeEnergy = 145.0;
       _estimatedCostFromDevice = _cumulativeEnergy * 12.0;
     });
+    _retargetCurve();
 
     _demoTimer?.cancel();
     _demoTimer = Timer.periodic(const Duration(seconds: 3), (_) {
@@ -234,10 +324,14 @@ class _DashboardState extends State<Dashboard> {
           ChartDataPoint(timestamp: timestamp, value: _currentVoltage),
         );
 
-        final currentHour = DateTime.now().hour;
-        _hourlyKwh[currentHour] = (_hourlyKwh[currentHour] ?? 0.1) + 0.002;
-        _lastHistoryUpdateTime = DateTime.now();
+        // Fake hours only belong to today; leave a viewed past day alone.
+        if (_isTodaySelected) {
+          final currentHour = DateTime.now().hour;
+          _hourlyKwh[currentHour] = (_hourlyKwh[currentHour] ?? 0.1) + 0.002;
+          _lastHistoryUpdateTime = DateTime.now();
+        }
       });
+      if (_isTodaySelected) _retargetCurve();
     });
   }
 
@@ -262,7 +356,7 @@ class _DashboardState extends State<Dashboard> {
                 double.tryParse(data['voltage'].toString()) ?? 0.0;
             _estimatedCostFromDevice =
                 double.tryParse(data['estimated_cost'].toString()) ??
-                    _estimatedCostFromDevice;
+                _estimatedCostFromDevice;
 
             final timestamp = DateTime.now();
 
@@ -360,6 +454,7 @@ class _DashboardState extends State<Dashboard> {
           _todayTotalKwh = null;
           _isLoadingHistory = false;
         });
+        _retargetCurve();
         return;
       }
       try {
@@ -396,9 +491,11 @@ class _DashboardState extends State<Dashboard> {
           _historyError = null;
           _lastHistoryUpdateTime = DateTime.now();
         });
+        _retargetCurve();
       } catch (e) {
         debugPrint("🔴 ERROR PARSING HOURLY HISTORY: $e");
         setState(() => _isLoadingHistory = false);
+        _retargetCurve();
       }
     });
   }
@@ -420,7 +517,9 @@ class _DashboardState extends State<Dashboard> {
           .get(Uri.parse('$_apiBaseUrl/history/$dateStr'))
           .timeout(const Duration(seconds: 10));
 
-      if (!mounted) return;
+      // Swiping quickly fires several fetches; only the day still on screen
+      // may land.
+      if (!mounted || !_isSameDay(date, _selectedDate)) return;
 
       if (response.statusCode == 200) {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
@@ -449,14 +548,17 @@ class _DashboardState extends State<Dashboard> {
           _historyError = 'No data for $dateStr';
         });
       }
+      _retargetCurve();
     } catch (e) {
       debugPrint("🔴 ERROR FETCHING HISTORY: $e");
-      if (!mounted) return;
+      if (!mounted || !_isSameDay(date, _selectedDate)) return;
       setState(() {
+        _hourlyKwh = {};
         _isLoadingHistory = false;
         _pastDayEstimatedCost = null;
         _historyError = 'Failed to load history';
       });
+      _retargetCurve();
     }
   }
 
@@ -479,111 +581,231 @@ class _DashboardState extends State<Dashboard> {
       },
     );
 
-    if (picked == null) return;
-
-    setState(() => _selectedDate = picked);
-
-    final now = DateTime.now();
-    final isPickedToday =
-        picked.year == now.year &&
-        picked.month == now.month &&
-        picked.day == now.day;
-
-    if (isPickedToday) {
-      _attachTodayHistoryListener();
-    } else {
-      _fetchHistoryForDate(picked);
-    }
+    if (picked == null || _isSameDay(picked, _selectedDate)) return;
+    _transitionToDate(picked, picked.isBefore(_selectedDate) ? -1 : 1);
   }
 
-  // --- HOURLY CHART: date navigation (placeholder UI, arrows in header) ---
+  // --- HOURLY CHART: step one day back/forward (header arrows, swipes) ---
   void _changeDate(int dayOffset) {
     final newDate = _selectedDate.add(Duration(days: dayOffset));
     if (newDate.isAfter(DateTime.now())) return; // no future dates
+    _transitionToDate(newDate, dayOffset.sign);
+  }
 
-    setState(() => _selectedDate = newDate);
+  // Every day change (swipe, arrows, calendar) runs the same move: the
+  // current curve slides out toward the gesture while the new day loads,
+  // then slides in from the other side, reshaping into the new day.
+  Future<void> _transitionToDate(DateTime date, int direction) async {
+    _releaseScrub();
+    setState(() {
+      _selectedDate = date;
+      _dayDirection = direction;
+    });
+    _awaitingDay = true;
+    _exitDone = _reduceMotion;
+    _arrivedCurve = null;
 
-    final now = DateTime.now();
-    final isNewDateToday =
-        newDate.year == now.year &&
-        newDate.month == now.month &&
-        newDate.day == now.day;
-
-    if (isNewDateToday) {
+    if (_isSameDay(date, DateTime.now())) {
       _attachTodayHistoryListener();
     } else {
-      _fetchHistoryForDate(newDate);
+      _fetchHistoryForDate(date);
     }
+    if (_reduceMotion) return;
+
+    try {
+      await _swipeX
+          .animateTo(
+            -direction * _chartWidth * 0.3,
+            duration: const Duration(milliseconds: 170),
+            curve: Curves.easeIn,
+          )
+          .orCancel;
+    } on TickerCanceled {
+      // A new drag caught the curve mid-exit; its release decides the rest.
+    }
+    _exitDone = true;
+    _enterDay();
   }
 
-  List<FlSpot> _generateHourlySpots() {
-    if (_hourlyKwh.isEmpty) return const [];
-    final hours = _hourlyKwh.keys.toList()..sort();
-    return hours.map((h) => FlSpot(h.toDouble(), _hourlyKwh[h]!)).toList();
-  }
-
-  // Muted lead-in/lead-out drawn in the chart's side margins (x < 0 and
-  // x > 24) so the hourly line runs edge to edge from the baseline. These
-  // points have no hour, so touches ignore them. Each side is only drawn
-  // when the real data reaches that edge (first reading by 1 AM, last from
-  // 11 PM), so days with offline gaps near midnight aren't bridged; for
-  // today the line stops at the latest hour.
-  static const Color _fillerLineColor = Color(0x99FFE3C4);
-  static const double _chartMinX = -4;
-  static const double _chartMaxX = 28;
-
-  List<FlSpot> _generateFillerSpots() {
-    final real = _generateHourlySpots();
-    if (real.isEmpty) return const [];
-    // Seeded by the selected day so the ridges stay put across rebuilds.
-    final rng = Random(
-      _selectedDate.year * 10000 +
-          _selectedDate.month * 100 +
-          _selectedDate.day,
+  // Slides the arrived day in, once the old one is out and no finger is on
+  // the chart.
+  void _enterDay() {
+    if (!mounted || _dragging || !_exitDone || _arrivedCurve == null) return;
+    final next = _arrivedCurve!;
+    _awaitingDay = false;
+    _arrivedCurve = null;
+    _morphTo(next, const Duration(milliseconds: 560));
+    if (_reduceMotion) {
+      _swipeX.value = 0;
+      return;
+    }
+    _swipeX.value = _dayDirection * _chartWidth * 0.22;
+    _swipeX.animateTo(
+      0,
+      duration: const Duration(milliseconds: 460),
+      curve: Curves.easeOutCubic,
     );
-    final spots = <FlSpot>[];
-    if (real.first.x <= 1) {
-      spots.addAll([
-        ..._fillerRidge(_chartMinX, 0, real.first.y, rng),
-        real.first,
-      ]);
-    }
-    if (real.last.x >= 23) {
-      if (spots.isNotEmpty) spots.add(FlSpot.nullSpot);
-      spots
-        ..add(real.last)
-        ..addAll(_fillerRidge(_chartMaxX, 24, real.last.y, rng).reversed);
-    }
-    return spots;
   }
 
-  // Low, slightly bumpy run from the baseline at [edgeX] toward [innerX],
-  // climbing gently so it meets the real line at [anchorY] without one long
-  // diagonal. Points are ordered from the edge inward.
-  List<FlSpot> _fillerRidge(
-    double edgeX,
-    double innerX,
-    double anchorY,
-    Random rng,
-  ) {
-    const step = 0.5;
-    final span = innerX - edgeX;
-    final n = (span.abs() / step).round();
-    final points = [FlSpot(edgeX, 0)];
-    for (var i = 1; i < n; i++) {
-      final t = i / n;
-      final level = 0.12 + 0.4 * t * t;
-      final jitter = 0.7 + 0.6 * rng.nextDouble();
-      points.add(FlSpot(edgeX + span * t, anchorY * level * jitter));
+  // Called whenever `_hourlyKwh` changes: live updates reshape the line in
+  // place; a pending day change hands the new curve to the slide-in.
+  void _retargetCurve() {
+    if (!mounted) return;
+    final next = _DayCurve.fromHourly(_hourlyKwh, _selectedDate);
+    if (_awaitingDay) {
+      _arrivedCurve = next;
+      _enterDay();
+      return;
     }
-    return points;
+    if (next.sameShape(_curveTo)) return;
+    _morphTo(next, Duration(milliseconds: _curveTo.isEmpty ? 600 : 320));
   }
 
-  double _getHourlyMaxY() {
-    if (_hourlyKwh.isEmpty) return 1.0;
-    final maxVal = _hourlyKwh.values.reduce((a, b) => a > b ? a : b);
-    return maxVal == 0 ? 1.0 : maxVal * 1.3;
+  void _morphTo(_DayCurve next, Duration duration) {
+    setState(() {
+      _curveFrom = _DayCurve.lerp(_curveFrom, _curveTo, _morphCurve.value);
+      _curveTo = next;
+    });
+    if (_reduceMotion) {
+      _morph.value = 1;
+      return;
+    }
+    _morph.duration = duration;
+    _morph.forward(from: 0);
   }
+
+  // --- HOURLY CHART: scrubbing ---
+  void _scrubAt(double dx, {bool begin = false}) {
+    final curve = _curveTo;
+    if (curve.isEmpty || _awaitingDay || _chartWidth <= 0) return;
+    const span = _HourlyChartPainter.maxX - _HourlyChartPainter.minX;
+    final x = dx / _chartWidth * span + _HourlyChartPainter.minX;
+    final hour = x
+        .round()
+        .clamp(curve.first.ceil(), curve.last.floor())
+        .toInt();
+
+    if (begin) {
+      _peekTimer?.cancel();
+      _cursorX.value = hour.toDouble();
+      if (_reduceMotion) {
+        _cursorFade.value = 1;
+      } else {
+        _cursorFade.animateTo(
+          1,
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOut,
+        );
+      }
+      _dismissScrubHint();
+    }
+    if (hour == _scrubHour) return;
+
+    HapticFeedback.selectionClick();
+    if (!begin) {
+      if (_reduceMotion) {
+        _cursorX.value = hour.toDouble();
+      } else {
+        _cursorX.animateTo(
+          hour.toDouble(),
+          duration: const Duration(milliseconds: 110),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    }
+    setState(() => _scrubHour = hour);
+  }
+
+  // A tap shows that hour for a moment, for anyone who taps instead of
+  // holding.
+  void _peekAt(double dx) {
+    _scrubAt(dx, begin: true);
+    if (_scrubHour == null) return;
+    _peekTimer = Timer(const Duration(milliseconds: 1800), _releaseScrub);
+  }
+
+  // Lifting the finger hands the cards back to the day's totals while the
+  // cursor glides back to the latest reading and fades.
+  void _releaseScrub() {
+    _peekTimer?.cancel();
+    if (_scrubHour == null) return;
+    setState(() => _scrubHour = null);
+    if (_reduceMotion) {
+      _cursorFade.value = 0;
+      return;
+    }
+    final rest = _curveTo.isEmpty ? _cursorX.value : _curveTo.last;
+    _cursorX.animateWith(
+      SpringSimulation(_cursorSpring, _cursorX.value, rest, 0),
+    );
+    _cursorFade.animateTo(
+      0,
+      duration: const Duration(milliseconds: 520),
+      curve: Curves.easeInCubic,
+    );
+  }
+
+  // --- HOURLY CHART: swiping between days ---
+  void _onSwipeStart(DragStartDetails details) {
+    _releaseScrub();
+    _dragging = true;
+    _swipeX.stop();
+  }
+
+  void _onSwipeUpdate(DragUpdateDetails details) {
+    final delta = details.primaryDelta ?? 0;
+    final next = _swipeX.value + delta;
+    // Dragging left asks for the next day. On today there is none, so the
+    // curve only gives a little, like pulling against a stop.
+    if (next < 0 && _isTodaySelected) {
+      _swipeX.value = max(_swipeX.value + delta * 0.15, -_chartWidth * 0.08);
+    } else {
+      _swipeX.value = _swipeX.value + delta * 0.6;
+    }
+  }
+
+  void _onSwipeEnd(DragEndDetails details) {
+    _dragging = false;
+    final x = _swipeX.value;
+    final velocity = details.primaryVelocity ?? 0;
+    final direction = x > 0 ? -1 : 1; // dragged right → earlier day
+    final flung = velocity.abs() > 550 && velocity.sign == x.sign;
+    final canMove = direction < 0 || !_isTodaySelected;
+
+    if (x != 0 && canMove && (x.abs() > _chartWidth * 0.12 || flung)) {
+      HapticFeedback.lightImpact();
+      _transitionToDate(
+        _selectedDate.add(Duration(days: direction)),
+        direction,
+      );
+      return;
+    }
+    if (_awaitingDay && _arrivedCurve != null) {
+      _enterDay();
+      return;
+    }
+    if (_reduceMotion) {
+      _swipeX.value = 0;
+      return;
+    }
+    _swipeX.animateWith(SpringSimulation(_swipeSpring, x, 0, velocity));
+  }
+
+  // "By 4 PM" — the running total runs through the end of [hour]. The hour
+  // still filling up today reads as of the latest update instead.
+  String _byLabel(int hour) {
+    if (hour == _liveHour && _lastHistoryUpdateTime != null) {
+      return 'By ${DateFormat('h:mm a').format(_lastHistoryUpdateTime!)}';
+    }
+    final end = hour + 1;
+    if (end == 24) return 'By midnight';
+    if (end == 12) return 'By noon';
+    return 'By ${_formatHourLabel(end.toDouble())}';
+  }
+
+  // Today's latest hour, which is still filling up; null on past days.
+  int? get _liveHour =>
+      _isTodaySelected && !_curveTo.isEmpty ? _curveTo.last.toInt() : null;
 
   // --- IOT CONNECTION: real-time listener on the root-level `sync` field ---
   // `sync == false` → device reported it's offline, show the disconnected
@@ -634,7 +856,9 @@ class _DashboardState extends State<Dashboard> {
 
     final now = DateTime.now();
     final lastSeen = _lastLiveDataTime;
-    final downtime = lastSeen != null ? now.difference(lastSeen) : Duration.zero;
+    final downtime = lastSeen != null
+        ? now.difference(lastSeen)
+        : Duration.zero;
 
     // Kept outside the builder so the sheet remembers whether the user has
     // moved on to the restart walkthrough across route rebuilds.
@@ -1055,11 +1279,7 @@ class _DashboardState extends State<Dashboard> {
         const SizedBox(height: 6),
         Text(
           metric.description,
-          style: TextStyle(
-            fontSize: 13,
-            height: 1.5,
-            color: Colors.grey[600],
-          ),
+          style: TextStyle(fontSize: 13, height: 1.5, color: Colors.grey[600]),
         ),
       ],
     );
@@ -1071,6 +1291,12 @@ class _DashboardState extends State<Dashboard> {
     _historySubscription?.cancel();
     _syncSubscription?.cancel();
     _demoTimer?.cancel();
+    _peekTimer?.cancel();
+    _morphCurve.dispose();
+    _morph.dispose();
+    _cursorX.dispose();
+    _cursorFade.dispose();
+    _swipeX.dispose();
     testModeNotifier.removeListener(_onTestModeChanged);
     nicknameNotifier.removeListener(_onNicknameChanged);
     splashDoneNotifier.removeListener(_onSplashDone);
@@ -1146,8 +1372,38 @@ class _DashboardState extends State<Dashboard> {
     // Get total screen height for our 70% calculation
     final screenHeight = MediaQuery.of(context).size.height;
 
-    final double chartMaxY = _getHourlyMaxY();
-    final double chartMidY = chartMaxY / 2;
+    // While scrubbing, the header cards re-read for the hour under the
+    // finger: the running total so far, and that total's share of the day.
+    final int? scrubHour = _scrubHour;
+    final bool scrubbing = scrubHour != null;
+    final double leftValue = scrubbing
+        ? _cumulativeThrough(scrubHour)
+        : _displayedTotal;
+    final int sharePercent = scrubbing && _hourlySum > 0
+        ? (_cumulativeThrough(scrubHour) / _hourlySum * 100).round()
+        : 0;
+    final String dateLabel = _isTodaySelected
+        ? 'Today'
+        : DateFormat('EEE MMM d').format(_selectedDate);
+    final Duration swapDuration = _reduceMotion
+        ? Duration.zero
+        : const Duration(milliseconds: 180);
+    const headerValueStyle = TextStyle(
+      fontSize: 28,
+      fontWeight: FontWeight.w800,
+      color: Colors.white,
+      letterSpacing: -0.5,
+    );
+    const headerUnitStyle = TextStyle(
+      fontSize: 13,
+      color: Colors.white,
+      fontWeight: FontWeight.w600,
+    );
+    final headerLabelStyle = TextStyle(
+      fontSize: 13,
+      color: Colors.white.withValues(alpha: 0.9),
+      fontWeight: FontWeight.w600,
+    );
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -1157,555 +1413,325 @@ class _DashboardState extends State<Dashboard> {
           children: [
             // --- HEADER SECTION ---
             Container(
-  height: screenHeight * 0.70,
-  width: double.infinity,
-  color: topCardColor,
-  child: SafeArea(
-    bottom: false,
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 1. Top Bar: Title (Left) & Date Navigator Pill (Right)
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Text(
-                    _nickname,
-                    style: const TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                      letterSpacing: -0.5,
-                    ),
-                  ),
-                  _Glass(
-                    radius: 24,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        GestureDetector(
-                          onTap: () => _changeDate(-1),
-                          child: const Icon(
-                            Icons.chevron_left,
-                            color: Colors.white,
-                            size: 18,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        GestureDetector(
-                          onTap: () => _pickDate(context),
-                          child: Text(
-                            _isTodaySelected
-                                ? 'Today'
-                                : DateFormat('EEE MMM d').format(_selectedDate),
-                            style: const TextStyle(
-                              fontSize: 14,
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        GestureDetector(
-                          onTap: _isTodaySelected ? null : () => _changeDate(1),
-                          child: Icon(
-                            Icons.chevron_right,
-                            color: Colors.white.withValues(
-                              alpha: _isTodaySelected ? 0.3 : 1.0,
-                            ),
-                            size: 18,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 16),
-
-              // 2. Two Side-by-Side Metric Cards
-              Row(
-                children: [
-                  // Left Card: Total Used
-                  Expanded(
-                    child: _Glass(
-                      radius: 20,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 18,
-                      ),
+              height: screenHeight * 0.70,
+              width: double.infinity,
+              color: topCardColor,
+              child: SafeArea(
+                bottom: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 10),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // 1. Top Bar: Title (Left) & Date Navigator Pill (Right)
                           Row(
-                            children: [
-                              const Icon(
-                                Icons.bolt_rounded,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  _isTodaySelected ? 'Total Used' : 'Total Used',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Colors.white.withValues(alpha: 0.9),
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.baseline,
-                            textBaseline: TextBaseline.alphabetic,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
                               Text(
-                                _formatWithCommas(_displayedTotal),
+                                _nickname,
                                 style: const TextStyle(
-                                  fontSize: 28,
+                                  fontSize: 24,
                                   fontWeight: FontWeight.w800,
                                   color: Colors.white,
                                   letterSpacing: -0.5,
                                 ),
                               ),
-                              const SizedBox(width: 4),
-                              const Text(
-                                'kWh',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600,
+                              _Glass(
+                                radius: 24,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    GestureDetector(
+                                      onTap: () => _changeDate(-1),
+                                      child: const Icon(
+                                        Icons.chevron_left,
+                                        color: Colors.white,
+                                        size: 18,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    GestureDetector(
+                                      onTap: () => _pickDate(context),
+                                      // The date slides the same way the chart does.
+                                      child: AnimatedSize(
+                                        duration: swapDuration,
+                                        curve: Curves.easeOutCubic,
+                                        child: AnimatedSwitcher(
+                                          duration: _reduceMotion
+                                              ? Duration.zero
+                                              : const Duration(
+                                                  milliseconds: 260,
+                                                ),
+                                          switchInCurve: Curves.easeOutCubic,
+                                          switchOutCurve: Curves.easeInCubic,
+                                          layoutBuilder: (current, previous) =>
+                                              Stack(
+                                                alignment: Alignment.center,
+                                                children: [
+                                                  ...previous,
+                                                  ?current,
+                                                ],
+                                              ),
+                                          transitionBuilder:
+                                              (child, animation) {
+                                                final incoming =
+                                                    child.key ==
+                                                    ValueKey(dateLabel);
+                                                final begin = Offset(
+                                                  (incoming ? 1 : -1) *
+                                                      _dayDirection *
+                                                      0.6,
+                                                  0,
+                                                );
+                                                return FadeTransition(
+                                                  opacity: animation,
+                                                  child: SlideTransition(
+                                                    position: Tween(
+                                                      begin: begin,
+                                                      end: Offset.zero,
+                                                    ).animate(animation),
+                                                    child: child,
+                                                  ),
+                                                );
+                                              },
+                                          child: Text(
+                                            dateLabel,
+                                            key: ValueKey(dateLabel),
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    GestureDetector(
+                                      onTap: _isTodaySelected
+                                          ? null
+                                          : () => _changeDate(1),
+                                      child: Icon(
+                                        Icons.chevron_right,
+                                        color: Colors.white.withValues(
+                                          alpha: _isTodaySelected ? 0.3 : 1.0,
+                                        ),
+                                        size: 18,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           ),
-                        ],
-                      ),
-                    ),
-                  ),
 
-                  const SizedBox(width: 12),
+                          const SizedBox(height: 16),
 
-                  // Right Card: Est. Total Bill
-                  Expanded(
-                    child: _Glass(
-                      radius: 20,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 18,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
+                          // 2. Two Side-by-Side Metric Cards
                           Row(
                             children: [
-                              const Icon(
-                                Icons.payments_rounded,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                              const SizedBox(width: 6),
+                              // Left Card: Total Used
                               Expanded(
-                                child: Text(
-                                  _isTodaySelected ? 'Est. Total Bill' : 'Total Bill',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Colors.white.withValues(alpha: 0.9),
-                                    fontWeight: FontWeight.w600,
+                                child: _Glass(
+                                  radius: 20,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 18,
                                   ),
-                                  overflow: TextOverflow.ellipsis,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.bolt_rounded,
+                                            color: Colors.white,
+                                            size: 20,
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                            child: _SwapText(
+                                              mode: scrubbing,
+                                              duration: swapDuration,
+                                              text: scrubbing
+                                                  ? _byLabel(scrubHour)
+                                                  : 'Total Used',
+                                              style: headerLabelStyle,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Row(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.baseline,
+                                        textBaseline: TextBaseline.alphabetic,
+                                        children: [
+                                          _RollingNumber(
+                                            _formatWithCommas(leftValue),
+                                            style: headerValueStyle,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          const Text(
+                                            'kWh',
+                                            style: headerUnitStyle,
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+
+                              const SizedBox(width: 12),
+
+                              // Right Card: Est. Total Bill
+                              Expanded(
+                                child: _Glass(
+                                  radius: 20,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 18,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          AnimatedSwitcher(
+                                            duration: swapDuration,
+                                            child: Icon(
+                                              scrubbing
+                                                  ? Icons.donut_large_rounded
+                                                  : Icons.payments_rounded,
+                                              key: ValueKey(scrubbing),
+                                              color: Colors.white,
+                                              size: 20,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                            child: _SwapText(
+                                              mode: scrubbing,
+                                              duration: swapDuration,
+                                              text: scrubbing
+                                                  ? 'Share of day'
+                                                  : _isTodaySelected
+                                                  ? 'Est. Total Bill'
+                                                  : 'Total Bill',
+                                              style: headerLabelStyle,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 12),
+                                      // No hourly peso data exists, so a scrubbed hour
+                                      // reads as a share of the day instead of a bill.
+                                      AnimatedSwitcher(
+                                        duration: swapDuration,
+                                        layoutBuilder: (current, previous) =>
+                                            Stack(
+                                              alignment: Alignment.centerLeft,
+                                              children: [...previous, ?current],
+                                            ),
+                                        child: scrubbing
+                                            ? Row(
+                                                key: const ValueKey('share'),
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.baseline,
+                                                textBaseline:
+                                                    TextBaseline.alphabetic,
+                                                children: [
+                                                  _RollingNumber(
+                                                    '$sharePercent',
+                                                    style: headerValueStyle,
+                                                  ),
+                                                  const SizedBox(width: 2),
+                                                  const Text(
+                                                    '%',
+                                                    style: headerUnitStyle,
+                                                  ),
+                                                ],
+                                              )
+                                            : _RollingNumber(
+                                                '₱${_formatWithCommas(_isTodaySelected ? _estimatedCostFromDevice : (_pastDayEstimatedCost ?? 0.0))}',
+                                                key: const ValueKey('bill'),
+                                                style: headerValueStyle,
+                                              ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 12),
-                          Text(
-                            '₱${_formatWithCommas(_isTodaySelected ? _estimatedCostFromDevice : (_pastDayEstimatedCost ?? 0.0))}',
-                            style: const TextStyle(
-                              fontSize: 28,
-                              fontWeight: FontWeight.w800,
-                              color: Colors.white,
-                              letterSpacing: -0.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
 
-              const SizedBox(height: 20),
+                          const SizedBox(height: 20),
 
-              // 3. Section Header Row: "Energy Usage" (Left) + Today Pill (Right)
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  const Text(
-                    'Energy Usage',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                    ),
-                  ),
-                  if (_isTodaySelected && _todayTotalKwh != null)
-                    _Glass(
-                      radius: 20,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.calendar_month_rounded,
-                            color: Colors.white,
-                            size: 16,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Today: ${_formatWithCommas(_todayTotalKwh!)} kWh',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-                    // DAILY CHART WITH SUBTLE GLOW EFFECT
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8.0),
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: Padding(
-                            padding: const EdgeInsets.only(
-                              top: 24.0,
-                              bottom: 0.0,
-                            ),
-                            child: Stack(
-                              children: [
-                                LineChart(
-                                  LineChartData(
-                                    minX: _chartMinX,
-                                    maxX: _chartMaxX,
-                                    minY: 0,
-                                    maxY: chartMaxY,
-                                    gridData: FlGridData(
-                                      show: true,
-                                      drawVerticalLine: true,
-                                      horizontalInterval: chartMidY == 0
-                                          ? 1
-                                          : chartMidY,
-                                      verticalInterval: 6,
-                                      getDrawingHorizontalLine: (value) =>
-                                          FlLine(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.2,
-                                            ),
-                                            strokeWidth: 1,
-                                          ),
-                                      getDrawingVerticalLine: (value) => FlLine(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.2,
-                                        ),
-                                        strokeWidth: 1,
-                                      ),
-                                    ),
-                                    borderData: FlBorderData(show: false),
-
-                                    // --- Tooltip: shows hour (12-hr + AM/PM) and kWh on touch ---
-                                    lineTouchData: LineTouchData(
-                                      enabled: true,
-                                      getTouchedSpotIndicator:
-                                          (barData, spotIndexes) => spotIndexes
-                                              .map(
-                                                (i) =>
-                                                    barData.color ==
-                                                        _fillerLineColor
-                                                    ? null
-                                                    : defaultTouchedIndicators(
-                                                        barData,
-                                                        [i],
-                                                      ).first,
-                                              )
-                                              .toList(),
-                                      touchTooltipData: LineTouchTooltipData(
-                                        fitInsideHorizontally: true,
-                                        fitInsideVertically: true,
-                                        getTooltipItems: (touchedSpots) {
-                                          final latestHour =
-                                              _hourlyKwh.keys.isEmpty
-                                              ? null
-                                              : _hourlyKwh.keys.reduce(
-                                                  (a, b) => a > b ? a : b,
-                                                );
-
-                                          return touchedSpots.map((spot) {
-                                            if (spot.bar.color ==
-                                                _fillerLineColor) {
-                                              return null;
-                                            }
-                                            final hour = spot.x.round();
-                                            final isLatestHour =
-                                                _isTodaySelected &&
-                                                latestHour != null &&
-                                                hour == latestHour;
-
-                                            if (isLatestHour &&
-                                                _lastHistoryUpdateTime !=
-                                                    null) {
-                                              final timeStr =
-                                                  DateFormat('h:mma')
-                                                      .format(
-                                                        _lastHistoryUpdateTime!,
-                                                      )
-                                                      .toLowerCase();
-                                              return LineTooltipItem(
-                                                'As of $timeStr\n${spot.y.toStringAsFixed(3)}kWh',
-                                                const TextStyle(
-                                                  color: Colors.white,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 12,
-                                                ),
-                                              );
-                                            }
-
-                                            return LineTooltipItem(
-                                              '${_formatHourLabel(spot.x)}\n${spot.y.toStringAsFixed(2)} kWh',
-                                              const TextStyle(
-                                                color: Colors.white,
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 12,
-                                              ),
-                                            );
-                                          }).toList();
-                                        },
-                                      ),
-                                    ),
-
-                                    extraLinesData: ExtraLinesData(
-                                      horizontalLines: [
-                                        HorizontalLine(
-                                          y: chartMidY,
-                                          color: Colors.transparent,
-                                          label: HorizontalLineLabel(
-                                            show: true,
-                                            alignment: Alignment.bottomRight,
-                                            padding: const EdgeInsets.only(
-                                              right: 4,
-                                              bottom: 4,
-                                            ),
-                                            style: TextStyle(
-                                              color: Colors.white.withValues(
-                                                alpha: 0.8,
-                                              ),
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                            labelResolver: (line) =>
-                                                chartMidY.toStringAsFixed(2),
-                                          ),
-                                        ),
-                                        HorizontalLine(
-                                          y: chartMaxY,
-                                          color: Colors.transparent,
-                                          label: HorizontalLineLabel(
-                                            show: true,
-                                            alignment: Alignment.bottomRight,
-                                            padding: const EdgeInsets.only(
-                                              right: 4,
-                                              bottom: 4,
-                                            ),
-                                            style: TextStyle(
-                                              color: Colors.white.withValues(
-                                                alpha: 0.8,
-                                              ),
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                            labelResolver: (line) =>
-                                                '${chartMaxY.toStringAsFixed(2)} kWh',
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-
-                                    titlesData: FlTitlesData(
-                                      topTitles: const AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: false,
-                                        ),
-                                      ),
-                                      leftTitles: const AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: false,
-                                        ),
-                                      ),
-                                      rightTitles: const AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: false,
-                                        ),
-                                      ),
-                                      bottomTitles: AxisTitles(
-                                        sideTitles: SideTitles(
-                                          showTitles: true,
-                                          reservedSize: 24,
-                                          interval: 6,
-                                          getTitlesWidget: (value, meta) {
-                                            String label = '';
-                                            if (value == 0) label = '12 AM';
-                                            if (value == 6) label = '6 AM';
-                                            if (value == 12) label = '12 PM';
-                                            if (value == 18) label = '6 PM';
-                                            if (value == 24) label = '12 AM';
-
-                                            if (label.isEmpty) {
-                                              return const SizedBox.shrink();
-                                            }
-
-                                            final textWidget = Text(
-                                              label,
-                                              style: TextStyle(
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.8,
-                                                ),
-                                                fontSize: 10,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            );
-
-                                            return SideTitleWidget(
-                                              meta: meta,
-                                              space: 8,
-                                              child: textWidget,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    ),
-                                    lineBarsData: [
-                                      // Filler first so the real line draws on top
-                                      LineChartBarData(
-                                        spots: _generateFillerSpots(),
-                                        isCurved: false,
-                                        color: _fillerLineColor,
-                                        barWidth: 1.5,
-                                        isStrokeCapRound: true,
-                                        dotData: const FlDotData(show: false),
-                                        belowBarData: BarAreaData(
-                                          show: true,
-                                          gradient: LinearGradient(
-                                            colors: [
-                                              Colors.white.withValues(
-                                                alpha: 0.10,
-                                              ),
-                                              Colors.white.withValues(
-                                                alpha: 0.0,
-                                              ),
-                                            ],
-                                            begin: Alignment.topCenter,
-                                            end: Alignment.bottomCenter,
-                                          ),
-                                        ),
-                                      ),
-                                      LineChartBarData(
-                                        spots: _generateHourlySpots(),
-                                        isCurved: false,
+                          // 3. Section Header Row: "Energy Usage" (Left) + Today Pill (Right)
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              const Text(
+                                'Energy Usage',
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w800,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              if (_isTodaySelected && _todayTotalKwh != null)
+                                _Glass(
+                                  radius: 20,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 6,
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(
+                                        Icons.calendar_month_rounded,
                                         color: Colors.white,
-                                        barWidth: 2.0,
-                                        isStrokeCapRound: true,
-                                        dotData: const FlDotData(show: false),
-                                        // Softened neon line aura
-                                        shadow: Shadow(
-                                          blurRadius: 4,
-                                          color: Colors.white.withValues(
-                                            alpha: 0.25,
-                                          ),
-                                          offset: Offset.zero,
-                                        ),
-                                        // Much lighter, cleaner fade underneath the bar
-                                        belowBarData: BarAreaData(
-                                          show: true,
-                                          gradient: LinearGradient(
-                                            colors: [
-                                              Colors.white.withValues(
-                                                alpha: 0.20,
-                                              ),
-                                              Colors.white.withValues(
-                                                alpha: 0.05,
-                                              ),
-                                              Colors.white.withValues(
-                                                alpha: 0.0,
-                                              ),
-                                            ],
-                                            stops: const [0.0, 0.5, 1.0],
-                                            begin: Alignment.topCenter,
-                                            end: Alignment.bottomCenter,
-                                          ),
+                                        size: 16,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        'Today: ${_formatWithCommas(_todayTotalKwh!)} kWh',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
-
-                                // Loading / empty-state overlay for the hourly chart
-                                if (_isLoadingHistory)
-                                  const Positioned.fill(
-                                    child: Center(
-                                      child: SizedBox(
-                                        height: 24,
-                                        width: 24,
-                                        child: CircularProgressIndicator(
-                                          color: Colors.white,
-                                          strokeWidth: 2,
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                else if (_hourlyKwh.isEmpty)
-                                  Positioned.fill(
-                                    child: Center(
-                                      child: Text(
-                                        _historyError ?? 'No data yet',
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(
-                                            alpha: 0.8,
-                                          ),
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            ),
+                            ],
                           ),
+                        ],
+                      ),
+                    ),
+                    // DAILY CHART — hold to read any hour, swipe for other days
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            _chartWidth = constraints.maxWidth;
+                            return _buildHourlyChart(dateLabel);
+                          },
                         ),
                       ),
                     ),
@@ -1870,6 +1896,169 @@ class _DashboardState extends State<Dashboard> {
                   ),
                   const SizedBox(height: 80),
                 ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --- HOURLY CHART ---
+  // Hold (or tap) to read any hour; swipe sideways for other days. Screen
+  // readers get the day's total and previous/next-day actions instead.
+  Widget _buildHourlyChart(String dateLabel) {
+    final bool hintVisible =
+        _showScrubHint &&
+        _hourlyKwh.isNotEmpty &&
+        !_isLoadingHistory &&
+        _scrubHour == null;
+
+    return Semantics(
+      container: true,
+      label: 'Hourly energy use, $dateLabel',
+      value: _hourlyKwh.isEmpty
+          ? 'No data'
+          : '${_formatWithCommas(_hourlySum)} kilowatt-hours',
+      customSemanticsActions: {
+        const CustomSemanticsAction(label: 'Previous day'): () =>
+            _changeDate(-1),
+        if (!_isTodaySelected)
+          const CustomSemanticsAction(label: 'Next day'): () => _changeDate(1),
+      },
+      child: RawGestureDetector(
+        behavior: HitTestBehavior.opaque,
+        gestures: {
+          // Holding still briefly starts a scrub; moving first is a swipe.
+          LongPressGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+                () => LongPressGestureRecognizer(
+                  duration: const Duration(milliseconds: 160),
+                ),
+                (r) {
+                  r
+                    ..onLongPressStart = (d) {
+                      _scrubAt(d.localPosition.dx, begin: true);
+                    }
+                    ..onLongPressMoveUpdate = (d) {
+                      _scrubAt(d.localPosition.dx);
+                    }
+                    ..onLongPressEnd = (_) => _releaseScrub();
+                },
+              ),
+          HorizontalDragGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<
+                HorizontalDragGestureRecognizer
+              >(
+                () => HorizontalDragGestureRecognizer(),
+                (r) => r
+                  ..onStart = _onSwipeStart
+                  ..onUpdate = _onSwipeUpdate
+                  ..onEnd = _onSwipeEnd
+                  ..onCancel = () => _onSwipeEnd(DragEndDetails()),
+              ),
+          TapGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+                () => TapGestureRecognizer(),
+                (r) => r..onTapUp = (d) => _peekAt(d.localPosition.dx),
+              ),
+        },
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            RepaintBoundary(
+              child: CustomPaint(
+                painter: _HourlyChartPainter(
+                  from: _curveFrom,
+                  to: _curveTo,
+                  morph: _morphCurve,
+                  swipeX: _swipeX,
+                  cursorX: _cursorX,
+                  cursorFade: _cursorFade,
+                  liveHour: _liveHour,
+                  textScaler: MediaQuery.textScalerOf(context),
+                ),
+              ),
+            ),
+
+            // Loading / empty-state overlay for the hourly chart
+            if (_isLoadingHistory)
+              const Positioned.fill(
+                top: _HourlyChartPainter.topPad,
+                child: Center(
+                  child: SizedBox(
+                    height: 24,
+                    width: 24,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  ),
+                ),
+              )
+            else if (_hourlyKwh.isEmpty)
+              Positioned.fill(
+                top: _HourlyChartPainter.topPad,
+                child: Center(
+                  child: Text(
+                    _historyError ?? 'No data yet',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.8),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+
+            // First-run hint, gone for good after the first scrub.
+            Positioned(
+              left: 16,
+              right: 16,
+              top: _HourlyChartPainter.topPad + 8,
+              child: IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity: hintVisible ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.12),
+                            blurRadius: 10,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.touch_app_rounded,
+                            size: 16,
+                            color: primaryOrange,
+                          ),
+                          const SizedBox(width: 6),
+                          const Flexible(
+                            child: Text(
+                              'Hold to see each hour · swipe for other days',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: _HourlyChartPainter.chipInk,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ],
@@ -2411,6 +2600,727 @@ class _Glass extends StatelessWidget {
           ),
           child: child,
         ),
+      ),
+    );
+  }
+}
+
+/// One day's hourly kWh line, resolved into the 24 hour slots the header
+/// chart morphs between. Missing hours inside the day are bridged straight
+/// across (the line joins neighbouring readings), and slots outside
+/// [first]–[last] hold the end values so a shorter day can stretch into a
+/// longer one.
+class _DayCurve {
+  const _DayCurve({
+    required this.values,
+    required this.present,
+    required this.first,
+    required this.last,
+    required this.maxY,
+    required this.leftRidge,
+    required this.rightRidge,
+    required this.leftEdge,
+    required this.rightEdge,
+    required this.opacity,
+  });
+
+  final List<double> values;
+  final List<bool> present; // slots holding a real reading
+  final double first; // drawn run, in hours
+  final double last;
+  final double maxY;
+  // Muted lead-in/lead-out drawn in the side margins (x < 0, x > 24) so the
+  // line runs edge to edge from the baseline: height factors of the end
+  // value, and how visible each side is (0–1).
+  final List<double> leftRidge;
+  final List<double> rightRidge;
+  final double leftEdge;
+  final double rightEdge;
+  final double opacity;
+
+  bool get isEmpty => opacity == 0;
+
+  static const List<double> _noRidge = [0, 0, 0, 0, 0, 0, 0];
+
+  static final _DayCurve empty = _DayCurve(
+    values: List.filled(24, 0.0),
+    present: List.filled(24, false),
+    first: 0,
+    last: 0,
+    maxY: 1,
+    leftRidge: _noRidge,
+    rightRidge: _noRidge,
+    leftEdge: 0,
+    rightEdge: 0,
+    opacity: 0,
+  );
+
+  factory _DayCurve.fromHourly(Map<int, double> hourly, DateTime day) {
+    final hours = hourly.keys.where((h) => h >= 0 && h < 24).toList()..sort();
+    if (hours.isEmpty) return empty;
+
+    final present = List<bool>.filled(24, false);
+    for (final h in hours) {
+      present[h] = true;
+    }
+    final values = List<double>.filled(24, 0);
+    for (var h = 0; h < 24; h++) {
+      if (present[h]) {
+        values[h] = hourly[h]!;
+        continue;
+      }
+      final prev = hours.lastWhere((k) => k < h, orElse: () => -1);
+      final next = hours.firstWhere((k) => k > h, orElse: () => -1);
+      if (prev < 0) {
+        values[h] = hourly[next]!;
+      } else if (next < 0) {
+        values[h] = hourly[prev]!;
+      } else {
+        values[h] = lerpDouble(
+          hourly[prev]!,
+          hourly[next]!,
+          (h - prev) / (next - prev),
+        )!;
+      }
+    }
+    final peak = hours.map((h) => hourly[h]!).reduce(max);
+
+    // A side's ridge only shows when the readings reach that edge (first by
+    // 1 AM, last from 11 PM), so offline gaps near midnight aren't bridged.
+    // Seeded by the day so the ridges stay put across rebuilds.
+    final rng = Random(day.year * 10000 + day.month * 100 + day.day);
+    List<double> ridge() => [
+      for (var i = 1; i < 8; i++)
+        (0.12 + 0.4 * (i / 8) * (i / 8)) * (0.7 + 0.6 * rng.nextDouble()),
+    ];
+    final hasLeft = hours.first <= 1;
+    final leftRidge = hasLeft ? ridge() : _noRidge;
+    final hasRight = hours.last >= 23;
+    final rightRidge = hasRight ? ridge() : _noRidge;
+
+    return _DayCurve(
+      values: values,
+      present: present,
+      first: hours.first.toDouble(),
+      last: hours.last.toDouble(),
+      maxY: peak == 0 ? 1 : peak * 1.3,
+      leftRidge: leftRidge,
+      rightRidge: rightRidge,
+      leftEdge: hasLeft ? 1 : 0,
+      rightEdge: hasRight ? 1 : 0,
+      opacity: 1,
+    );
+  }
+
+  double valueAt(double hour) {
+    final x = hour.clamp(0.0, 23.0);
+    final i = x.floor();
+    return lerpDouble(values[i], values[min(i + 1, 23)], x - i)!;
+  }
+
+  bool sameShape(_DayCurve other) =>
+      opacity == other.opacity &&
+      first == other.first &&
+      last == other.last &&
+      maxY == other.maxY &&
+      listEquals(values, other.values) &&
+      listEquals(present, other.present) &&
+      listEquals(leftRidge, other.leftRidge) &&
+      listEquals(rightRidge, other.rightRidge);
+
+  // The same run lying flat on the baseline, invisible: what an empty day
+  // rises from or sinks into.
+  _DayCurve _flattened() => _DayCurve(
+    values: List.filled(24, 0.0),
+    present: present,
+    first: first,
+    last: last,
+    maxY: 1,
+    leftRidge: leftRidge,
+    rightRidge: rightRidge,
+    leftEdge: leftEdge,
+    rightEdge: rightEdge,
+    opacity: 0,
+  );
+
+  static _DayCurve lerp(_DayCurve a, _DayCurve b, double t) {
+    if (t >= 1) return b;
+    if (t <= 0) return a;
+    if (a.isEmpty && b.isEmpty) return b;
+    if (a.isEmpty) a = b._flattened();
+    if (b.isEmpty) b = a._flattened();
+
+    List<double> mix(List<double> x, List<double> y) => [
+      for (var i = 0; i < x.length; i++) lerpDouble(x[i], y[i], t)!,
+    ];
+    return _DayCurve(
+      values: mix(a.values, b.values),
+      present: b.present,
+      first: lerpDouble(a.first, b.first, t)!,
+      last: lerpDouble(a.last, b.last, t)!,
+      maxY: lerpDouble(a.maxY, b.maxY, t)!,
+      leftRidge: mix(
+        a.leftEdge > 0 ? a.leftRidge : b.leftRidge,
+        b.leftEdge > 0 ? b.leftRidge : a.leftRidge,
+      ),
+      rightRidge: mix(
+        a.rightEdge > 0 ? a.rightRidge : b.rightRidge,
+        b.rightEdge > 0 ? b.rightRidge : a.rightRidge,
+      ),
+      leftEdge: lerpDouble(a.leftEdge, b.leftEdge, t)!,
+      rightEdge: lerpDouble(a.rightEdge, b.rightEdge, t)!,
+      opacity: lerpDouble(a.opacity, b.opacity, t)!,
+    );
+  }
+}
+
+/// Paints the header's hourly kWh chart on its fixed 12 AM–12 AM grid: the
+/// day's line (mid-morph while data changes), the muted ridges in the side
+/// margins, and the scrub cursor with its hour chip. While scrubbing, the
+/// line up to the cursor stays bright and the rest steps back, matching the
+/// running total the header cards show.
+class _HourlyChartPainter extends CustomPainter {
+  _HourlyChartPainter({
+    required this.from,
+    required this.to,
+    required this.morph,
+    required this.swipeX,
+    required this.cursorX,
+    required this.cursorFade,
+    required this.liveHour,
+    required this.textScaler,
+  }) : super(repaint: Listenable.merge([morph, swipeX, cursorX, cursorFade]));
+
+  // Hours run 0–24; the margins either side hold the ridges.
+  static const double minX = -4;
+  static const double maxX = 28;
+  // Room above the plot for the top scale label and the hour chip, and
+  // below it for the hour labels.
+  static const double topPad = 24;
+  static const double bottomPad = 24;
+  static const Color chipInk = Color(0xFF2B1A10);
+  static const Color _chipInkSoft = Color(0xFF6B4A35);
+  static const Color _ridgeColor = Color(0x99FFE3C4);
+  static const Color _accent = Color(0xFFF26E22);
+  static const _axisLabels = [
+    (0.0, '12 AM'),
+    (6.0, '6 AM'),
+    (12.0, '12 PM'),
+    (18.0, '6 PM'),
+    (24.0, '12 AM'),
+  ];
+
+  final _DayCurve from;
+  final _DayCurve to;
+  final Animation<double> morph;
+  final Animation<double> swipeX;
+  final Animation<double> cursorX;
+  final Animation<double> cursorFade;
+  final int? liveHour; // today's hour that is still filling up
+  final TextScaler textScaler;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final curve = _DayCurve.lerp(from, to, morph.value);
+    final plot = Rect.fromLTRB(0, topPad, size.width, size.height - bottomPad);
+    if (plot.height <= 0 || size.width <= 0) return;
+    double px(double x) => (x - minX) / (maxX - minX) * size.width;
+    double py(double y) => plot.bottom - y / curve.maxY * plot.height;
+    final fade = cursorFade.value.clamp(0.0, 1.0);
+
+    _paintGrid(canvas, size, plot, px, py, curve.maxY, fade);
+
+    // The curve follows a swipe sideways and fades as it goes.
+    final slide = swipeX.value;
+    final alpha =
+        curve.opacity *
+        (1 - (slide.abs() / (size.width * 0.3)).clamp(0.0, 1.0));
+    if (alpha > 0.005) {
+      canvas.save();
+      canvas.clipRect(Offset.zero & size);
+      canvas.translate(slide, 0);
+      _paintCurve(canvas, plot, px, py, curve, alpha, fade);
+      canvas.restore();
+    }
+
+    if (fade > 0.005 && !to.isEmpty) {
+      _paintCursor(canvas, size, plot, px, py, curve, fade);
+    }
+  }
+
+  void _paintGrid(
+    Canvas canvas,
+    Size size,
+    Rect plot,
+    double Function(double) px,
+    double Function(double) py,
+    double maxY,
+    double fade,
+  ) {
+    final grid = Paint()
+      ..color = Colors.white.withValues(alpha: 0.2)
+      ..strokeWidth = 1;
+    for (final (x, _) in _axisLabels) {
+      canvas.drawLine(
+        Offset(px(x), plot.top),
+        Offset(px(x), plot.bottom),
+        grid,
+      );
+    }
+    canvas.drawLine(
+      Offset(0, py(maxY / 2)),
+      Offset(size.width, py(maxY / 2)),
+      grid,
+    );
+
+    // Scale labels hang just under their lines at the right edge; they step
+    // back while scrubbing so the chip reads first.
+    final scaleStyle = TextStyle(
+      color: Colors.white.withValues(alpha: 0.8 * (1 - 0.7 * fade)),
+      fontSize: 10,
+      fontWeight: FontWeight.w600,
+    );
+    for (final (y, label) in [
+      (maxY / 2, (maxY / 2).toStringAsFixed(2)),
+      (maxY, '${maxY.toStringAsFixed(2)} kWh'),
+    ]) {
+      final tp = _layout(TextSpan(text: label, style: scaleStyle));
+      tp.paint(canvas, Offset(size.width - 4 - tp.width, py(y) + 2));
+      tp.dispose();
+    }
+
+    final axisStyle = TextStyle(
+      color: Colors.white.withValues(alpha: 0.8),
+      fontSize: 10,
+      fontWeight: FontWeight.bold,
+    );
+    for (final (x, label) in _axisLabels) {
+      final tp = _layout(TextSpan(text: label, style: axisStyle));
+      tp.paint(canvas, Offset(px(x) - tp.width / 2, plot.bottom + 8));
+      tp.dispose();
+    }
+  }
+
+  void _paintCurve(
+    Canvas canvas,
+    Rect plot,
+    double Function(double) px,
+    double Function(double) py,
+    _DayCurve curve,
+    double alpha,
+    double fade,
+  ) {
+    final points = <Offset>[
+      Offset(px(curve.first), py(curve.valueAt(curve.first))),
+      for (var h = curve.first.floor() + 1; h < curve.last; h++)
+        Offset(px(h.toDouble()), py(curve.values[h])),
+      if (curve.last > curve.first)
+        Offset(px(curve.last), py(curve.valueAt(curve.last))),
+    ];
+
+    final startY = curve.valueAt(curve.first);
+    final endY = curve.valueAt(curve.last);
+    final leftRidge = [
+      Offset(px(minX), plot.bottom),
+      for (var i = 1; i <= 7; i++)
+        Offset(px(minX + 0.5 * i), py(startY * curve.leftRidge[i - 1])),
+      points.first,
+    ];
+    final rightRidge = [
+      points.last,
+      for (var i = 7; i >= 1; i--)
+        Offset(px(maxX - 0.5 * i), py(endY * curve.rightRidge[i - 1])),
+      Offset(px(maxX), plot.bottom),
+    ];
+
+    final line = Path()..addPolygon(points, false);
+    final area = _areaUnder(points, plot.bottom);
+    final areaTop = points.map((p) => p.dy).reduce(min);
+    final areaRect = Rect.fromLTRB(plot.left, areaTop, plot.right, plot.bottom);
+
+    void draw(double a) {
+      if (curve.leftEdge > 0.005) {
+        _paintRidge(canvas, plot, leftRidge, a * curve.leftEdge);
+      }
+      if (curve.rightEdge > 0.005) {
+        _paintRidge(canvas, plot, rightRidge, a * curve.rightEdge);
+      }
+      if (points.length == 1) {
+        canvas.drawCircle(
+          points.first,
+          2.5,
+          Paint()..color = Colors.white.withValues(alpha: a),
+        );
+        return;
+      }
+      canvas.drawPath(
+        area,
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.white.withValues(alpha: 0.20 * a),
+              Colors.white.withValues(alpha: 0.05 * a),
+              Colors.white.withValues(alpha: 0),
+            ],
+            stops: const [0.0, 0.5, 1.0],
+          ).createShader(areaRect),
+      );
+      // Soft aura, then the line itself.
+      canvas.drawPath(
+        line,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = Colors.white.withValues(alpha: 0.25 * a)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.8),
+      );
+      canvas.drawPath(
+        line,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..color = Colors.white.withValues(alpha: a),
+      );
+    }
+
+    if (fade <= 0.005) {
+      draw(alpha);
+      return;
+    }
+    // Up to the cursor is what the running total counts; the rest of the
+    // day steps back.
+    final cut = px(cursorX.value.clamp(curve.first, curve.last));
+    canvas.save();
+    canvas.clipRect(Rect.fromLTRB(-1e4, -1e4, cut, 1e4));
+    draw(alpha);
+    canvas.restore();
+    canvas.save();
+    canvas.clipRect(Rect.fromLTRB(cut, -1e4, 1e4, 1e4));
+    draw(alpha * (1 - 0.62 * fade));
+    canvas.restore();
+  }
+
+  void _paintRidge(Canvas canvas, Rect plot, List<Offset> points, double a) {
+    final top = points.map((p) => p.dy).reduce(min);
+    canvas.drawPath(
+      _areaUnder(points, plot.bottom),
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.white.withValues(alpha: 0.10 * a),
+            Colors.white.withValues(alpha: 0),
+          ],
+        ).createShader(Rect.fromLTRB(plot.left, top, plot.right, plot.bottom)),
+    );
+    canvas.drawPath(
+      Path()..addPolygon(points, false),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..color = _ridgeColor.withValues(alpha: _ridgeColor.a * a),
+    );
+  }
+
+  void _paintCursor(
+    Canvas canvas,
+    Size size,
+    Rect plot,
+    double Function(double) px,
+    double Function(double) py,
+    _DayCurve curve,
+    double fade,
+  ) {
+    final hours = cursorX.value.clamp(curve.first, curve.last);
+    final x = px(hours);
+    final y = py(curve.valueAt(hours));
+    final hour = hours.round().clamp(0, 23);
+
+    // Chip: the hour and what it used, centred over the cursor but kept on
+    // screen. Hours with no reading say so instead of showing a bridged value.
+    final when = hour == liveHour ? '${_clock(hour)} – now' : _hourRange(hour);
+    final reading = to.present[hour]
+        ? '${to.values[hour].toStringAsFixed(2)} kWh'
+        : 'No reading';
+    final tp = _layout(
+      TextSpan(
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: chipInk.withValues(alpha: fade),
+        ),
+        children: [
+          TextSpan(text: when),
+          TextSpan(
+            text: '  ·  $reading',
+            style: TextStyle(
+              fontWeight: FontWeight.w500,
+              color: _chipInkSoft.withValues(alpha: fade),
+            ),
+          ),
+        ],
+      ),
+    );
+    final chipSize = Size(tp.width + 20, tp.height + 10);
+    final chipLeft = (x - chipSize.width / 2)
+        .clamp(4.0, max(4.0, size.width - chipSize.width - 4))
+        .toDouble();
+    final chip = RRect.fromRectAndRadius(
+      Offset(chipLeft, 0) & chipSize,
+      const Radius.circular(12),
+    );
+
+    canvas.drawLine(
+      Offset(x, chip.bottom),
+      Offset(x, plot.bottom),
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.85 * fade)
+        ..strokeWidth = 1.5,
+    );
+
+    canvas.drawRRect(
+      chip.shift(const Offset(0, 3)),
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.16 * fade)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+    );
+    canvas.drawRRect(
+      chip,
+      Paint()..color = Colors.white.withValues(alpha: fade),
+    );
+    tp.paint(canvas, Offset(chip.left + 10, chip.top + 5));
+    tp.dispose();
+
+    // Marker riding the line.
+    canvas.drawCircle(
+      Offset(x, y + 2),
+      7,
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.18 * fade)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+    );
+    canvas.drawCircle(
+      Offset(x, y),
+      7,
+      Paint()..color = Colors.white.withValues(alpha: fade),
+    );
+    canvas.drawCircle(
+      Offset(x, y),
+      4,
+      Paint()..color = _accent.withValues(alpha: fade),
+    );
+  }
+
+  Path _areaUnder(List<Offset> points, double baseline) => Path()
+    ..addPolygon([
+      ...points,
+      Offset(points.last.dx, baseline),
+      Offset(points.first.dx, baseline),
+    ], true);
+
+  TextPainter _layout(TextSpan span) => TextPainter(
+    text: span,
+    textDirection: TextDirection.ltr,
+    textScaler: textScaler,
+  )..layout();
+
+  static String _clock(int hour) =>
+      '${hour % 12 == 0 ? 12 : hour % 12} ${hour % 24 < 12 ? 'AM' : 'PM'}';
+
+  // "3–4 PM", or "11 AM–12 PM" when the hour crosses noon/midnight.
+  static String _hourRange(int hour) {
+    String period(int h) => h % 24 < 12 ? 'AM' : 'PM';
+    String number(int h) => '${h % 12 == 0 ? 12 : h % 12}';
+    final end = hour + 1;
+    return period(hour) == period(end)
+        ? '${number(hour)}–${number(end)} ${period(hour)}'
+        : '${_clock(hour)}–${_clock(end)}';
+  }
+
+  @override
+  bool shouldRepaint(_HourlyChartPainter old) =>
+      old.from != from ||
+      old.to != to ||
+      old.liveHour != liveHour ||
+      old.textScaler != textScaler;
+}
+
+/// A number that rolls each changed digit into place, like the number
+/// wheels on an electric meter. Digits use tabular figures so nothing
+/// shifts sideways while they turn.
+class _RollingNumber extends StatelessWidget {
+  const _RollingNumber(this.text, {super.key, required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  static bool _isDigit(String c) => '0123456789'.contains(c);
+
+  @override
+  Widget build(BuildContext context) {
+    // Measure with the same merged style the Text widgets render with (the
+    // theme's line height included), so each wheel cell is exactly one line.
+    final digitStyle = DefaultTextStyle.of(context).style.merge(
+      style.copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
+    );
+    final probe = TextPainter(
+      text: TextSpan(text: '0', style: digitStyle),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout();
+    final digitSize = probe.size;
+    probe.dispose();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final chars = text.split('');
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        // Invisible copy: sizes the stack, gives the row its baseline and
+        // reads the value to screen readers.
+        Opacity(
+          opacity: 0,
+          alwaysIncludeSemantics: true,
+          child: Text(text, style: digitStyle),
+        ),
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          child: IgnoreBaseline(
+            child: ExcludeSemantics(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < chars.length; i++)
+                    if (_isDigit(chars[i]))
+                      // Keyed by place value, so a wheel keeps its position
+                      // when the number gains a digit.
+                      _DigitWheel(
+                        key: ValueKey(chars.length - i),
+                        digit: int.parse(chars[i]),
+                        style: digitStyle,
+                        size: digitSize,
+                        reduceMotion: reduceMotion,
+                      )
+                    else
+                      Text(chars[i], style: digitStyle),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DigitWheel extends StatelessWidget {
+  const _DigitWheel({
+    super.key,
+    required this.digit,
+    required this.style,
+    required this.size,
+    required this.reduceMotion,
+  });
+
+  final int digit;
+  final TextStyle style;
+  final Size size;
+  final bool reduceMotion;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(end: digit.toDouble()),
+      duration: reduceMotion
+          ? Duration.zero
+          : const Duration(milliseconds: 420),
+      curve: Curves.easeOutCubic,
+      builder: (context, position, wheel) {
+        final window = ClipRect(
+          child: OverflowBox(
+            alignment: Alignment.topCenter,
+            maxHeight: double.infinity,
+            child: Transform.translate(
+              offset: Offset(0, -position * size.height),
+              child: wheel,
+            ),
+          ),
+        );
+        // Mid-turn, neighbouring digits fade out at the window's edges
+        // instead of being cut off; at rest the mask is skipped.
+        final turning = position != position.roundToDouble();
+        return SizedBox.fromSize(
+          size: size,
+          child: turning
+              ? ShaderMask(
+                  shaderCallback: (rect) => const LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0x00FFFFFF),
+                      Color(0xFFFFFFFF),
+                      Color(0xFFFFFFFF),
+                      Color(0x00FFFFFF),
+                    ],
+                    stops: [0.0, 0.3, 0.7, 1.0],
+                  ).createShader(rect),
+                  child: window,
+                )
+              : window,
+        );
+      },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var d = 0; d <= 9; d++)
+            SizedBox.fromSize(
+              size: size,
+              child: Text('$d', style: style),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Label that cross-fades when [mode] flips but updates in place within a
+/// mode, so a scrubbed "By 4 PM" ticks over without flashing.
+class _SwapText extends StatelessWidget {
+  const _SwapText({
+    required this.mode,
+    required this.text,
+    required this.style,
+    required this.duration,
+  });
+
+  final bool mode;
+  final String text;
+  final TextStyle style;
+  final Duration duration;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: duration,
+      layoutBuilder: (current, previous) => Stack(
+        alignment: Alignment.centerLeft,
+        children: [...previous, ?current],
+      ),
+      child: Text(
+        text,
+        key: ValueKey(mode),
+        style: style,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }
