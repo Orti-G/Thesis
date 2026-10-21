@@ -113,14 +113,8 @@ class _BillingScreenState extends State<BillingScreen> {
     notchPositionRatio: 0.24,
   );
 
-  @override
-  void initState() {
-    super.initState();
-    // Auto-refresh the billing page every time this screen opens
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _handleRefresh();
-    });
-  }
+  // No refresh on open: the backend recalculates the forecast at 9 AM, 3 PM
+  // and 9 PM, and pull-to-refresh (_handleRefresh) forces one on demand.
 
   Future<Map<String, dynamic>> _fetchBillBreakdownCached(double kwh) {
     final key = kwh.round();

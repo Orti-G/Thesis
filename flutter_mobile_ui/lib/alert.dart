@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
@@ -48,6 +49,12 @@ class _AlertsScreenState extends State<AlertsScreen>
   bool _loadingEvents = true;
   String? _eventsError;
 
+  // Rows swiped away as "unsure" while their Undo toast is up; the answer
+  // is sent once the toast closes. `index` is where Undo puts the row back.
+  static const Duration _undoWindow = Duration(seconds: 4);
+  final Map<int, ({Map<String, dynamic> event, int index})> _pendingUnsure =
+      {};
+
   int get _closedCount => _events.where((e) => e['status'] == 'closed').length;
   int get _openCount => _events.length - _closedCount;
 
@@ -63,6 +70,11 @@ class _AlertsScreenState extends State<AlertsScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     anomalyReviewRequest.removeListener(_onReviewRequest);
+    // Leaving mid-Undo still counts as the swipe: send those answers now.
+    for (final eventId in _pendingUnsure.keys) {
+      _postReview(eventId, 'unsure').ignore();
+    }
+    _pendingUnsure.clear();
     super.dispose();
   }
 
@@ -105,7 +117,11 @@ class _AlertsScreenState extends State<AlertsScreen>
       }
 
       final body = jsonDecode(res.body) as Map<String, dynamic>;
-      final data = (body['data'] as List).cast<Map<String, dynamic>>();
+      // Rows still in their Undo window stay hidden until it ends.
+      final data = (body['data'] as List)
+          .cast<Map<String, dynamic>>()
+          .where((e) => !_pendingUnsure.containsKey(e['event_id']))
+          .toList();
 
       if (!mounted) return;
       setState(() {
@@ -122,15 +138,23 @@ class _AlertsScreenState extends State<AlertsScreen>
   }
 
   // Idea 1: Custom Floating Glassmorphic Toast Notification
-  void _showGlassmorphicToast(BuildContext context, String message) {
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>
+      _showGlassmorphicToast(
+    BuildContext context,
+    String message, {
+    String? actionLabel,
+    VoidCallback? onAction,
+    Duration duration = const Duration(seconds: 3),
+  }) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    return messenger.showSnackBar(
       SnackBar(
         elevation: 0,
         backgroundColor: Colors.transparent,
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-        duration: const Duration(seconds: 3),
+        duration: duration,
         content: ClipRRect(
           borderRadius: BorderRadius.circular(20),
           child: BackdropFilter(
@@ -181,6 +205,28 @@ class _AlertsScreenState extends State<AlertsScreen>
                       ),
                     ),
                   ),
+                  if (actionLabel != null && onAction != null)
+                    TextButton(
+                      onPressed: () {
+                        messenger.hideCurrentSnackBar(
+                          reason: SnackBarClosedReason.action,
+                        );
+                        onAction();
+                      },
+                      style: TextButton.styleFrom(
+                        foregroundColor: primaryOrange,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        minimumSize: const Size(0, 32),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: Text(
+                        actionLabel,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -195,22 +241,37 @@ class _AlertsScreenState extends State<AlertsScreen>
   Future<void> _reviewEvent(int eventId, String answer) async {
     Navigator.of(context).pop();
     setState(() => _events.removeWhere((e) => e['event_id'] == eventId));
+    await _submitReview(eventId, answer);
+  }
 
+  Future<http.Response> _postReview(int eventId, String answer) {
+    return http
+        .post(
+          Uri.parse('$kApiBaseUrl/anomaly-events/$eventId/review'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'answer': answer}),
+        )
+        .timeout(const Duration(seconds: 10));
+  }
+
+  // A swipe already showed its own toast, so it passes toastOnSuccess: false
+  // and only hears back when something went wrong.
+  Future<void> _submitReview(
+    int eventId,
+    String answer, {
+    bool toastOnSuccess = true,
+  }) async {
     String? toast;
     try {
-      final res = await http
-          .post(
-            Uri.parse('$kApiBaseUrl/anomaly-events/$eventId/review'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'answer': answer}),
-          )
-          .timeout(const Duration(seconds: 10));
+      final res = await _postReview(eventId, answer);
 
       if (res.statusCode == 200) {
         final status = (jsonDecode(res.body) as Map<String, dynamic>)['status'];
-        toast = status == 'already_reviewed'
-            ? 'Already answered on another phone.'
-            : 'Answer saved. Thank you!';
+        if (status == 'already_reviewed') {
+          toast = 'Already answered on another phone.';
+        } else if (toastOnSuccess) {
+          toast = 'Answer saved. Thank you!';
+        }
       } else if (res.statusCode != 404) {
         // 404 means the event no longer exists; the refresh sorts it out.
         throw Exception('Server returned ${res.statusCode}');
@@ -222,6 +283,45 @@ class _AlertsScreenState extends State<AlertsScreen>
     if (!mounted) return;
     if (toast != null) _showGlassmorphicToast(context, toast);
     await _fetchEvents();
+  }
+
+  Map<String, dynamic>? _unsureOption(Map<String, dynamic> event) {
+    return ((event['options'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>()
+        .where((o) => o['answer'] == 'unsure')
+        .firstOrNull;
+  }
+
+  // Swiping a row away answers "unsure", like clearing a notification. The
+  // answer goes out when the Undo toast closes, unless Undo was tapped.
+  void _dismissAsUnsure(int eventId) {
+    final index = _events.indexWhere((e) => e['event_id'] == eventId);
+    if (index < 0) return;
+    setState(() {
+      _pendingUnsure[eventId] = (event: _events.removeAt(index), index: index);
+    });
+
+    _showGlassmorphicToast(
+      context,
+      'Marked as not sure.',
+      actionLabel: 'Undo',
+      onAction: () => _undoUnsure(eventId),
+      duration: _undoWindow,
+    ).closed.then((reason) {
+      if (reason == SnackBarClosedReason.action) return;
+      // Already sent if the screen was disposed in the meantime.
+      if (_pendingUnsure.remove(eventId) == null || !mounted) return;
+      _submitReview(eventId, 'unsure', toastOnSuccess: false);
+    });
+  }
+
+  void _undoUnsure(int eventId) {
+    final pending = _pendingUnsure.remove(eventId);
+    if (pending == null || !mounted) return;
+    if (_events.any((e) => e['event_id'] == eventId)) return;
+    setState(() {
+      _events.insert(min(pending.index, _events.length), pending.event);
+    });
   }
 
   // Event times are Philippine local time with no zone, so they are used
@@ -723,9 +823,17 @@ class _AlertsScreenState extends State<AlertsScreen>
     } else {
       return Column(
         key: const ValueKey('list'),
-        children: _events
-            .map((event) => _buildAnomalyItem(context, event: event))
-            .toList(),
+        children: [
+          for (var i = 0; i < _events.length; i++) ...[
+            if (i > 0)
+              Divider(
+                height: 1,
+                thickness: 1,
+                color: Colors.grey.withValues(alpha: 0.15),
+              ),
+            _buildAnomalyItem(context, event: _events[i]),
+          ],
+        ],
       );
     }
   }
@@ -756,8 +864,10 @@ class _AlertsScreenState extends State<AlertsScreen>
     final time = event['time_tl'] as String?;
     final message = event['message_tl'] as String?;
     final accent = _severityColor(event['severity'] as String?);
+    final eventId = event['event_id'] as int?;
+    final unsure = _unsureOption(event);
 
-    return InkWell(
+    final row = InkWell(
       onTap: () => _showAnomalyDetail(context, event),
       splashColor: Colors.grey.withValues(alpha: 0.1),
       highlightColor: Colors.transparent,
@@ -836,6 +946,48 @@ class _AlertsScreenState extends State<AlertsScreen>
             ),
           ],
         ),
+      ),
+    );
+
+    // Only finished events can be answered, so ongoing ones don't swipe.
+    if (event['status'] != 'closed' || eventId == null || unsure == null) {
+      return row;
+    }
+    final unsureLabel = (unsure['label_tl'] as String?) ?? 'Hindi sigurado';
+    return Dismissible(
+      key: ValueKey('event-$eventId'),
+      direction: DismissDirection.horizontal,
+      background: _buildSwipeBackground(unsureLabel, Alignment.centerLeft),
+      secondaryBackground:
+          _buildSwipeBackground(unsureLabel, Alignment.centerRight),
+      onDismissed: (_) => _dismissAsUnsure(eventId),
+      child: row,
+    );
+  }
+
+  // Shown behind a row as it's swiped, so the gesture says what it answers.
+  Widget _buildSwipeBackground(String label, Alignment alignment) {
+    return Container(
+      alignment: alignment,
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      decoration: BoxDecoration(
+        color: Colors.grey.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.close_rounded, color: Colors.grey[700], size: 20),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.grey[700],
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1005,6 +1157,9 @@ class _AlertsScreenState extends State<AlertsScreen>
     final chart = event['chart'] as Map<String, dynamic>?;
     final options = ((event['options'] as List?) ?? const [])
         .cast<Map<String, dynamic>>();
+    // "Unsure" is a small X under the real answers, not a third big button.
+    final mainOptions = options.where((o) => o['answer'] != 'unsure').toList();
+    final unsure = _unsureOption(event);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1113,13 +1268,36 @@ class _AlertsScreenState extends State<AlertsScreen>
             ),
             const SizedBox(height: 16),
           ],
-          for (var i = 0; i < options.length; i++) ...[
+          for (var i = 0; i < mainOptions.length; i++) ...[
             if (i > 0) const SizedBox(height: 12),
             _buildAnswerButton(
-              label: (options[i]['label_tl'] as String?) ?? '',
+              label: (mainOptions[i]['label_tl'] as String?) ?? '',
               filled: i == 0,
               onPressed: () =>
-                  _reviewEvent(eventId, options[i]['answer'] as String),
+                  _reviewEvent(eventId, mainOptions[i]['answer'] as String),
+            ),
+          ],
+          if (unsure != null) ...[
+            const SizedBox(height: 12),
+            Center(
+              child: TextButton.icon(
+                onPressed: () => _reviewEvent(eventId, 'unsure'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.grey[600],
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                ),
+                icon: const Icon(Icons.close_rounded, size: 18),
+                label: Text(
+                  (unsure['label_tl'] as String?) ?? 'Hindi sigurado',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
             ),
           ],
         ],
