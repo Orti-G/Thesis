@@ -9,7 +9,8 @@ rate_per_kwh + fixed_charge values from Firebase instead — see the
 bracket-simulation notebook, run locally once a month, not on the VM).
 Parses a Meralco monthly "Summary Schedule of Rates" PDF and computes a
 residential customer's kWh -> peso energy bill, matching Meralco's own
-billing math (verified against real July and August 2026 bills).
+billing math (verified against real July and August 2026 bills;
+the July bill is reproduced line by line, see default_lft_adj()).
 
 Pure functions only — nothing runs at import time, so this is safe to
 `import` from a FastAPI backend on a VM. Column positions and tier
@@ -274,10 +275,31 @@ def get_parsed_schedule(pdf_path):
 
 
 # ---------------------------------------------------------------------------
+# LFT Adj: printed only on bills from August 2026 onward
+# ---------------------------------------------------------------------------
+
+LFT_ADJ_PERKWH = 0.0009          # San Pablo City, from the Aug-2026 bill
+LFT_ADJ_FROM = (2026, 8)          # (year, month) of the first schedule that has it
+
+
+def schedule_year_month(pdf_path):
+    """'07-2026_rate_schedule.pdf' -> (2026, 7). None if the name has no MM-YYYY prefix."""
+    m = re.match(r"(\d{2})-(\d{4})", os.path.basename(pdf_path))
+    return (int(m.group(2)), int(m.group(1))) if m else None
+
+
+def default_lft_adj(pdf_path):
+    """0 for schedules before August 2026 (e.g. the July bill has no LFT Adj line),
+    LFT_ADJ_PERKWH from August 2026 on. Unknown file names keep the current value."""
+    ym = schedule_year_month(pdf_path)
+    return 0.0 if ym is not None and ym < LFT_ADJ_FROM else LFT_ADJ_PERKWH
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline: PDF + kWh -> peso breakdown
 # ---------------------------------------------------------------------------
 
-def compute_bill(pdf_path, kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
+def compute_bill(pdf_path, kwh, lft_pct=0.5, lft_adj_perkwh=None):
     """
     pdf_path: bare filename (resolved against RATE_SCHEDULE_DIR /
         meralco_rates/) or a full/existing path.
@@ -289,9 +311,10 @@ def compute_bill(pdf_path, kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
 
     lft_adj_perkwh: "LFT Adj" line seen on Aug-2026-onward bills. Not
         published anywhere in the rate schedule PDF's table — only visible
-        on the actual bill — so it can't be auto-parsed. Default 0.0009
-        matches the San Pablo City verification bill; override if it
-        drifts in a later month.
+        on the actual bill — so it can't be auto-parsed. None (default) =
+        0.0009 for schedules from August 2026 (San Pablo City verification
+        bill) and 0 for earlier ones, which matches the July 2026 bill
+        exactly. Pass a number to override.
 
     Raises ValueError if any required field fails to resolve to exactly
     one column (e.g. Meralco reorders/renames a column this parser
@@ -303,6 +326,8 @@ def compute_bill(pdf_path, kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
     call after that, for any kwh, is a cache hit and takes well under 1ms.
     The cache auto-invalidates if the file's contents change.
     """
+    if lft_adj_perkwh is None:
+        lft_adj_perkwh = default_lft_adj(pdf_path)
     table, cols, vat = get_parsed_schedule(pdf_path)
 
     row = find_tier_row(table, kwh)
@@ -426,11 +451,13 @@ def compute_bill(pdf_path, kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
         "total_energy_amount": total_energy_amount,
     }
 
-def analytic_bracket_rate(pdf_path, representative_kwh, lft_pct=0.5, lft_adj_perkwh=0.0009):
+def analytic_bracket_rate(pdf_path, representative_kwh, lft_pct=0.5, lft_adj_perkwh=None):
     """Closed-form rate_per_kwh (slope) + fixed_charge (intercept) for the
     tier representative_kwh falls into. Same math compute_bill() uses,
     just expressed as a line instead of a rounded step-by-step total —
     this is what makes peso_to_kwh() invertible."""
+    if lft_adj_perkwh is None:
+        lft_adj_perkwh = default_lft_adj(pdf_path)
     table, cols, vat = get_parsed_schedule(pdf_path)
     row = find_tier_row(table, representative_kwh)
     v = lambda field: clean(row[cols[field]]) if field in cols else 0.0
@@ -466,12 +493,14 @@ BRACKET_BOUNDS = {"0-200": (0, 200), "201-300": (201, 300), "301-400": (301, 400
 BRACKET_REPS = {"0-200": 100, "201-300": 250, "301-400": 350, "over-400": 500}
 
 
-def peso_to_kwh(pdf_path, target_peso, lft_pct=0.5, lft_adj_perkwh=0.0009):
+def peso_to_kwh(pdf_path, target_peso, lft_pct=0.5, lft_adj_perkwh=None):
     """Inverse of compute_bill(): given a target peso total, find the kWh
     that produces it. If target_peso falls in a genuine gap between two
     brackets (Meralco's rates step discontinuously at every tier boundary,
     so some peso values are simply unreachable by any exact kWh), snaps
     to whichever boundary kWh is closer instead of erroring."""
+    if lft_adj_perkwh is None:
+        lft_adj_perkwh = default_lft_adj(pdf_path)
     ranges = []
     for name, (low, high) in BRACKET_BOUNDS.items():
         slope, intercept = analytic_bracket_rate(pdf_path, BRACKET_REPS[name], lft_pct, lft_adj_perkwh)

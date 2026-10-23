@@ -1165,6 +1165,40 @@ def run_anomaly():
     return ar.score_latest(rows, bundle)
 
 
+# ── Forecast frame cache ───────────────────────────────────────────────────────
+# /forecast used to rebuild features for ALL readings since June 5 on every request.
+# Now the past-day summary is built once (per day, per model, per change in past readings)
+# and each request processes only today's readings. Result is identical (forecast_cache_check.py).
+_fc_lock  = threading.Lock()
+_fc_cache = {"key": None, "hist": None}
+
+
+def _forecast_history(conn, fb, ab, today):
+    """Past-day summary for `today`, rebuilt only when the day, a model or the past readings change."""
+    sig = fr.past_readings_signature_db(conn, today)
+    key = (today, id(fb), fb.get("version"), id(ab), ab.get("version"), sig)
+    with _fc_lock:
+        if _fc_cache["key"] != key:
+            t0 = datetime.now()
+            raw = fr.fetch_all_readings_db(conn)
+            _fc_cache.update(key=key, hist=fr.build_history(raw, ab, fb, today))
+            print(f"🔁 Forecast history rebuilt for {today} in {(datetime.now() - t0).total_seconds():.1f} s")
+        return _fc_cache["hist"]
+
+
+def _forecast_frame(fb, ab, today):
+    with get_conn() as conn:
+        hist = _forecast_history(conn, fb, ab, today)
+        window = fr.fetch_window_readings_db(conn, today)
+    return fr.build_today(window, ab, fb, hist)
+
+
+def _warm_forecast_cache():
+    """Called by the background watcher so the first tap of the day does not pay for the rebuild."""
+    with get_conn() as conn:
+        _forecast_history(conn, FORECAST_BUNDLE, ANOMALY_BUNDLE, datetime.now(PH_TZ).date())
+
+
 # ── Anomaly model: hot reload + daily drift check ──────────────────────────────
 def _install_new_model_if_any():
     """Install waiting models from models/incoming/ (written by the refits on this VM).
@@ -1250,6 +1284,11 @@ async def anomaly_model_watcher():
                 await asyncio.to_thread(_daily_drift_check)
             except Exception as e:
                 print(f"❌ Drift check failed: {e}")
+
+        try:
+            await asyncio.to_thread(_warm_forecast_cache)
+        except Exception as e:
+            print(f"❌ Forecast cache warm-up failed: {e}")
 
 
 @app.get("/anomaly-model")
@@ -1426,9 +1465,7 @@ def _run_forecast_locked(latest, trigger_source: str) -> dict:
     fb, ab = FORECAST_BUNDLE, ANOMALY_BUNDLE          # read once (hot reload safe)
     now = datetime.now(PH_TZ)
 
-    with get_conn() as conn:
-        raw = fr.fetch_all_readings_db(conn)
-    F = fr.build_frame(raw, ab, fb, today=now.date())
+    F = _forecast_frame(fb, ab, now.date())          # cached history + today's readings only
 
     # Billing cycle: 28th -> 27th. accumulated = adjusted cumul_kwh (same as the dashboard)
     cutoff_dt   = datetime.strptime(BILLING_CUTOFF_DATE, "%Y-%m-%d").date()
