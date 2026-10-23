@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, Query
-from typing import Optional
+from fastapi import FastAPI, HTTPException, Query, Header
+from typing import Optional, List
 from meralco_engine import compute_bill, RATE_SCHEDULE_DIR, peso_to_kwh
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 import psycopg2
 import psycopg2.extras
@@ -12,12 +12,15 @@ import pandas as pd
 import calendar
 import os
 import re
+import random
 import firebase_admin
 from firebase_admin import credentials, db as firebase_db, messaging
 import asyncio
 import threading
 import anomaly_retrain as ar    # shared with GRID_Anomaly_Drift_Check.ipynb
 import forecast_retrain as fr   # shared with GRID_Forecast_Check.ipynb
+import advisory_rules as nlg    # Tagalog NLG advisories (pure, no I/O)
+import rate_compare             # month-over-month rate effect (linear rates, pure)
 
 app = FastAPI()
 
@@ -95,6 +98,43 @@ today_total_kwh = 0.0
 
 # ── Flush Lock ─────────────────────────────────────────────────────────────────
 _flush_lock = threading.Lock()
+
+# ── NLG Advisories ─────────────────────────────────────────────────────────────
+ADVISORY_REF        = "/advisories"            # /advisories/{category}
+BRACKET_STATE_REF   = "/advisories_state/bracket"
+ANOMALY_EVENT       = None                     # current anomaly event (in memory)
+LAST_PUSH           = {}                       # category -> datetime of last push
+
+# ── Scheduled forecasts ────────────────────────────────────────────────────────
+# One automatic forecast per intra-day window of the study (Table 20), at the
+# window's middle. Early (12–6 AM) is skipped: lowest R² in the study (SVR 0.393).
+# Afternoon (3 PM) is also the study's end-of-month checkpoint.
+# (name, run from, window end). A missed run (API down) still runs later in its window.
+FORECAST_SCHEDULE = [
+    ("Mid-morning", dtime(9, 0),  dtime(12, 0)),
+    ("Afternoon",   dtime(15, 0), dtime(18, 0)),
+    ("Evening",     dtime(21, 0), dtime(23, 59, 59)),
+]
+FORECAST_STALE_MIN = 30          # skip (retry next minute) if no reading in the last 30 min
+_forecast_lock = threading.Lock()
+last_true_fill_date = ""
+
+# ── CMS + monthly rates (written by Update_Meralco_Firebase.ipynb, outside the VM) ─
+RATES_HISTORY_REF   = "/meralco_rates_history"   # {YYYY-MM: {fixed_charge, brackets, ...}}
+CMS_INBOX_REF       = "/cms/inbox"                # facts + headline + link + image (notebook)
+CMS_PUBLISHED_REF   = "/cms/published"            # GRID-written items the app reads (VM)
+RATES_PUSHED_REF    = "/advisories_state/rates_pushed_period"
+# Optional shared secret for POST /refresh-rates. Set the same value in the notebook.
+REFRESH_TOKEN       = os.environ.get("GRID_REFRESH_TOKEN")
+
+
+def calibration_k() -> float:
+    """Meter calibration (Meralco meter ÷ device), from the forecast bundle.
+    Displayed kWh stays raw; pricing and brackets use kWh × k."""
+    try:
+        return float(FORECAST_BUNDLE["eom"]["k_pooled"])
+    except Exception:
+        return 1.0
 
 def compute_billing_cutoff() -> str:
     """
@@ -200,6 +240,13 @@ def startup_event():
     asyncio.create_task(sync_watchdog())
     asyncio.create_task(anomaly_model_watcher())
 
+    ensure_anomaly_review_schema()   # event_id + reviewed_at on anomaly_logs
+    ensure_forecast_log_schema()     # true_day_total_kwh + trigger_source on forecast_logs
+    try:
+        print(f"📊 true_day_total_kwh filled for {fill_true_day_totals()} forecast log(s)")
+    except Exception as e:
+        print(f"❌ true_day_total_kwh backfill failed: {e}")
+
     if state and state.get("billing_cutoff_date") == computed_cutoff:
         # Same billing cycle as before restart — resume as-is
         BILLING_CUTOFF_DATE  = computed_cutoff
@@ -266,16 +313,11 @@ async def sync_watchdog():
         # Only trigger notification on TRANSITION from true → false
         # Avoids sending repeated notifications every 10 seconds
         if not is_synced and last_sync_state:
-            send_fcm_alert(
-                title="⚠️ Device Offline",
-                body="Ang IoT device ay hindi na naka-konekta. "
-                     "Mangyaring suriin ang inyong koneksyon.",
-                channel_id="high_channel",
-                data={
-                    "type":      "sync_lost",
-                    "timestamp": datetime.now(PH_TZ).isoformat(),
-                }
-            )
+            publish_advisory(nlg.build_device_advisory(
+                online=False, since=last_reading_ts, timeout_s=SYNC_TIMEOUT_SECONDS,
+                avoid_id=last_template_id("device")))
+        elif is_synced and not last_sync_state:
+            publish_advisory(nlg.build_device_advisory(online=True))   # in-app only
 
         last_sync_state = is_synced
 
@@ -363,27 +405,41 @@ def adjust_cumul(raw_cumul: float) -> float:
 def log_anomaly(reading_id: int, anomaly_result: dict, avg_power: float,
                 window_ts: datetime):
     """
-    Log only detected anomalies (is_anomaly = True) to anomaly_logs.
-    acknowledged = NULL by default (pending user review).
-    Universal — works for IsolationForest, OneClassSVM, LOF.
+    Log only detected anomalies to anomaly_logs (every row is a flagged reading,
+    so the table needs no is_anomaly column).
+    acknowledged = NULL and reviewed_at = NULL by default (pending user review).
+    event_id groups flagged readings <= 10 min apart into one event (one prompt):
+    it continues the previous row's event if that row is within 10 min and not
+    yet reviewed, otherwise the new row starts its own event (event_id = id).
+    Returns (log_id, event_id). Universal — works for IsolationForest, OneClassSVM, LOF.
     """
     if not anomaly_result.get("is_anomaly"):
-        return
- 
+        return None, None
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
+                SELECT event_id FROM anomaly_logs
+                WHERE timestamp < %s AND timestamp >= %s
+                  AND reviewed_at IS NULL AND event_closed_at IS NULL
+                ORDER BY timestamp DESC LIMIT 1
+                """,
+                (window_ts, window_ts - nlg.ANOMALY_EVENT_GAP),
+            )
+            prev = cur.fetchone()
+            cur.execute(
+                """
                 INSERT INTO anomaly_logs
-                    (timestamp, reading_id, is_anomaly,
+                    (timestamp, reading_id,
                      anomaly_score, power_avg, roll_mean_1hr, roll_mean_24hr,
                      dev_1hr, dev_24hr, acknowledged, power_delta, time_zscore)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     window_ts,
                     reading_id,
-                    True,
                     anomaly_result["score"],
                     avg_power,
                     anomaly_result["roll_mean_1hr"],
@@ -395,26 +451,81 @@ def log_anomaly(reading_id: int, anomaly_result: dict, avg_power: float,
                     anomaly_result["time_zscore"],
                 )
             )
+            log_id = cur.fetchone()[0]
+            event_id = prev[0] if prev and prev[0] is not None else log_id
+            cur.execute("UPDATE anomaly_logs SET event_id = %s WHERE id = %s",
+                        (event_id, log_id))
+        conn.commit()
+    return log_id, event_id
+
+
+def ph_now_naive() -> datetime:
+    """Manila wall-clock time without a zone: the convention every timestamp
+    column in this database uses (flush_buffer saves window_ts the same way).
+    SQL now() would give the server's UTC clock instead."""
+    return datetime.now(PH_TZ).replace(tzinfo=None)
+
+
+def ensure_anomaly_review_schema():
+    """One-time migration (safe to run every startup):
+    - event_id    groups flagged rows into one event / one prompt
+    - reviewed_at set when the user answers; NULL = still pending.
+    - event_closed_at = when the event ended (last flagged reading + 10 min).
+    - review_notified_at = when its review push was actually sent; NULL = never.
+    - expired_at = when an unanswered event left the list (last reading + 7 days).
+      "Hindi sigurado" sets reviewed_at but leaves acknowledged NULL (unlabeled),
+      so it leaves the pending list without becoming a training label.
+    Existing rows get event_ids by the same 10-minute rule; rows already answered
+    get reviewed_at so they don't reappear as pending. Old events are closed and
+    expired by close_finished_events() with computed times, never with "now"."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE anomaly_logs ADD COLUMN IF NOT EXISTS event_id INTEGER")
+            cur.execute("ALTER TABLE anomaly_logs ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP")
+            cur.execute("ALTER TABLE anomaly_logs ADD COLUMN IF NOT EXISTS event_closed_at TIMESTAMP")
+            cur.execute("ALTER TABLE anomaly_logs ADD COLUMN IF NOT EXISTS review_notified_at TIMESTAMP")
+            cur.execute("ALTER TABLE anomaly_logs ADD COLUMN IF NOT EXISTS expired_at TIMESTAMP")
+            cur.execute("CREATE INDEX IF NOT EXISTS anomaly_logs_event_idx ON anomaly_logs (event_id)")
+            cur.execute(
+                """
+                WITH o AS (
+                    SELECT id, timestamp,
+                           CASE WHEN timestamp - LAG(timestamp) OVER (ORDER BY timestamp, id)
+                                     <= %s THEN 0 ELSE 1 END AS brk
+                    FROM anomaly_logs),
+                g AS (SELECT id, timestamp, SUM(brk) OVER (ORDER BY timestamp, id) AS grp FROM o),
+                f AS (SELECT id, FIRST_VALUE(id) OVER (PARTITION BY grp ORDER BY timestamp, id) AS ev
+                      FROM g)
+                UPDATE anomaly_logs a SET event_id = f.ev
+                FROM f WHERE a.id = f.id AND a.event_id IS NULL
+                """,
+                (nlg.ANOMALY_EVENT_GAP,),
+            )
+            cur.execute(
+                "UPDATE anomaly_logs SET reviewed_at = %s "
+                "WHERE acknowledged IS NOT NULL AND reviewed_at IS NULL", (ph_now_naive(),))
         conn.commit()
 
-def log_forecast(result: dict, window_ts: datetime):
+def log_forecast(result: dict, window_ts: datetime, trigger_source: str = "user"):
     """
     Log every forecast prediction to forecast_logs.
-    Universal — works for Random Forest, LR, SVR.
+    trigger_source: "user" (POST /forecast) or "scheduled" (FORECAST_SCHEDULE).
+    true_day_total_kwh stays NULL until the day is over (fill_true_day_totals).
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO forecast_logs
-                    (timestamp, billing_cycle_start,
+                    (timestamp, trigger_source, billing_cycle_start,
                      predicted_day_total_kwh, accumulated_past_kwh,
                      combined_kwh, days_so_far, avg_daily_kwh,
                      days_remaining, projected_eom_kwh)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     window_ts,
+                    trigger_source,
                     result["billing_cycle_start"],
                     result["predicted_day_total_kWh"],
                     result["accumulated_past_kWh"],
@@ -427,13 +538,81 @@ def log_forecast(result: dict, window_ts: datetime):
             )
         conn.commit()
 
-def push_to_firebase(raw: dict, adjusted_cumul: float, est_cost: float):
+def ensure_forecast_log_schema():
+    """Safe every startup. true_day_total_kwh = the day's metered total (sum of
+    interval_kwh, anomalous readings included: the study's "true" total), filled
+    once the day is over. trigger_source tells user runs from scheduled ones;
+    existing rows were all user-triggered, hence the default."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE forecast_logs ADD COLUMN IF NOT EXISTS true_day_total_kwh DOUBLE PRECISION")
+            cur.execute("ALTER TABLE forecast_logs ADD COLUMN IF NOT EXISTS trigger_source TEXT NOT NULL DEFAULT 'user'")
+        conn.commit()
+
+
+def fill_true_day_totals() -> int:
+    """Fill true_day_total_kwh for every log whose day is over (date < today, PH).
+    Runs at startup (backfills old logs) and once a day after midnight.
+    Same definition as the v3.2 notebook: SUM(interval_kwh) per calendar date.
+    A day with no readings at all stays NULL."""
+    today = datetime.now(PH_TZ).date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE forecast_logs f
+                SET true_day_total_kwh = d.kwh
+                FROM (SELECT DATE(timestamp) AS day, SUM(interval_kwh) AS kwh
+                      FROM readings WHERE DATE(timestamp) < %s
+                      GROUP BY DATE(timestamp)) d
+                WHERE DATE(f.timestamp) = d.day AND f.true_day_total_kwh IS NULL
+                """,
+                (today,),
+            )
+            n = cur.rowcount
+        conn.commit()
+    return n
+
+
+def run_scheduled_forecasts_if_due():
+    """Called every minute. Runs a slot's forecast once per day, inside its window,
+    only if the device sent data recently. Restart-safe: "already ran" is read
+    from forecast_logs, not from memory."""
+    now = datetime.now(PH_TZ)
+    now_n = now.replace(tzinfo=None)
+    for name, start, end in FORECAST_SCHEDULE:
+        if not (start <= now.time() < end):
+            continue
+        day = now_n.date()
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM forecast_logs WHERE trigger_source = 'scheduled' "
+                    "AND timestamp >= %s AND timestamp < %s LIMIT 1",
+                    (datetime.combine(day, start), datetime.combine(day, end)),
+                )
+                done = cur.fetchone() is not None
+        if done:
+            continue
+        if last_reading_ts is None or (now - last_reading_ts).total_seconds() > FORECAST_STALE_MIN * 60:
+            continue                               # device offline: try again next minute
+        try:
+            run_forecast("scheduled")
+            print(f"📈 Scheduled forecast ({name}) done")
+        except Exception as e:
+            print(f"❌ Scheduled forecast ({name}) failed: {e}")
+
+
+def push_to_firebase(raw: dict, adjusted_cumul: float, est_cost: float,
+                     billed_kwh: float = None, bracket: str = None):
     """Push all 6 live measurements to Firebase /live_reading."""
     firebase_db.reference("/live_reading").set({
         "voltage":      raw["voltage"],
         "current":      raw["current"],
         "power":        raw["power"],
-        "cumul_kwh":    adjusted_cumul,   # ← adjusted (current cycle only)
+        "cumul_kwh":    adjusted_cumul,   # ← adjusted (current cycle only), shown as "Total Used"
+        "billed_kwh":   billed_kwh,       # ← cumul_kwh × k, used for bracket and cost
+        "bracket":      bracket,
         "power_factor": raw["power_factor"],
         "frequency":    raw["frequency"],
         "timestamp":    raw["timestamp"],
@@ -459,13 +638,13 @@ def send_fcm_alert(
 
         if not tokens_ref:
             print("❌ No device tokens registered")
-            return
+            return False
 
         tokens = list(tokens_ref.values())
 
         if not tokens:
             print("❌ Token list is empty")
-            return
+            return False
 
         message = messaging.MulticastMessage(
             notification=messaging.Notification(
@@ -475,7 +654,7 @@ def send_fcm_alert(
             android=messaging.AndroidConfig(
                 notification=messaging.AndroidNotification(
                     channel_id=channel_id,
-                    priority="high" if channel_id == "high_channel" else "normal",
+                    priority="high" if channel_id == "high_channel" else "default",
                 )
             ),
             data={k: str(v) for k, v in (data or {}).items()},
@@ -497,8 +676,240 @@ def send_fcm_alert(
                         f"/device_tokens/{safe_key}").delete()
                     print(f"🗑️ Removed invalid token: {safe_key}")
 
+        return response.success_count > 0
+
     except Exception as e:
         print(f"❌ FCM error: {e}")
+        return False
+
+
+# ── NLG advisory I/O (advisory_rules.py stays pure; all writes happen here) ───
+def last_template_id(category: str):
+    """Last template_id shown for this category, passed back as avoid_id."""
+    try:
+        return firebase_db.reference(f"{ADVISORY_REF}/{category}/template_id").get()
+    except Exception:
+        return None
+
+
+def publish_advisory(adv: dict) -> bool:
+    """Write an advisory to RTDB /advisories/{category} and push it if flagged.
+    Returns True only if a push actually reached at least one device."""
+    if not adv:
+        return False
+    now = datetime.now(PH_TZ)
+    record = {k: v for k, v in adv.items() if k not in ("data", "push") and v is not None}
+    record.update({k: v for k, v in adv["data"].items() if v is not None})
+    record["timestamp"] = now.isoformat()
+    try:
+        firebase_db.reference(f"{ADVISORY_REF}/{adv['category']}").set(record)
+    except Exception as e:
+        print(f"❌ Advisory write failed: {e}")
+
+    if adv["push"] and adv["channel"]:
+        payload = {"type": adv["category"], "template_id": adv["template_id"],
+                   "timestamp": now.isoformat()}
+        d = adv["data"]
+        if "log_ids" in d:
+            payload["log_ids"] = ",".join(str(i) for i in d["log_ids"])
+        if d.get("event_id") is not None:
+            payload["event_id"] = d["event_id"]                     # anomaly: open this card
+        if d.get("event_ids"):
+            payload["event_ids"] = ",".join(str(i) for i in d["event_ids"])   # review push
+        sent = send_fcm_alert(adv["title_tl"], adv["message_tl"], adv["channel"], payload)
+        if sent:
+            LAST_PUSH[adv["category"]] = now
+        return bool(sent)
+    return False
+
+
+def billing_cycle_end(now: datetime):
+    """The 27th that closes the current cycle (same rule as /forecast)."""
+    if now.day <= 27:
+        return now.replace(day=27).date()
+    if now.month < 12:
+        return now.replace(month=now.month + 1, day=27).date()
+    return now.replace(year=now.year + 1, month=1, day=27).date()
+
+
+def handle_bracket_advisory(adjusted_cumul: float):
+    """Tier alert on BILLED kWh (adjusted cumul × k): once when approaching
+    (>=90% of the bracket's upper bound) and once when a new bracket is entered,
+    per bracket per billing cycle."""
+    k = calibration_k()
+    billed_kwh = adjusted_cumul * k
+    ref = firebase_db.reference(BRACKET_STATE_REF)
+    state = ref.get()
+    event, new_state = nlg.check_bracket_event(billed_kwh, BILLING_CUTOFF_DATE, state)
+    if new_state != state:
+        ref.set(new_state)
+    if event:
+        days_left = (billing_cycle_end(datetime.now(PH_TZ)) - datetime.now(PH_TZ).date()).days
+        publish_advisory(nlg.build_bracket_advisory(
+            event, billed_kwh, days_left, calibration_k=k,
+            avoid_id=last_template_id("bracket")))
+
+
+def household_rate_advisory(billed_kwh: float, basis: str = "so_far",
+                            push: bool = False):
+    """This month's Meralco rates vs last month's, on the household's billed kWh.
+    basis "so_far" = billed kWh this cycle; "projected" = calibrated month-end."""
+    try:
+        history = firebase_db.reference(RATES_HISTORY_REF).get() or {}
+        cmp_ = rate_compare.compare_with_previous(MERALCO_RATES, history, billed_kwh, basis)
+    except Exception as e:
+        print(f"❌ Rate comparison failed: {e}")
+        return None
+    adv = nlg.build_rate_change_advisory(cmp_, avoid_id=last_template_id("rates"))
+    if adv:
+        adv["push"] = push
+    return adv
+
+
+def publish_cms() -> dict:
+    """Rebuild /cms/published from the notebook's /cms/inbox (small set, full rewrite).
+    Only status "approved" items are published; "archived" ones drop out."""
+    inbox = firebase_db.reference(CMS_INBOX_REF).get() or {}
+    published, failed = {}, []
+    for item_id, item in inbox.items():
+        if not isinstance(item, dict) or item.get("status") != "approved":
+            continue
+        try:
+            published[item_id] = nlg.build_cms_published(item)
+        except Exception as e:
+            failed.append(item_id)
+            print(f"❌ CMS item {item_id} skipped: {e}")
+    firebase_db.reference(CMS_PUBLISHED_REF).set(published)
+    return {"published": len(published), "failed": failed}
+
+
+def handle_anomaly_advisory(anomaly_result: dict, avg_power: float,
+                            window_ts: datetime, log_id, event_id):
+    """One advisory + HITL prompt per anomaly event. The DB event_id (log_anomaly)
+    decides the grouping; the in-memory event only tracks severity for escalation
+    and push throttling. A later reading in the same event only adds its log_id,
+    unless the severity rises (escalation)."""
+    global ANOMALY_EVENT
+    z = anomaly_result.get("time_zscore")
+    if ANOMALY_EVENT and ANOMALY_EVENT.get("event_id") != event_id:
+        ANOMALY_EVENT = None            # DB says this is a different event
+    ANOMALY_EVENT, action = nlg.update_anomaly_event(ANOMALY_EVENT, window_ts, log_id, z)
+    if ANOMALY_EVENT.get("event_id") not in (None, event_id):
+        action = "new"
+    ANOMALY_EVENT["event_id"] = event_id
+
+    if action == "extended":
+        firebase_db.reference(f"{ADVISORY_REF}/anomaly/log_ids").set(ANOMALY_EVENT["log_ids"])
+        return
+
+    adv = nlg.build_anomaly_advisory(
+        power_avg=avg_power,
+        roll_mean_1hr=anomaly_result.get("roll_mean_1hr"),
+        time_zscore=z,
+        event=ANOMALY_EVENT,
+        escalated=(action == "escalated"),
+        avoid_id=last_template_id("anomaly"),
+    )
+    adv["data"]["event_id"] = event_id   # the app opens the event card with this id
+    # While an event is open only a SEVERE one pushes (safety: something may be
+    # left on or faulty). Others show in-app and get one review push when they end.
+    adv["push"] = ANOMALY_EVENT["severity"] == "severe"
+    publish_advisory(adv)
+
+
+_review_lock = threading.Lock()
+
+def close_finished_events():
+    """Runs at every 5-min flush and every minute in the background (so events
+    still close while the device is offline). Every stamp it writes is the time
+    the thing actually happened:
+    1. Close events with no flagged reading for ANOMALY_EVENT_GAP:
+       event_closed_at = last flagged reading + gap.
+    2. Expire unanswered events older than REVIEW_EXPIRY:
+       expired_at = last flagged reading + 7 days (acknowledged stays NULL).
+    3. ONE review push for events that ended within REVIEW_NOTIFY_WINDOW, are
+       unanswered and not yet pushed (bundled; at most one per REVIEW_PUSH_COOLDOWN).
+       review_notified_at is set only for events in a push that was sent. Quiet
+       one-reading blips and events that ended long ago keep it NULL."""
+    if not _review_lock.acquire(blocking=False):
+        return
+    try:
+        now = datetime.now(PH_TZ)
+        now_n = now.replace(tzinfo=None)                 # DB timestamps are naive PH time
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE anomaly_logs a SET event_closed_at = e.last_ts + %s
+                    FROM (SELECT event_id, MAX(timestamp) AS last_ts FROM anomaly_logs
+                          WHERE event_closed_at IS NULL
+                          GROUP BY event_id HAVING MAX(timestamp) <= %s) e
+                    WHERE a.event_id = e.event_id AND a.event_closed_at IS NULL
+                    """,
+                    (nlg.ANOMALY_EVENT_GAP, now_n - nlg.ANOMALY_EVENT_GAP),
+                )
+                cur.execute(
+                    """
+                    UPDATE anomaly_logs a SET expired_at = e.last_ts + %s
+                    FROM (SELECT event_id, MAX(timestamp) AS last_ts FROM anomaly_logs
+                          WHERE reviewed_at IS NULL AND expired_at IS NULL
+                          GROUP BY event_id HAVING MAX(timestamp) <= %s) e
+                    WHERE a.event_id = e.event_id
+                      AND a.reviewed_at IS NULL AND a.expired_at IS NULL
+                    """,
+                    (nlg.REVIEW_EXPIRY, now_n - nlg.REVIEW_EXPIRY),
+                )
+                cur.execute(
+                    """
+                    SELECT event_id, MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts,
+                           COUNT(*) AS readings, MAX(time_zscore) AS peak_z
+                    FROM anomaly_logs
+                    WHERE event_closed_at IS NOT NULL AND review_notified_at IS NULL
+                      AND reviewed_at IS NULL AND expired_at IS NULL
+                    GROUP BY event_id HAVING MAX(event_closed_at) >= %s
+                    ORDER BY MIN(timestamp)
+                    """,
+                    (now_n - nlg.REVIEW_NOTIFY_WINDOW,),
+                )
+                due = cur.fetchall()
+            conn.commit()
+
+        events = [{"event_id": r["event_id"],
+                   "start": r["first_ts"] - timedelta(seconds=BUFFER_SECONDS),
+                   "end": r["last_ts"], "readings": r["readings"],
+                   "severity": nlg.anomaly_severity(
+                       float(r["peak_z"]) if r["peak_z"] is not None else None)}
+                  for r in due]
+        loud = [e for e in events if not nlg.is_quiet_event(e["severity"], e["readings"])]
+        if not loud or not nlg.push_allowed(LAST_PUSH.get("review"), now, nlg.REVIEW_PUSH_COOLDOWN):
+            return
+        adv = nlg.build_review_push(loud, now.date())
+        if not adv:
+            return
+        if not publish_advisory(adv):
+            return                                   # not delivered: stays NULL, retried next tick
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE anomaly_logs SET review_notified_at = %s "
+                            "WHERE event_id = ANY(%s) AND review_notified_at IS NULL",
+                            (now_n, [e["event_id"] for e in loud]))
+            conn.commit()
+    except Exception as e:
+        print(f"❌ Event close/review push failed: {e}")
+    finally:
+        _review_lock.release()
+
+
+def event_cost_php(event_kwh: float, current_billed_kwh: float) -> Optional[float]:
+    """Billing side: the event's energy (× k, as Meralco meters it) at the rate of
+    the bracket the household is in now. Approximate: it ignores a bracket change
+    caused by the event itself, so the card says "humigit-kumulang"."""
+    try:
+        k = calibration_k()
+        rate = float(MERALCO_RATES["brackets"][nlg.bracket_label(current_billed_kwh)])
+        return round(event_kwh * k * rate, 2)
+    except Exception:
+        return None
 
 # ── Device Token Registration ──────────────────────────────────────────────────
 class DeviceToken(BaseModel):
@@ -563,7 +974,7 @@ def refresh_billing_baseline_if_needed():
     replace it — otherwise the deduction resets every month instead of
     tracking the real, continually-incrementing PZEM/ESP32 counter.
     """
-    global BILLING_BASELINE_KWH, BILLING_CUTOFF_DATE
+    global BILLING_BASELINE_KWH, BILLING_CUTOFF_DATE, BILLING_COMPUTED
 
     new_cutoff = compute_billing_cutoff()
 
@@ -685,44 +1096,44 @@ def flush_buffer():
         # Run anomaly detection
         anomaly_result = run_anomaly()
 
+        is_anomaly = bool(anomaly_result.get("is_anomaly"))
+
         # Log anomaly to DB if detected (acknowledged = NULL)
-        if anomaly_result.get("is_anomaly"):
-            log_anomaly(
+        log_id, event_id = None, None
+        if is_anomaly:
+            log_id, event_id = log_anomaly(
                 reading_id=reading_id,
                 anomaly_result=anomaly_result,
                 avg_power=avg_power,
                 window_ts=window_ts,
             )
 
-        # Push anomaly result to Firebase
-        if anomaly_result["is_anomaly"]:
-            firebase_db.reference("/anomaly_alert").set({
-                "is_anomaly": True,
-                "score":      anomaly_result["score"],
-                "timestamp":  window_ts.isoformat(),
-                "power_avg":  avg_power,
-                "power_delta": anomaly_result["power_delta"],
-            })
-            send_fcm_alert(
-                title="⚠️ Anomalya Natukoy",
-                body=f"Hindi karaniwan ang kuryente: {avg_power:.1f}W. "
-                f"Suriin at kumpirmahin kung normal ito.",
-                channel_id="high_channel",
-                    data={
-                        "type":      "anomaly",
-                        "power_avg": str(avg_power),
-                        "timestamp": window_ts.isoformat(),
-                    }
-                )
-        else:
-            firebase_db.reference("/anomaly_alert").set({
-                "is_anomaly": False,
-                "score":      anomaly_result["score"],
-                "timestamp":  window_ts.isoformat(),
-                "power_avg":  avg_power,
-                "power_delta": anomaly_result["power_delta"],
-            })
-            
+        # Raw detector output for the dashboard (.get: "collecting_data" has no power_delta)
+        firebase_db.reference("/anomaly_alert").set({
+            "is_anomaly":  is_anomaly,
+            "score":       anomaly_result.get("score"),
+            "timestamp":   window_ts.isoformat(),
+            "power_avg":   avg_power,
+            "power_delta": anomaly_result.get("power_delta"),
+        })
+
+        # NLG: one advisory + HITL prompt per anomaly event (replaces the
+        # hardcoded per-reading FCM)
+        if is_anomaly:
+            try:
+                handle_anomaly_advisory(anomaly_result, avg_power, window_ts, log_id, event_id)
+            except Exception as e:
+                print(f"❌ Anomaly advisory failed: {e}")
+
+        # NLG: close finished anomaly events and send their review push
+        close_finished_events()
+
+        # NLG: tier alerts (approaching / crossed), once per bracket per cycle
+        try:
+            handle_bracket_advisory(adjusted_cumul)
+        except Exception as e:
+            print(f"❌ Bracket advisory failed: {e}")
+
 
         # Push today's hourly history to Firebase (Option C)
         push_hourly_history(datetime.now(PH_TZ))
@@ -804,7 +1215,7 @@ async def anomaly_model_watcher():
     """Background task. Every minute: install a waiting model (hot reload).
     Once a day after midnight: drift check; a refit drops its pkl in incoming/,
     which the next tick installs. Heavy work runs in a thread, not on the event loop."""
-    global last_drift_check_date
+    global last_drift_check_date, last_true_fill_date
     while True:
         await asyncio.sleep(MODEL_WATCH_SECONDS)
         try:
@@ -812,8 +1223,26 @@ async def anomaly_model_watcher():
         except Exception as e:
             print(f"❌ Model install failed (old model kept): {e}")
 
+        await asyncio.to_thread(close_finished_events)   # events close even while offline
+
+        try:
+            await asyncio.to_thread(run_scheduled_forecasts_if_due)
+        except Exception as e:
+            print(f"❌ Forecast schedule check failed: {e}")
+
         now = datetime.now(PH_TZ)
         today = now.strftime("%Y-%m-%d")
+
+        # First tick of a new day: yesterday is complete, fill its true total
+        if today != last_true_fill_date:
+            last_true_fill_date = today
+            try:
+                n = await asyncio.to_thread(fill_true_day_totals)
+                if n:
+                    print(f"📊 true_day_total_kwh filled for {n} forecast log(s)")
+            except Exception as e:
+                print(f"❌ true_day_total_kwh fill failed: {e}")
+
         due = (now.hour, now.minute) >= (DRIFT_CHECK_HOUR, DRIFT_CHECK_MINUTE)
         if due and today != last_drift_check_date:
             last_drift_check_date = today
@@ -889,12 +1318,14 @@ def post_reading(data: Reading):
     # Set sync = true immediately on every reading
     firebase_db.reference("/sync").set(True)
 
-    bracket = "0-200" if adjusted_cumul <= 200 else "201-300" if adjusted_cumul <= 300 else "301-400" if adjusted_cumul <= 400 else "over-400"
+    # Pricing and bracket on calibrated kWh (Meralco-meter equivalent); display stays raw
+    billed_kwh = round(adjusted_cumul * calibration_k(), 4)
+    bracket    = nlg.bracket_label(billed_kwh)    # whole-kWh rule, same as the alerts
 
     rate_per_kwh = MERALCO_RATES["brackets"][bracket]
     fixed_charge = MERALCO_RATES["fixed_charge"]
 
-    estimated_cost = adjusted_cumul * rate_per_kwh + fixed_charge
+    estimated_cost = billed_kwh * rate_per_kwh + fixed_charge
 
     # 1. Push all 6 to Firebase (adjusted cumul_kwh)
     push_to_firebase({
@@ -904,7 +1335,7 @@ def post_reading(data: Reading):
         "power_factor": data.power_factor,
         "frequency":    data.frequency,
         "timestamp":    now.isoformat(),
-    }, adjusted_cumul, estimated_cost)
+    }, adjusted_cumul, estimated_cost, billed_kwh, bracket)
 
     # 2. Add to 5-min buffer (raw cumul for interval_kwh calculation)
     reading_buffer.append({
@@ -933,16 +1364,51 @@ def post_reading(data: Reading):
 
 # ── reset rates ──────────────────────────────────────────────────────────
 @app.post("/refresh-rates")
-def refresh_rates():
+def refresh_rates(x_grid_token: Optional[str] = Header(None)):
+    """Called by Update_Meralco_Firebase.ipynb after it writes Firebase.
+    1. Reload the live linear rates
+    2. Rebuild /cms/published from /cms/inbox (Tagalog text realized here)
+    3. Rate-change advisory on the household's billed kWh so far; pushed once per period
+    """
     global MERALCO_RATES
+    if REFRESH_TOKEN and x_grid_token != REFRESH_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
     MERALCO_RATES = firebase_db.reference("/meralco_rates").get()
-    return {"status": "ok", "message": "Meralco rates refreshed"}
+    cms_result = publish_cms()
+
+    period = rate_compare.period_of(MERALCO_RATES)
+    pushed_ref = firebase_db.reference(RATES_PUSHED_REF)
+    first_time = bool(period) and pushed_ref.get() != period
+
+    latest = get_latest_averaged_reading()
+    billed_kwh = float(latest["cumul_kwh"]) * calibration_k() if latest else 0.0
+    adv = household_rate_advisory(billed_kwh, "so_far", push=first_time)
+    publish_advisory(adv)
+    if adv and first_time:
+        pushed_ref.set(period)
+
+    return {
+        "status":        "ok",
+        "message":       "Meralco rates refreshed",
+        "period":        period,
+        "cms":           cms_result,
+        "rate_advisory": adv["message_tl"] if adv else
+                         "none (no previous month in /meralco_rates_history, or no kWh yet)",
+        "pushed":        bool(adv and first_time),
+    }
 
 # ── Forecast Endpoint ──────────────────────────────────────────────────────────
 @app.post("/forecast")
 def forecast():
+    """User-triggered forecast (the app's refresh). Scheduled runs use the same
+    computation: see FORECAST_SCHEDULE."""
+    return run_forecast("user")
+
+
+def run_forecast(trigger_source: str = "user") -> dict:
     """
-    User-triggered endpoint. Same computation as the paper (Chapter III) and
+    Same computation as the paper (Chapter III) and
     GRID_Forecast_Check.ipynb, via forecast_retrain.py:
       clean total today  = SVR on level-normalised inputs (anomalous readings excluded)
       day total          = clean total + anomalous so far + expected anomalous energy still to come
@@ -952,7 +1418,11 @@ def forecast():
     latest = get_latest_averaged_reading()
     if latest is None:
         raise HTTPException(status_code=503, detail="No data available yet.")
+    with _forecast_lock:                              # one forecast at a time (user + scheduled)
+        return _run_forecast_locked(latest, trigger_source)
 
+
+def _run_forecast_locked(latest, trigger_source: str) -> dict:
     fb, ab = FORECAST_BUNDLE, ANOMALY_BUNDLE          # read once (hot reload safe)
     now = datetime.now(PH_TZ)
 
@@ -999,11 +1469,48 @@ def forecast():
         "projected_bill":               bill,
         "forecast_version":             f["forecast_version"],
         "anomaly_version":              ab.get("version", "june-v2"),
+        "trigger_source":               trigger_source,
     }
 
     firebase_db.reference("/forecast").set(result)
-    log_forecast(result, now.replace(tzinfo=None))
+    log_forecast(result, now.replace(tzinfo=None), trigger_source)
+
+    # NLG: cycle status + projection (one merged message), this month's rate
+    # effect on the household, and the daily advisory
+    advisories = nlg.plan_advisories([
+        nlg.build_cycle_advisory(
+            accumulated_kwh=accumulated_kwh * f["calibration_k"],   # billed kWh so far
+            projected_kwh=f["projected_eom_calibrated_kWh"],
+            days_so_far=days_so_far,
+            days_left=f["days_remaining"],
+            projected_bill_php=bill_total(bill),
+            calibration_k=f["calibration_k"],
+            avoid_id=last_template_id("cycle"),
+        ),
+        household_rate_advisory(f["projected_eom_calibrated_kWh"], "projected", push=False),
+        nlg.build_daily_advisory(
+            predicted_total_kwh=f["predicted_day_total_kWh"],
+            typical_daily_kwh=f["ewma_daily_kWh"],
+            anomalous_kwh=f["anomalous_so_far_kWh"] + f["expected_rest_anomalous_kWh"],
+            avoid_id=last_template_id("daily"),
+        ),
+    ])
+    for adv in advisories:
+        publish_advisory(adv)
+
+    result["advisories"] = advisories
     return result
+
+
+def bill_total(bill) -> Optional[float]:
+    """Total amount from compute_bill(). The notebook's version returns
+    "total_energy_amount"; the other keys are fallbacks."""
+    if not isinstance(bill, dict) or "error" in bill:
+        return None
+    for key in ("total_energy_amount", "total_bill", "total", "total_amount"):
+        if isinstance(bill.get(key), (int, float)):
+            return float(bill[key])
+    return None
 
 
 @app.get("/forecast-model")
@@ -1016,11 +1523,20 @@ def forecast_model_info():
             "calibration_k": b["eom"]["k_pooled"]}
 
 
-@app.post("/forecast-model/refit")
-def forecast_model_refit_now():
-    """Refit the forecasting model now (installs within a minute)."""
-    _forecast_refit_if_due(force_reason="manual")
-    return {"status": "refit written to models/incoming/, installs within a minute"}
+@app.post("/forecast-model/check-refit")
+def forecast_model_check_now(force: bool = False):
+    """Same as the nightly job: refits only if due (weekly, or the anomaly model changed).
+    force=true refits regardless. A refit installs within a minute."""
+    today = datetime.now(PH_TZ).date()
+    due, reason = fr.refit_due(FORECAST_BUNDLE, ANOMALY_BUNDLE, today)
+    if not due and not force:
+        return {"refit": False, "reason": reason, "version": FORECAST_BUNDLE.get("version"),
+                "last_refit": FORECAST_BUNDLE.get("last_refit")}
+    with get_conn() as conn:
+        status = fr.run_refit_if_due(conn, FORECAST_BUNDLE, ANOMALY_BUNDLE, MODEL_DIR, today,
+                                     force_reason=None if due else "manual")
+    print(f"📈 Forecast refit check: {status}")
+    return status
 
 
 # ── Weekly Comparison Endpoint ────────────────────────────────────────────────
@@ -1082,8 +1598,15 @@ def get_weekly_comparison():
  
     current_week_data = fetch_week(current_week_start, current_week_end)
     last_week_data    = fetch_week(last_week_start, last_week_end)
- 
+
+    # NLG: completed days of this week vs the same weekdays of last week (in-app only)
+    weekly_adv = nlg.build_weekly_advisory(
+        current_week_data, last_week_data, str(today),
+        avoid_id=last_template_id("weekly"))
+    publish_advisory(weekly_adv)
+
     return {
+        "advisory": weekly_adv,
         "status": "ok",
         "current_week": {
             "start":      str(current_week_start),
@@ -1155,55 +1678,213 @@ def get_history(date_str: str):
 @app.get("/anomaly-logs/pending")
 def get_pending_anomalies():
     """
-    Returns all anomaly logs where acknowledged IS NULL.
-    These are the unreviewed alerts shown on mobile UI.
+    Unreviewed anomaly rows, one per 5-min reading (kept for compatibility).
+    The app should use GET /anomaly-events/pending (one card per event) instead.
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT * FROM anomaly_logs
-                WHERE acknowledged IS NULL
+                WHERE reviewed_at IS NULL AND expired_at IS NULL
                 ORDER BY timestamp DESC
                 """
             )
             rows = cur.fetchall()
- 
+
     return {
         "status": "ok",
         "count":  len(rows),
         "data":   [dict(r) for r in rows]
     }
- 
+
+
+@app.get("/anomaly-events/pending")
+def get_pending_anomaly_events():
+    """
+    One card per unanswered anomaly event from the last 7 days, newest first.
+      status "open"   -> still happening: message only, no answer buttons
+      status "closed" -> past-tense message, summary (minutes, kWh, ≈ ₱),
+                         the three answers, and chart data for the app to draw
+    Each row's timestamp is the END of its 5-minute window.
+    """
+    now = datetime.now(PH_TZ)
+    now_n = now.replace(tzinfo=None)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT a.event_id,
+                       MIN(a.timestamp)                                   AS first_ts,
+                       MAX(a.timestamp)                                   AS last_ts,
+                       COUNT(*)                                           AS readings,
+                       ARRAY_AGG(a.id ORDER BY a.timestamp)               AS log_ids,
+                       MAX(a.power_avg)                                   AS peak_power,
+                       MAX(a.time_zscore)                                 AS peak_z,
+                       (ARRAY_AGG(a.roll_mean_1hr ORDER BY a.power_avg DESC))[1] AS baseline_1hr,
+                       (ARRAY_AGG(a.power_avg ORDER BY ABS(a.power_avg - a.roll_mean_1hr)
+                                  DESC NULLS LAST))[1]                   AS dev_power,
+                       (ARRAY_AGG(a.roll_mean_1hr ORDER BY ABS(a.power_avg - a.roll_mean_1hr)
+                                  DESC NULLS LAST))[1]                   AS dev_baseline,
+                       SUM(r.interval_kwh)                                AS event_kwh,
+                       MAX(a.event_closed_at)                             AS closed_at
+                FROM anomaly_logs a
+                LEFT JOIN readings r ON r.id = a.reading_id
+                WHERE a.reviewed_at IS NULL AND a.expired_at IS NULL
+                GROUP BY a.event_id
+                HAVING MAX(a.timestamp) >= %s
+                ORDER BY MIN(a.timestamp) DESC
+                """,
+                (now_n - nlg.REVIEW_EXPIRY,),
+            )
+            rows = cur.fetchall()
+
+            charts = {}
+            pad = timedelta(minutes=30)
+            for r in rows:
+                cur.execute(
+                    """
+                    SELECT r.timestamp, r.power_avg, (a.id IS NOT NULL) AS flagged
+                    FROM readings r
+                    LEFT JOIN anomaly_logs a ON a.reading_id = r.id
+                    WHERE r.timestamp BETWEEN %s AND %s
+                    ORDER BY r.timestamp
+                    """,
+                    (r["first_ts"] - pad, r["last_ts"] + pad),
+                )
+                charts[r["event_id"]] = [
+                    {"t": p["timestamp"].isoformat(), "w": round(float(p["power_avg"] or 0), 1),
+                     "flagged": bool(p["flagged"])}
+                    for p in cur.fetchall()
+                ]
+
+    latest = get_latest_averaged_reading()
+    current_billed = float(latest["cumul_kwh"]) * calibration_k() if latest else 0.0
+
+    events = []
+    for r in rows:
+        start = r["first_ts"] - timedelta(seconds=BUFFER_SECONDS)   # rows mark the window END
+        end = r["last_ts"]
+        z = float(r["peak_z"]) if r["peak_z"] is not None else None
+        status = nlg.event_status(r["last_ts"], now_n, r["closed_at"])
+        kwh = float(r["event_kwh"]) if r["event_kwh"] is not None else None
+        # State the reading that explains the flag: the highest one when the event is
+        # high for this hour (z >= 3), else the one furthest from its last-hour mean
+        # (a sudden rise or drop).
+        if z is not None and z >= nlg.SEVERITY_BANDS[-1][1]:
+            say_power, say_base = r["peak_power"], r["baseline_1hr"]
+        else:
+            say_power, say_base = r["dev_power"], r["dev_baseline"]
+        card = nlg.build_anomaly_review(
+            event_id=r["event_id"],
+            peak_power=float(say_power or 0),
+            baseline_1hr=float(say_base) if say_base is not None else None,
+            peak_z=z, start=start, end=end, today=now.date(), status=status,
+            event_kwh=kwh,
+            event_cost_php=event_cost_php(kwh, current_billed) if kwh else None,
+        )
+        events.append({
+            "event_id":     r["event_id"],
+            "start":        start.isoformat(),
+            "end":          end.isoformat(),
+            "duration_min": int((end - start).total_seconds() // 60),
+            "readings":     r["readings"],
+            "log_ids":      list(r["log_ids"]),
+            "peak_power_w": float(r["peak_power"] or 0),
+            "peak_zscore":  z,
+            "event_kwh":    round(kwh, 4) if kwh is not None else None,
+            "chart": {
+                "baseline_w": float(r["baseline_1hr"]) if r["baseline_1hr"] is not None else None,
+                "baseline_label_tl": "Karaniwan sa nakaraang 1 oras",
+                "points": charts.get(r["event_id"], []),
+            },
+            **card,
+        })
+
+    return {"status": "ok", "count": len(events), "data": events}
+
+
+class ReviewRequest(BaseModel):
+    answer: str   # "real" (Totoong kakaiba) | "normal" (Normal na gamit) | "unsure" (Hindi sigurado)
+
+REVIEW_ANSWERS = {o["answer"]: o["acknowledged"] for o in nlg.HITL_OPTIONS}
+
+@app.post("/anomaly-events/{event_id}/review")
+def review_anomaly_event(event_id: int, body: ReviewRequest):
+    """
+    HITL answer for a whole event (all its 5-min rows at once).
+      real   -> acknowledged = TRUE   (label: real anomaly)
+      normal -> acknowledged = FALSE  (label: normal use)
+      unsure -> acknowledged = NULL   (left unlabeled, as in the paper)
+    All three set reviewed_at, so the event leaves the pending list.
+    """
+    global ANOMALY_EVENT
+    if body.answer not in REVIEW_ANSWERS:
+        raise HTTPException(status_code=422,
+                            detail=f"answer must be one of {sorted(REVIEW_ANSWERS)}")
+    acknowledged = REVIEW_ANSWERS[body.answer]
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE anomaly_logs
+                SET acknowledged = %s, reviewed_at = %s
+                WHERE event_id = %s AND reviewed_at IS NULL
+                RETURNING id
+                """,
+                (acknowledged, ph_now_naive(), event_id),
+            )
+            updated = [r[0] for r in cur.fetchall()]
+            if not updated:
+                cur.execute("SELECT 1 FROM anomaly_logs WHERE event_id = %s LIMIT 1", (event_id,))
+                exists = cur.fetchone()
+        conn.commit()
+
+    if not updated:
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Anomaly event {event_id} not found")
+        return {"status": "already_reviewed", "event_id": event_id, "updated": []}
+
+    # Answered: later flagged readings start a new event (and a new prompt)
+    if ANOMALY_EVENT and ANOMALY_EVENT.get("event_id") == event_id:
+        ANOMALY_EVENT = None
+    try:
+        firebase_db.reference(f"{ADVISORY_REF}/anomaly/answered").set(
+            {"event_id": event_id, "answer": body.answer})
+    except Exception as e:
+        print(f"❌ Advisory answer write failed: {e}")
+
+    return {"status": "ok", "event_id": event_id, "answer": body.answer,
+            "acknowledged": acknowledged, "updated": updated}
+
 
 class AcknowledgeRequest(BaseModel):
     acknowledged: bool   # true = real anomaly | false = false alarm
- 
+
 @app.patch("/anomaly-logs/{log_id}/acknowledge")
 def acknowledge_anomaly(log_id: int, body: AcknowledgeRequest):
     """
-    User reviews an anomaly alert on mobile.
-    Sets acknowledged = true (real) or false (false alarm).
-    Record disappears from pending UI after this. ✅
-    Used for HITL retraining later.
+    Single-row answer (kept for compatibility; the app should review whole
+    events via POST /anomaly-events/{event_id}/review).
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE anomaly_logs
-                SET acknowledged = %s
+                SET acknowledged = %s, reviewed_at = %s
                 WHERE id = %s
                 RETURNING id
                 """,
-                (body.acknowledged, log_id)
+                (body.acknowledged, ph_now_naive(), log_id)
             )
             updated = cur.fetchone()
         conn.commit()
- 
+
     if not updated:
         raise HTTPException(status_code=404, detail=f"Anomaly log {log_id} not found")
- 
+
     return {
         "status":        "ok",
         "id":            log_id,
