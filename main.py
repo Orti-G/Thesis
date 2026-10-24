@@ -19,6 +19,7 @@ import asyncio
 import threading
 import anomaly_retrain as ar    # shared with GRID_Anomaly_Drift_Check.ipynb
 import forecast_retrain as fr   # shared with GRID_Forecast_Check.ipynb
+import hitl_trigger as hitl     # HITL retraining trigger (shared with HITL_Retraining_Check.ipynb)
 import advisory_rules as nlg    # Tagalog NLG advisories (pure, no I/O)
 import rate_compare             # month-over-month rate effect (linear rates, pure)
 
@@ -62,6 +63,7 @@ ar.validate_bundle(ANOMALY_BUNDLE)
 
 AUTO_REFIT_FORECAST   = True   # weekly SVR refit + refit after an anomaly-model change
 AUTO_REFIT            = True   # False = only report drift; refit manually on the VM: python anomaly_retrain.py --refit
+AUTO_REFIT_HITL       = True   # False = only report recurring false alarms (no refit)
 MODEL_WATCH_SECONDS   = 60     # how often models/incoming/ is checked
 DRIFT_CHECK_HOUR      = 0      # daily drift check at 00:15 PH time (yesterday is complete)
 DRIFT_CHECK_MINUTE    = 15
@@ -1239,10 +1241,23 @@ def _daily_drift_check():
         status = ar.run_daily_check(conn, ANOMALY_BUNDLE, MODEL_DIR, auto_refit=AUTO_REFIT)
     firebase_db.reference("/anomaly_model/drift").set({k: str(v) for k, v in status.items()})
     print(f"🔎 Drift check: {status}")
+    refit_done = bool(status.get("refit"))
+    # A drift refit already trains on the newest 30 days, so the HITL check waits for the next day.
+    if not refit_done:
+        refit_done = _hitl_check()
     # If the anomaly model was refit, the forecast refit follows its install (next tick).
     # Otherwise check the weekly forecast refit now.
-    if not status.get("refit"):
+    if not refit_done:
         _forecast_refit_if_due()
+
+
+def _hitl_check() -> bool:
+    """Recurring owner-labeled false alarms -> refit (same path as a drift refit). Returns True if refit."""
+    with get_conn() as conn:
+        h = hitl.run_hitl_check(conn, ANOMALY_BUNDLE, MODEL_DIR, auto_refit=AUTO_REFIT_HITL)
+    firebase_db.reference("/anomaly_model/hitl").set({k: str(v) for k, v in h.items()})
+    print(f"🧑 HITL check: {h}")
+    return bool(h.get("refit"))
 
 
 async def anomaly_model_watcher():
@@ -1310,6 +1325,13 @@ def anomaly_model_check_now():
     """Run the drift check now (same as the daily job)."""
     _daily_drift_check()
     return firebase_db.reference("/anomaly_model/drift").get()
+
+
+@app.post("/anomaly-model/check-hitl")
+def anomaly_model_check_hitl_now():
+    """Run only the HITL check now (refits if owner-labeled false alarms recur)."""
+    _hitl_check()
+    return firebase_db.reference("/anomaly_model/hitl").get()
 
 def get_current_schedule_filename():
     """Picks the PDF whose filename encodes the latest year-month, e.g.
