@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-23T00:00:00Z",
+  "title": "Design System: GRID",
+  "extensions": {
+    "colorMeta": {
+      "signal-orange": { "role": "primary", "displayName": "Signal Orange", "canonical": "oklch(68.8% 0.182 45)", "source": "primaryOrange", "tonalRamp": ["#1D0200", "#4A0900", "#7C1600", "#AE2D00", "#D55400", "#FE7931", "#FFAA77", "#FFDAB7"] },
+      "header-orange": { "role": "primary", "displayName": "Header Orange", "canonical": "oklch(74.5% 0.163 53)", "source": "topCardColor", "tonalRamp": ["#1B0400", "#451200", "#752400", "#A43C00", "#CA6000", "#F28430", "#FFB177", "#FFDFB7"] },
+      "orange-ink": { "role": "primary", "displayName": "Orange Ink", "canonical": "oklch(57.3% 0.159 42)", "source": "orangeInk", "tonalRamp": ["#1C0300", "#470F00", "#771F00", "#A73600", "#CE5B27", "#F67F4E", "#FFAD87", "#FFDCC1"] },
+      "ground": { "role": "neutral", "displayName": "Ground", "canonical": "oklch(98.5% 0 0)", "source": "bgColor", "tonalRamp": ["#0B0B0B", "#252525", "#424242", "#616161", "#828282", "#A5A5A5", "#C9C9C9", "#EEEEEE"] },
+      "card-white": { "role": "neutral", "displayName": "Card White", "canonical": "oklch(100% 0 0)", "source": "Colors.white", "tonalRamp": ["#0B0B0B", "#252525", "#424242", "#616161", "#828282", "#A5A5A5", "#C9C9C9", "#EEEEEE"] },
+      "hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "oklch(94.3% 0 0)", "source": "hairline", "tonalRamp": ["#0B0B0B", "#252525", "#424242", "#616161", "#828282", "#A5A5A5", "#C9C9C9", "#EEEEEE"] },
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "oklch(23.5% 0 0)", "source": "textDark", "tonalRamp": ["#0B0B0B", "#252525", "#424242", "#616161", "#828282", "#A5A5A5", "#C9C9C9", "#EEEEEE"] },
+      "body-ink": { "role": "neutral", "displayName": "Body Ink", "canonical": "oklch(38.7% 0 0)", "tonalRamp": ["#0B0B0B", "#252525", "#424242", "#616161", "#828282", "#A5A5A5", "#C9C9C9", "#EEEEEE"] },
+      "muted-ink": { "role": "neutral", "displayName": "Muted Ink", "canonical": "oklch(49.8% 0.009 254)", "tonalRamp": ["#090B0F", "#22252A", "#3F4247", "#5E6267", "#7E8388", "#A1A5AB", "#C5CACF", "#EAEFF5"] },
+      "nav-ink": { "role": "neutral", "displayName": "Nav Ink", "canonical": "oklch(55.7% 0.047 43)", "source": "navIconColor", "tonalRamp": ["#110906", "#30211B", "#543B32", "#79594C", "#9B7A6C", "#BF9C8E", "#DFC2B7", "#FEE9E1"] },
+      "pill-ink": { "role": "neutral", "displayName": "Pill Ink", "canonical": "oklch(23.7% 0.033 51)", "source": "chipInk", "tonalRamp": ["#0F0A07", "#2D231D", "#4E3E35", "#715C51", "#937D71", "#B7A093", "#D8C5BA", "#F9EBE4"] },
+      "icon-well": { "role": "neutral", "displayName": "Icon Well", "canonical": "oklch(96.3% 0.003 229)", "tonalRamp": ["#0A0B0C", "#242526", "#414243", "#606162", "#818383", "#A3A5A6", "#C7C9CA", "#EDEFF0"] },
+      "rise-red": { "role": "tertiary", "displayName": "Rise Red", "canonical": "oklch(60.8% 0.209 27)", "source": "upText / badgeRed", "tonalRamp": ["#210000", "#510000", "#860000", "#BB000A", "#E53935", "#FF6258", "#FF9B8D", "#FFD1C5"] },
+      "fall-green": { "role": "tertiary", "displayName": "Fall Green", "canonical": "oklch(52.3% 0.135 144)", "source": "downText", "tonalRamp": ["#011002", "#052E08", "#0F5015", "#237429", "#49974B", "#6CBB6D", "#9EDC9D", "#D2FCD0"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Live values in header glass tiles, rendered through RollingNumber with tabular figures. 26px in Advisories' two-up tiles, 28px on Dashboard." },
+      "headline": { "displayName": "Headline", "purpose": "Screen title or household nickname on the header field, white." },
+      "section": { "displayName": "Section", "purpose": "Section headings on the white desk." },
+      "title": { "displayName": "Title", "purpose": "Card titles (15.5px) and state-card titles (16px)." },
+      "body": { "displayName": "Body", "purpose": "Card body copy; Bakit explanations at 13px. Tolerates long Tagalog strings." },
+      "label": { "displayName": "Label", "purpose": "Tile labels, units, chip labels (700), tab labels (14.5px)." },
+      "caption": { "displayName": "Caption", "purpose": "Chart day labels, legends, timestamps, hint pills." },
+      "nav-label": { "displayName": "Nav Label", "purpose": "Bottom nav labels only; scale down, never wrap." }
+    },
+    "shadows": [
+      { "name": "nav-float", "value": "0 6px 24px rgba(0,0,0,0.10)", "purpose": "The floating bottom nav pill." },
+      { "name": "hint-float", "value": "0 3px 10px rgba(0,0,0,0.12)", "purpose": "White first-run hint pills over the header chart." }
+    ],
+    "surfaces": [
+      { "name": "glass-tile", "value": "linear-gradient(135deg, rgba(255,255,255,0.30), rgba(255,255,255,0.08)); border 1px rgba(255,255,255,0.40)", "purpose": "Header tiles on the orange field. No backdrop blur over flat orange." },
+      { "name": "nav-glass", "value": "rgba(255,255,255,0.80) over blur(8px)", "purpose": "The nav pill, the one place content moves behind a surface." }
+    ],
+    "motion": [
+      { "name": "label-swap", "value": "180ms", "purpose": "SwapText label swap on scrub start and release." },
+      { "name": "digit-roll", "value": "420ms cubic-bezier(0.33, 1, 0.68, 1)", "purpose": "RollingNumber per-digit wheel (easeOutCubic)." },
+      { "name": "bars-rise", "value": "700ms cubic-bezier(0.33, 1, 0.68, 1)", "purpose": "Painted bars rise once on load (easeOutCubic)." },
+      { "name": "series-reveal", "value": "260ms cubic-bezier(0.65, 0, 0.35, 1)", "purpose": "Comparison series slides in and out with its chip (easeInOutCubic)." },
+      { "name": "nav-select", "value": "200ms ease-in-out", "purpose": "Selected nav pill and label weight." },
+      { "name": "expand", "value": "220ms ease-out", "purpose": "Bakit panel open and close; chevron rotates over 200ms." },
+      { "name": "hint-fade", "value": "250ms", "purpose": "First-run scrub hint fade." },
+      { "name": "scrub-hold", "value": "160ms", "purpose": "Long-press threshold before a chart scrub starts; tap peeks for 1800ms." },
+      { "name": "reduced-motion", "value": "0ms", "purpose": "Every duration above collapses to zero when MediaQuery.disableAnimations is set." }
+    ],
+    "breakpoints": [],
+    "drift": [
+      "White text on Header Orange (#FA8B39) is about 2.4:1, app-wide (Dashboard, Advisories, Billing, Alerts). Recorded as the world's material, not as a passing contrast; unresolved.",
+      "Colours are raw hex final fields per screen state, not Material ColorScheme roles; no ThemeData and no dark theme exist.",
+      "Neutrals vary: textDark #1E1E1E (Advisories, Settings, Billing) vs #111418 (Alerts); ground #FAFAFA vs Billing's creamBg #FFFDF9.",
+      "Billing names a different orange family: primaryOrange #FCB775, brandOrangeText #E25319, tier text #7A3712, active tab #EF7A22.",
+      "Dashboard content cards use a Colors.grey 35% border plus 2 to 5% black shadows; Advisories cards use the 1px #ECECEC hairline with no shadow. The hairline is recorded as canonical.",
+      "Dashboard header glass tiles carry a 12px backdrop blur over the flat field; Advisories drops it.",
+      "Alerts has no flat orange header: a 22% orange radial glow behind a dark 30px title.",
+      "Alerts passes Signal Orange (#F26E22) to BakitExpander, and the expander defaults to it: about 2.9:1 on white. Advisories passes Orange Ink.",
+      "Uppercase tracked labels exist in Billing calculator captions (BILL CALCULATOR, 11px/800, 0.8 tracking) and Alerts severity tags (1.2 tracking); not canonized."
+    ]
+  },
+  "components": [
+    {
+      "name": "Header Field with Glass Tiles",
+      "kind": "custom",
+      "refersTo": "header-tile",
+      "description": "Flat orange header with white title and two translucent tiles carrying rolling values.",
+      "html": "<div class=\"ds-field\"><div class=\"ds-field-title\">Advisories</div><div class=\"ds-tiles\"><div class=\"ds-tile\" tabindex=\"0\"><div class=\"ds-tile-label\">Daily average</div><div class=\"ds-tile-value\">8.4<span>kWh</span></div></div><div class=\"ds-tile\" tabindex=\"0\"><div class=\"ds-tile-label\">vs last week</div><div class=\"ds-tile-value\">-6<span>%</span></div></div></div></div>",
+      "css": ".ds-field { background: #FA8B39; padding: 16px 20px; font-family: Roboto, sans-serif; color: #FFFFFF; } .ds-field-title { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 8px; } .ds-tiles { display: flex; gap: 12px; } .ds-tile { flex: 1; padding: 16px; border-radius: 20px; background: linear-gradient(135deg, rgba(255,255,255,0.30), rgba(255,255,255,0.08)); border: 1px solid rgba(255,255,255,0.40); transition: background 0.18s; } .ds-tile:hover { background: linear-gradient(135deg, rgba(255,255,255,0.38), rgba(255,255,255,0.12)); } .ds-tile:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 2px; } .ds-tile-label { font-size: 13px; font-weight: 600; margin-bottom: 10px; } .ds-tile-value { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; } .ds-tile-value span { font-size: 13px; font-weight: 600; margin-left: 4px; }"
+    },
+    {
+      "name": "Header Chip",
+      "kind": "chip",
+      "refersTo": "header-chip",
+      "description": "Filter chip on the orange field; solid white with Orange Ink label when selected.",
+      "html": "<div class=\"ds-chip-field\"><button class=\"ds-chip\">+ Last week</button><button class=\"ds-chip ds-chip-on\">&#10003; Last week</button></div>",
+      "css": ".ds-chip-field { background: #FA8B39; padding: 16px; display: flex; gap: 8px; } .ds-chip { font: 700 13px Roboto, sans-serif; color: #FFFFFF; background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.55); border-radius: 999px; padding: 6px 14px; min-height: 32px; cursor: pointer; transition: background 0.2s; } .ds-chip:hover { background: rgba(255,255,255,0.28); } .ds-chip:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 2px; } .ds-chip-on { background: #FFFFFF; color: #C2501A; border-color: #FFFFFF; } .ds-chip-on:hover { background: #FFFFFF; }"
+    },
+    {
+      "name": "Content Card with Bakit",
+      "kind": "card",
+      "refersTo": "content-card",
+      "description": "White card, hairline rule, 20px radius, tinted category icon, and the Bakit? expander.",
+      "html": "<div class=\"ds-ground\"><div class=\"ds-card\"><div class=\"ds-card-head\"><span class=\"ds-card-icon\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"#C2501A\"><path d=\"M17 12h-5v5h5v-5zM16 1v2H8V1H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-1V1h-2zm3 18H5V8h14v11z\"/></svg></span><span class=\"ds-card-title\">Mas mababa ang gamit ngayong linggo</span><span class=\"ds-card-age\">2h</span></div><p class=\"ds-card-body\">Bumaba ng 6% ang karaniwang gamit kumpara sa parehong mga araw noong nakaraang linggo.</p><button class=\"ds-bakit\">Bakit? &#9662;</button></div></div>",
+      "css": ".ds-ground { background: #FAFAFA; padding: 16px; font-family: Roboto, sans-serif; } .ds-card { background: #FFFFFF; border: 1px solid #ECECEC; border-radius: 20px; padding: 16px 16px 6px; } .ds-card-head { display: flex; align-items: flex-start; gap: 10px; } .ds-card-icon { width: 32px; height: 32px; border-radius: 50%; background: rgba(194,80,26,0.12); display: flex; align-items: center; justify-content: center; flex: none; } .ds-card-title { flex: 1; padding-top: 5px; color: #1E1E1E; font-size: 15.5px; font-weight: 800; line-height: 1.3; } .ds-card-age { padding-top: 7px; color: #757575; font-size: 12px; font-weight: 600; } .ds-card-body { margin: 10px 0 0; color: #444444; font-size: 14px; line-height: 1.45; } .ds-bakit { min-height: 48px; background: none; border: none; padding: 0; color: #C2501A; font: 700 13px Roboto, sans-serif; cursor: pointer; } .ds-bakit:hover { text-decoration: underline; } .ds-bakit:focus-visible { outline: 2px solid #C2501A; outline-offset: 2px; }"
+    },
+    {
+      "name": "State Card",
+      "kind": "card",
+      "refersTo": "state-card",
+      "description": "Empty, offline or error state with an icon well and a Try again text button.",
+      "html": "<div class=\"ds-ground\"><div class=\"ds-state\"><span class=\"ds-well\"><svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"#5F6368\"><path d=\"M19.35 10.04A7.49 7.49 0 0 0 12 4c-1.48 0-2.85.43-4.01 1.17l1.46 1.46A5.5 5.5 0 0 1 17.5 11h.5a3 3 0 0 1 1.5 5.6l1.45 1.45A5 5 0 0 0 19.35 10.04zM3 5.27l2.75 2.74A6 6 0 0 0 6 20h11.73l2 2L21 20.73 4.27 4 3 5.27zM7.73 10l8 8H6a4 4 0 0 1 0-8h1.73z\"/></svg></span><div class=\"ds-state-title\">Couldn't load advisories</div><div class=\"ds-state-body\">Check your internet connection, then try again.</div><button class=\"ds-text-btn\">Try again</button></div></div>",
+      "css": ".ds-ground { background: #FAFAFA; padding: 16px; font-family: Roboto, sans-serif; } .ds-state { background: #FFFFFF; border: 1px solid #ECECEC; border-radius: 20px; padding: 20px 20px 16px; } .ds-well { width: 40px; height: 40px; border-radius: 50%; background: #F1F3F4; display: flex; align-items: center; justify-content: center; margin-bottom: 14px; } .ds-state-title { color: #1E1E1E; font-size: 16px; font-weight: 800; margin-bottom: 4px; } .ds-state-body { color: #616161; font-size: 14px; line-height: 1.45; } .ds-text-btn { margin-top: 6px; min-height: 48px; background: none; border: none; padding: 0; color: #C2501A; font: 800 14px Roboto, sans-serif; cursor: pointer; border-radius: 4px; } .ds-text-btn:hover { background: rgba(194,80,26,0.08); } .ds-text-btn:focus-visible { outline: 2px solid #C2501A; outline-offset: 2px; }"
+    },
+    {
+      "name": "Pinned Tabs",
+      "kind": "nav",
+      "refersTo": "tab",
+      "description": "Material tabs pinned under the header, Orange Ink selected label, Signal Orange indicator, count badge.",
+      "html": "<div class=\"ds-tabs\"><button class=\"ds-tab ds-tab-on\">This week <span class=\"ds-count\">3</span></button><button class=\"ds-tab\">News &amp; Tips</button></div>",
+      "css": ".ds-tabs { display: flex; background: #FAFAFA; border-bottom: 1px solid #ECECEC; font-family: Roboto, sans-serif; } .ds-tab { flex: 1; height: 52px; background: none; border: none; color: #5F6368; font-size: 14.5px; font-weight: 600; cursor: pointer; position: relative; transition: background 0.2s; } .ds-tab:hover { background: rgba(242,110,34,0.08); } .ds-tab:focus-visible { outline: 2px solid #C2501A; outline-offset: -2px; } .ds-tab-on { color: #C2501A; font-weight: 700; } .ds-tab-on::after { content: ''; position: absolute; left: 30%; right: 30%; bottom: 0; height: 3px; background: #F26E22; border-radius: 3px 3px 0 0; } .ds-count { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 6px; border-radius: 10px; background: #C2501A; color: #FFFFFF; font-size: 11.5px; font-weight: 800; line-height: 1.6; }"
+    },
+    {
+      "name": "Floating Nav Pill",
+      "kind": "nav",
+      "refersTo": "nav-bar",
+      "description": "Floating blurred white pill with five items; the selected item sits in a Signal Orange pill.",
+      "html": "<div class=\"ds-nav-wrap\"><nav class=\"ds-nav\"><a class=\"ds-nav-item ds-nav-on\" href=\"#\"><span class=\"ds-nav-icon\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z\"/></svg></span>Home</a><a class=\"ds-nav-item\" href=\"#\"><span class=\"ds-nav-icon\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M19.5 3.5 18 2l-1.5 1.5L15 2l-1.5 1.5L12 2l-1.5 1.5L9 2 7.5 3.5 6 2v14H3v3a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3V2l-1.5 1.5zM19 19a1 1 0 0 1-2 0v-3H8V5h11v14z\"/></svg></span>Billing</a><a class=\"ds-nav-item\" href=\"#\"><span class=\"ds-nav-icon\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z\"/></svg><i class=\"ds-dot\"></i></span>Alerts</a></nav></div>",
+      "css": ".ds-nav-wrap { background: #FAFAFA; padding: 24px 12px 28px; font-family: Roboto, sans-serif; } .ds-nav { height: 72px; display: flex; justify-content: space-around; align-items: center; background: rgba(255,255,255,0.80); backdrop-filter: blur(8px); border-radius: 40px; box-shadow: 0 6px 24px rgba(0,0,0,0.10); } .ds-nav-item { width: 58px; display: flex; flex-direction: column; align-items: center; gap: 2px; color: #8C6B5E; font-size: 10px; font-weight: 500; text-decoration: none; } .ds-nav-icon { position: relative; padding: 8px 10px; border-radius: 30px; display: flex; transition: background 0.2s ease-in-out, color 0.2s ease-in-out; } .ds-nav-item:hover .ds-nav-icon { background: rgba(242,110,34,0.10); } .ds-nav-item:focus-visible { outline: 2px solid #C2501A; outline-offset: 2px; border-radius: 12px; } .ds-nav-on { color: rgba(0,0,0,0.87); font-weight: 700; } .ds-nav-on .ds-nav-icon { background: #F26E22; color: #FFFFFF; } .ds-dot { position: absolute; top: 6px; right: 8px; width: 8px; height: 8px; border-radius: 50%; background: #E53935; border: 1.5px solid #FFFFFF; }"
+    },
+    {
+      "name": "Scrub Hint Pill",
+      "kind": "custom",
+      "refersTo": "hint-pill",
+      "description": "First-run white pill over the header chart explaining hold-to-compare; shown once.",
+      "html": "<div class=\"ds-chip-field\"><div class=\"ds-hint\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"#F26E22\"><path d=\"M9 11.24V7.5a2.5 2.5 0 0 1 5 0v3.74a4.5 4.5 0 1 0-5 0zm9.84 4.63-4.54-2.26a1.3 1.3 0 0 0-.54-.11H13v-6a1.5 1.5 0 0 0-3 0v10.74l-3.43-.72a1.04 1.04 0 0 0-.97 1.75L10.52 24h6.79c.75 0 1.33-.55 1.44-1.28l.75-5.27a1.5 1.5 0 0 0-.66-1.58z\"/></svg>Hold a day to compare it with last week</div></div>",
+      "css": ".ds-chip-field { background: #FA8B39; padding: 16px; } .ds-hint { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px 6px 8px; background: #FFFFFF; border-radius: 20px; box-shadow: 0 3px 10px rgba(0,0,0,0.12); color: #2B1A10; font: 600 12px Roboto, sans-serif; transition: opacity 0.25s; } .ds-hint:hover { opacity: 0.92; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Meter Face",
+    "overview": "GRID reads like the face of a household electric meter turned warm: a flat orange field across the top of the screen where the live numbers sit in translucent white tiles and roll digit by digit like meter wheels, and a quiet off-white desk below where cards explain what those numbers mean. The orange field is where the household looks; the desk is where it reads. Dashboard and Advisories are built this way; Billing, Alerts and Settings predate it and carry older variants (see drift notes in the sidecar).\n\nDensity is moderate and phone-first: one column, 16 to 20px gutters, a floating white pill nav that the content scrolls under. Depth is mostly flat. The system leans on Material 3 defaults (Roboto, stock TabBar, FilterChip, buttons and ripples) re-coloured per screen with raw hex fields; there is no custom ThemeData and no dark theme. Charts are custom-painted directly onto the orange field and respond to touch: hold or tap a point and the header tiles re-read for it, with a selection haptic per step; release returns to the live state.\n\nMotion is functional and always optional: bars rise once, digits roll, labels swap, and every animation collapses to zero under the system's Remove animations setting.",
+    "keyCharacteristics": [
+      "Flat orange header field with white type and translucent white glass tiles.",
+      "Off-white ground with white cards edged by a single hairline rule at 20px radius.",
+      "Numbers that change roll per digit with tabular figures.",
+      "Painted, touch-scrubbable charts living inside the header, not in cards.",
+      "Roboto at heavy Material weights (700 to 900) for every number and title.",
+      "A floating, blurred white pill as the only navigation chrome."
+    ],
+    "rules": [
+      { "name": "The Ink Swap Rule", "body": "Orange that is read as text on white is Orange Ink, never Signal Orange. Signal Orange is for fills, indicators and icons on white; Header Orange is for the field.", "section": "colors" },
+      { "name": "The White On Field Rule", "body": "Everything on the header field is white or translucent white (tiles at 30% to 8% white, borders at 40%, unselected chips at 18%, last-week bars at 38%). No second hue enters the field except data colour inside white pills.", "section": "colors" },
+      { "name": "The Raw Hex Rule", "body": "Colours are declared as `final Color` fields at the top of each screen state using the names above (primaryOrange, topCardColor, bgColor, textDark, orangeInk, hairline). New screens copy these fields verbatim rather than inventing neighbours.", "section": "colors" },
+      { "name": "The Weight Not Face Rule", "body": "Hierarchy comes from Roboto's weights and size, never from a second family, uppercase tracking or decorative styling.", "section": "typography" },
+      { "name": "The Scale With The System Rule", "body": "Type follows the system font-size setting. Long labels shrink (FittedBox scale-down) or ellipsize; they do not clip.", "section": "typography" },
+      { "name": "The Float Earns Shadow Rule", "body": "Only floating overlays cast a shadow. Cards resting on the ground are edged by a hairline rule, not lifted.", "section": "elevation" },
+      { "name": "The Blur Must See Something Rule", "body": "Backdrop blur is used where content actually moves behind the surface (the nav pill, blur 8). Over the flat orange field a blur shows nothing and costs a full pass on budget phones, so header tiles are translucent gradients without blur.", "section": "elevation" }
+    ],
+    "dos": [
+      "**Do** start a screen from the header field: flat Header Orange (#FA8B39) to the status bar, white headline at 24px/800, glass tiles at 20px radius.",
+      "**Do** put orange text on white in Orange Ink (#C2501A) and keep Signal Orange (#F26E22) for fills, indicators and icons.",
+      "**Do** edge resting cards with a 1px Hairline (#ECECEC) at 20px radius on the Ground (#FAFAFA).",
+      "**Do** use RollingNumber for any value that updates live or on scrub, and SwapText for the label above it.",
+      "**Do** make header charts scrubbable with a selection haptic per step and a return on release.",
+      "**Do** read `MediaQuery.disableAnimationsOf` and collapse every duration to zero when it is set.",
+      "**Do** give every data source a loading, empty, offline and error state using the state card.",
+      "**Do** keep tap targets at 48dp and let text scale with the system setting."
+    ],
+    "donts": [
+      "**Don't** set Signal Orange (#F26E22) as text on white; at about 2.9:1 it fails body contrast.",
+      "**Don't** lift resting cards with shadows; shadows belong to the nav pill and hint pills only.",
+      "**Don't** add backdrop blur over the flat orange field.",
+      "**Don't** introduce a second typeface, uppercase tracked eyebrows or caption kickers above sections.",
+      "**Don't** invent new neutrals; reuse Ink, Body Ink, Muted Ink and Ground rather than near-duplicates.",
+      "**Don't** colour data in red or green unless it is a direction (rise or fall)."
+    ]
+  }
+}

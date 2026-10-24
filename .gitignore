@@ -1,0 +1,6 @@
+# Impeccable run artifacts (keep design.json)
+.impeccable/*
+!.impeccable/design.json
+
+# Claude Code personal settings
+.claude/settings.local.json
