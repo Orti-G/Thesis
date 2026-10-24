@@ -16,21 +16,25 @@ Household members (Meralco residential customers) who open the app on their phon
 The thesis panel evaluates the app as if it were shipping to households. Design for real household use; no demo-only affordances.
 
 ## Product Purpose
-A mobile companion to the GRID device, a thesis-built whole-house power meter. The device streams live readings to Firebase; a backend forecasts end-of-month kWh and detects anomalies. The app shows live consumption, forecasts, anomaly alerts and advisories, and turns usage into an itemized Meralco bill (including a kWh/peso calculator against published rate schedules). Success: the household understands and can act on their consumption before the bill arrives.
+A mobile companion to the GRID device, a thesis-built whole-house power meter. The device streams live readings to Firebase; a backend forecasts end-of-month kWh and detects anomalies. The app shows live consumption, forecasts, anomaly alerts the household reviews, weekly advisories, Meralco news and tips, and turns usage into an itemized Meralco bill (including a kWh/peso calculator against published rate schedules). Success: the household understands and can act on their consumption before the bill arrives.
 
 ## Positioning
 Own sensor hardware plus ML forecasting and anomaly detection feeding live data into the app, rather than a manual bill calculator or utility-provided portal.
 
 ## Operating Context
-Data comes from Firebase Realtime Database (`live_reading`, `forecast`, `meralco_rates`, `history/today`, `sync`) and a backend API (forecast, bill breakdown, calculator convert, history, anomaly logs, token registration). Rates come from Meralco rate-schedule PDFs named `MM-YYYY_rate_schedule.pdf`; there is no endpoint listing available schedules. Push notifications (Firebase Messaging) arrive on three channels: detected anomalies, Meralco tier-crossing warnings, and projected bill estimates.
+Data comes from Firebase Realtime Database (`live_reading`, `forecast`, `meralco_rates`, `history/today`, `sync`, `advisories/{bracket,cycle,daily,rates,weekly}` holding the latest backend advisory per category, and `cms/published` for the News & Tips feed) and a backend API (forecast, bill breakdown, calculator convert, history including `/history/weekly-comparison`, anomaly logs and events, anomaly reviews, token registration). Rates come from Meralco rate-schedule PDFs named `MM-YYYY_rate_schedule.pdf`; there is no endpoint listing available schedules. Push notifications (Firebase Messaging) arrive on three channels: detected anomalies, Meralco tier-crossing warnings, and projected bill estimates. Tapping an anomaly notification opens its review in Alerts.
+
+Releases are built with `flutter_mobile_ui/tool/build.ps1`, which stamps the git commit count as the Android build number; the version name comes from `pubspec.yaml`. Settings shows the installed version and build.
 
 ## Capabilities and Constraints
 - Screens: onboarding (with intro video), dashboard, billing, advisories, alerts, settings, disclaimer dialog.
 - Billing has "End of Month" and "Current" modes, tier info, itemized breakdown, and a calculator accepting kWh or pesos for a chosen rate month.
+- Alerts lets the household review each detected anomaly event (with its chart) by picking one of the answers the backend offers, posted to `/anomaly-events/{id}/review`. Swiping an event away answers "unsure", with an Undo toast before the answer is sent.
+- Advisories compares this week with last week, lists the backend's advisories (each with a "Bakit?" explanation), and has a News & Tips tab.
 - Settings hides a developer diagnostic mode, unlocked by tapping "About" repeatedly.
 - Whole-house scope only: one meter on the main supply. No appliance-level monitoring, load disaggregation, or per-appliance cost. Generic advice that names appliance types is fine.
 - Flutter app; Android is the target platform (iOS/web/desktop scaffolds exist but are incidental).
-- Language: UI copy is English today. A Tagalog natural-language-generation module is planned but not built; text containers and layouts should tolerate longer Tagalog strings and generated copy.
+- Language: the app's own UI labels are English. Backend-generated copy (advisory titles, messages and "Bakit?" explanations, rate-change cards, news items) arrives in Tagalog (`*_tl` fields) and is shown as sent, with one exception: Alerts rebuilds anomaly card titles and review answer labels in plain Tagalog from the stable `kind`, `severity` and `answer` values, because the backend's "Anomalya" titles confused households. Everything else is never rewritten. Text containers and layouts must tolerate longer Tagalog strings and generated copy.
 
 ## Brand Commitments
 - The app is named **GRID**, shown without an acronym expansion. It was formerly KURO.

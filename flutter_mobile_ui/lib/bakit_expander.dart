@@ -1,15 +1,18 @@
 import 'package:flutter/material.dart';
 
 /// "Bakit?" toggle that reveals the backend's `explain_tl` text under a
-/// card. Renders nothing when there is no explanation to show.
+/// card. Renders nothing when there is no explanation to show, apart from
+/// [trailing], which sits at the far end of the toggle's row either way.
 class BakitExpander extends StatefulWidget {
   final String? text;
   final Color accent;
+  final Widget? trailing;
 
   const BakitExpander({
     super.key,
     required this.text,
     this.accent = const Color(0xFFF26E22),
+    this.trailing,
   });
 
   @override
@@ -22,41 +25,23 @@ class _BakitExpanderState extends State<BakitExpander> {
   @override
   Widget build(BuildContext context) {
     final text = widget.text?.trim() ?? '';
-    if (text.isEmpty) return const SizedBox.shrink();
+    final trailing = widget.trailing;
+    if (text.isEmpty) {
+      if (trailing == null) return const SizedBox.shrink();
+      return ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Align(alignment: Alignment.centerRight, child: trailing),
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => setState(() => _open = !_open),
-          // 48dp tall, Android's minimum touch target.
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 48),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Bakit?',
-                  style: TextStyle(
-                    color: widget.accent,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(width: 2),
-                AnimatedRotation(
-                  turns: _open ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
-                  child: Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    size: 18,
-                    color: widget.accent,
-                  ),
-                ),
-              ],
-            ),
-          ),
+        Row(
+          children: [
+            _buildToggle(),
+            if (trailing != null) ...[const Spacer(), trailing],
+          ],
         ),
         AnimatedSize(
           duration: const Duration(milliseconds: 220),
@@ -83,6 +68,40 @@ class _BakitExpanderState extends State<BakitExpander> {
               : const SizedBox(width: double.infinity),
         ),
       ],
+    );
+  }
+
+  Widget _buildToggle() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _open = !_open),
+      // 48dp tall, Android's minimum touch target.
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Bakit?',
+              style: TextStyle(
+                color: widget.accent,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(width: 2),
+            AnimatedRotation(
+              turns: _open ? 0.5 : 0,
+              duration: const Duration(milliseconds: 200),
+              child: Icon(
+                Icons.keyboard_arrow_down_rounded,
+                size: 18,
+                color: widget.accent,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

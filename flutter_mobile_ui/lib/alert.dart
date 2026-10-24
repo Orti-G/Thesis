@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart' hide TextDirection;
+import 'alerts_guide.dart';
 import 'bakit_expander.dart';
 
 const String kApiBaseUrl = 'http://35.209.250.46:8000';
@@ -40,8 +41,9 @@ class _AlertsScreenState extends State<AlertsScreen>
   final Color textDark = const Color(0xFF111418);
   final Color criticalText = const Color(0xFFD32F2F);
 
-  // Tab state for toggling between Inbox and Info
-  int _selectedTab = 0;
+  // Whether the "How alerts work" sheet is up, so a tapped notification
+  // can close it and show the inbox underneath.
+  bool _infoOpen = false;
 
   // One entry per anomaly event (flagged readings ≤ 10 min apart), newest
   // first. `open` events are still happening and can't be answered yet.
@@ -88,7 +90,7 @@ class _AlertsScreenState extends State<AlertsScreen>
     final request = anomalyReviewRequest.value;
     if (request == null || !mounted) return;
 
-    if (request.showInbox) setState(() => _selectedTab = 0);
+    if (request.showInbox && _infoOpen) Navigator.of(context).pop();
     await _fetchEvents();
 
     final focusId = request.focusEventId;
@@ -328,41 +330,97 @@ class _AlertsScreenState extends State<AlertsScreen>
   // exactly as written; never convert them from UTC.
   static final DateFormat _clockFormat = DateFormat('h:mm a');
 
-  Color _severityColor(String? severity) {
-    switch (severity) {
+  // Every event wears the same bolt. For "higher than usual" events the
+  // shade says how strong it was, darkest for severe. Sudden rises and
+  // drops carry no strength level, so each gets its own clear colour
+  // instead: golden yellow going up, blue going down.
+  Color _eventColor(Map<String, dynamic> event) {
+    switch (event['kind']) {
+      case 'rise':
+        return const Color(0xFFF5B000);
+      case 'drop':
+        return const Color(0xFF3B82F6);
+    }
+    switch (event['severity']) {
       case 'severe':
-        return criticalText;
+        return const Color(0xFFC2410C);
       case 'moderate':
         return primaryOrange;
       case 'mild':
-        return const Color(0xFFE0A000);
-      default: // pattern
+        return const Color(0xFFF39456);
+      default:
         return const Color(0xFF64748B);
     }
   }
 
-  String _severityLabel(String? severity) {
-    switch (severity) {
-      case 'severe':
-        return 'SEVERE';
-      case 'moderate':
-        return 'MODERATE';
-      case 'mild':
-        return 'MILD';
-      default:
-        return 'UNUSUAL PATTERN';
-    }
+  // The backend's title_tl is "<kind> · <day>", e.g. "Anomalya · Okt 18".
+  // The day heads the list's groups, so titles leave it out.
+  static const String _daySeparator = ' · ';
+
+  String? _eventDay(Map<String, dynamic> event) {
+    final sent = event['title_tl'] as String?;
+    final dot = sent?.lastIndexOf(_daySeparator) ?? -1;
+    if (dot < 0) return null;
+    final day = sent!.substring(dot + _daySeparator.length);
+    return day.isEmpty ? null : day[0].toUpperCase() + day.substring(1);
   }
 
-  // hour = high for this time of day, rise/drop = sudden change.
-  IconData _kindIcon(String? kind) {
-    switch (kind) {
+  // The backend's "Anomalya" titles read as jargon to households, so the
+  // title is rebuilt here in plain words. Unknown kinds fall back to the
+  // backend's own title, minus its day.
+  String? _eventTitle(Map<String, dynamic> event) {
+    final sent = event['title_tl'] as String?;
+    final String? plain;
+    switch (event['kind']) {
       case 'rise':
-        return Icons.arrow_upward_rounded;
+        plain = 'Biglang tumaas ang konsumo';
       case 'drop':
-        return Icons.arrow_downward_rounded;
+        plain = 'Biglang bumaba ang konsumo';
+      case 'hour':
+        switch (event['severity']) {
+          case 'severe':
+            plain = 'Napakataas na konsumo';
+          case 'moderate':
+            plain = 'Mas mataas na konsumo kaysa karaniwan';
+          case 'mild':
+            plain = 'Bahagyang mataas na konsumo';
+          default:
+            plain = null;
+        }
       default:
-        return Icons.schedule_rounded;
+        plain = null;
+    }
+    if (plain != null) return plain;
+    final dot = sent?.lastIndexOf(_daySeparator) ?? -1;
+    return dot < 0 ? sent : sent!.substring(0, dot);
+  }
+
+  static final NumberFormat _wattFormat = NumberFormat('#,##0');
+
+  // The card's one supporting line: when, and how high it went. Drops skip
+  // the peak, since what matters there is how low it fell.
+  String? _eventDetail(Map<String, dynamic> event) {
+    final start = DateTime.tryParse(event['start'] as String? ?? '');
+    final end = DateTime.tryParse(event['end'] as String? ?? '');
+    if (start == null || end == null) return event['time_tl'] as String?;
+    final span = '${_clockFormat.format(start)}–${_clockFormat.format(end)}';
+    final peak = event['peak_power_w'] as num?;
+    if (event['kind'] == 'drop' || peak == null) return span;
+    return '$span · hanggang ${_wattFormat.format(peak)} W';
+  }
+
+  // Answers to "Normal ba ang paggamit na ito?" read as a yes/no reply,
+  // keyed on the stable `answer` value rather than the backend's label.
+  String _answerLabel(Map<String, dynamic> option) {
+    switch (option['answer']) {
+      case 'normal':
+        return 'Oo, normal ito';
+      case 'real':
+        return 'Hindi, kakaiba ito';
+      case 'unsure':
+        return 'Hindi ko alam';
+      default:
+        return (option['label_tl'] as String?) ?? '';
     }
   }
 
@@ -446,246 +504,122 @@ class _AlertsScreenState extends State<AlertsScreen>
                         padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
                         child: SizedBox.shrink(),
                       ),
+                      // The guide lives in a sheet, so the page itself is
+                      // only the events to review.
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
-                        child: Text(
-                          'Alerts & Anomalies',
-                          style: TextStyle(
-                            color: textDark,
-                            fontSize: 30,
-                            height: 1.1,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: -1.0,
-                          ),
-                        ),
-                      ),
-
-                      // ── TOGGLE BAR ──
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
                         child: Row(
                           children: [
-                            _buildTabButton(
-                              index: 0,
-                              title: 'Inbox',
-                              icon: Icons.all_inbox_rounded,
-                              hasBadge: _events.isNotEmpty,
-                              isIconOnly: false,
+                            Expanded(
+                              child: Text(
+                                'Alerts & Anomalies',
+                                style: TextStyle(
+                                  color: textDark,
+                                  fontSize: 30,
+                                  height: 1.1,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -1.0,
+                                ),
+                              ),
                             ),
-                            const SizedBox(width: 12),
-                            _buildTabButton(
-                              index: 1,
-                              title: 'Info',
-                              icon: Icons.info_outline_rounded,
-                              hasBadge: false,
-                              isIconOnly: true,
+                            IconButton(
+                              onPressed: () => _showInfo(context),
+                              tooltip: 'How alerts work',
+                              iconSize: 26,
+                              color: textDark,
+                              style: IconButton.styleFrom(
+                                backgroundColor: cardColor,
+                                fixedSize: const Size(48, 48),
+                              ),
+                              icon: const Icon(Icons.info_outline_rounded),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 24),
 
-                      // ── TAB CONTENT: INBOX (ANOMALIES) ──
-                      if (_selectedTab == 0) ...[
-                        // SUMMARY CARD
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                          child: Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(20),
-                            decoration: BoxDecoration(
-                              color: topCardColor,
-                              borderRadius: BorderRadius.circular(20),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: topCardColor.withValues(alpha: 0.25),
-                                  blurRadius: 16,
-                                  offset: const Offset(0, 6),
-                                ),
-                              ],
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 48,
-                                  height: 48,
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withValues(alpha: 0.18),
-                                    borderRadius: BorderRadius.circular(14),
-                                  ),
-                                  child: const Icon(
-                                    Icons.notifications_active_rounded,
-                                    color: Colors.white,
-                                    size: 24,
-                                  ),
-                                ),
-                                const SizedBox(width: 16),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        '$_closedCount Pending',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 22,
-                                          fontWeight: FontWeight.w700,
-                                          letterSpacing: -0.5,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        _openCount > 0
-                                            ? 'events awaiting your review · $_openCount ongoing'
-                                            : 'events awaiting your review',
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(alpha: 0.85),
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                if (_loadingEvents)
-                                  const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                              ],
-                            ),
+                      // ── SUMMARY CARD ── the one place the count is said,
+                      // in orange so a backlog reads as something to do.
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(20),
+                          decoration: BoxDecoration(
+                            color: topCardColor,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: topCardColor.withValues(alpha: 0.25),
+                                blurRadius: 16,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
                           ),
-                        ),
-                        const SizedBox(height: 28),
-
-                        // ANOMALIES FEED
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 20.0),
                           child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Text(
-                                'PENDING EVENTS',
-                                style: TextStyle(
-                                  color: Colors.grey[600],
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 0.5,
+                              Container(
+                                width: 48,
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.18),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: const Icon(
+                                  Icons.notifications_active_rounded,
+                                  color: Colors.white,
+                                  size: 24,
                                 ),
                               ),
-                              if (!_loadingEvents && _events.isNotEmpty)
-                                Text(
-                                  '${_events.length}',
-                                  style: TextStyle(
-                                    color: Colors.grey[500],
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '$_closedCount to review',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.w700,
+                                        letterSpacing: -0.5,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      _openCount > 0
+                                          ? 'events waiting for your answer · $_openCount ongoing'
+                                          : 'events waiting for your answer',
+                                      style: TextStyle(
+                                        color: Colors.white.withValues(alpha: 0.85),
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (_loadingEvents)
+                                const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
                                   ),
                                 ),
                             ],
                           ),
                         ),
-                        const SizedBox(height: 12),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 300),
-                            child: _buildAnomaliesListContent(),
-                          ),
+                      ),
+                      const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 300),
+                          child: _buildAnomaliesListContent(),
                         ),
-                        const SizedBox(height: 100),
-                      ],
-
-                      // ── TAB CONTENT: INFO (INFOGRAPHIC) ──
-                      if (_selectedTab == 1) ...[
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                          child: Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(24),
-                            decoration: _cardDecoration,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Anatomy of an Anomaly',
-                                  style: TextStyle(
-                                    color: textDark,
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w800,
-                                    letterSpacing: -0.6,
-                                  ),
-                                ),
-                                const SizedBox(height: 28),
-                                SizedBox(
-                                  height: 110,
-                                  child: Row(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      _buildBar(38, false),
-                                      _buildBar(52, false),
-                                      _buildBar(33, false),
-                                      _buildBar(42, false),
-                                      _buildBar(100, true),
-                                      _buildBar(38, false),
-                                      _buildBar(47, false),
-                                    ],
-                                  ),
-                                ),
-                                Container(
-                                  height: 2,
-                                  margin: const EdgeInsets.only(top: 8),
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: [Colors.grey[300]!, Colors.transparent],
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 14),
-                                Row(
-                                  children: [
-                                    _buildLegendDot(
-                                      const Color(0xFFE2E8F0),
-                                      'Normal Pattern',
-                                    ),
-                                    const Spacer(),
-                                    _buildLegendDot(primaryOrange, 'Detected Spike'),
-                                  ],
-                                ),
-                                const SizedBox(height: 8),
-                                Divider(
-                                  color: Colors.grey.withValues(alpha: 0.15),
-                                  height: 40,
-                                ),
-                                _buildCauseRow(
-                                  icon: Icons.bolt_rounded,
-                                  title: 'Sudden Spike',
-                                  description:
-                                      'A large change in power draw over a short period.',
-                                ),
-                                _buildCauseRow(
-                                  icon: Icons.schedule_rounded,
-                                  title: 'Unusual Time',
-                                  description:
-                                      'Appliance use at a time that\'s not typical.',
-                                ),
-                                _buildCauseRow(
-                                  icon: Icons.build_circle_rounded,
-                                  title: 'Faulty Appliance',
-                                  description:
-                                      'Sustained high consumption signaling a malfunction.',
-                                  isLast: true,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 100),
-                      ]
+                      ),
+                      const SizedBox(height: 100),
                     ],
                   ),
                 ),
@@ -699,80 +633,116 @@ class _AlertsScreenState extends State<AlertsScreen>
 
   // ── HELPER WIDGETS ──
 
-  Widget _buildTabButton({
-    required int index,
-    required String title,
-    required IconData icon,
-    required bool hasBadge,
-    bool isIconOnly = false,
-  }) {
-    final isSelected = _selectedTab == index;
-    return GestureDetector(
-      onTap: () => setState(() => _selectedTab = index),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: EdgeInsets.symmetric(
-          horizontal: isIconOnly ? 18 : 24,
-          vertical: 14,
-        ),
-        decoration: BoxDecoration(
-          color: isSelected ? cardColor : Colors.grey.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(100),
-          boxShadow: isSelected
-              ? [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  )
-                ]
-              : [],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Icon(
-                  icon,
-                  size: 22,
-                  color: isSelected ? textDark : Colors.grey[600],
-                ),
-                if (hasBadge)
-                  Positioned(
-                    right: -2,
-                    top: -2,
-                    child: Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE57373),
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: isSelected ? cardColor : bgColor,
-                          width: 2,
+  // The guide floats as a card over the inbox rather than rising from the
+  // bottom like an event, so reading it never feels like opening an alert.
+  void _showInfo(BuildContext context) {
+    setState(() => _infoOpen = true);
+    final reduceMotion = MediaQuery.of(context).disableAnimations;
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      // A plain dim, not a blur: the guide animates nonstop, and re-blurring
+      // the page every frame stutters on budget phones.
+      barrierColor: Colors.black.withValues(alpha: 0.4),
+      transitionDuration:
+          reduceMotion ? Duration.zero : const Duration(milliseconds: 260),
+      pageBuilder: (dialogContext, _, _) {
+        final size = MediaQuery.of(dialogContext).size;
+        return RepaintBoundary(
+          child: SafeArea(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: 520,
+                    maxHeight: size.height * 0.82,
+                  ),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(28),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.12),
+                          blurRadius: 32,
+                          offset: const Offset(0, 12),
                         ),
+                      ],
+                    ),
+                    child: Material(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(28),
+                      clipBehavior: Clip.antiAlias,
+                      // A fixed header keeps Close clear of the text
+                      // scrolling underneath it.
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(24, 12, 12, 12),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    'How alerts work',
+                                    style: TextStyle(
+                                      color: textDark,
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  onPressed: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                  tooltip: 'Close',
+                                  color: textDark,
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: const Color(0xFFF1F3F4),
+                                  ),
+                                  icon: const Icon(Icons.close_rounded),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Divider(
+                            height: 1,
+                            thickness: 1,
+                            color: Colors.grey.withValues(alpha: 0.15),
+                          ),
+                          Flexible(
+                            child: AlertsGuide(
+                              onDone: () => Navigator.of(dialogContext).pop(),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-              ],
-            ),
-            if (!isIconOnly) ...[
-              const SizedBox(width: 10),
-              Text(
-                title,
-                style: TextStyle(
-                  color: isSelected ? textDark : Colors.grey[600],
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
                 ),
               ),
-            ],
-          ],
-        ),
-      ),
-    );
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (_, animation, _, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.94, end: 1).animate(curved),
+            child: child,
+          ),
+        );
+      },
+    ).whenComplete(() {
+      if (mounted) setState(() => _infoOpen = false);
+    });
   }
 
   Widget _buildAnomaliesListContent() {
@@ -821,11 +791,16 @@ class _AlertsScreenState extends State<AlertsScreen>
         ),
       );
     } else {
+      // Events arrive newest first, so each day's events sit together and
+      // a heading starts wherever the day changes.
       return Column(
         key: const ValueKey('list'),
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           for (var i = 0; i < _events.length; i++) ...[
-            if (i > 0)
+            if (i == 0 || _eventDay(_events[i]) != _eventDay(_events[i - 1]))
+              _buildDayHeading(_eventDay(_events[i]))
+            else
               Divider(
                 height: 1,
                 thickness: 1,
@@ -836,6 +811,21 @@ class _AlertsScreenState extends State<AlertsScreen>
         ],
       );
     }
+  }
+
+  Widget _buildDayHeading(String? day) {
+    if (day == null) return const SizedBox(height: 12);
+    return Padding(
+      padding: const EdgeInsets.only(top: 24, bottom: 2),
+      child: Text(
+        day,
+        style: TextStyle(
+          color: Colors.grey[600],
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
   }
 
   Widget _buildOngoingPill() {
@@ -860,10 +850,9 @@ class _AlertsScreenState extends State<AlertsScreen>
     BuildContext context, {
     required Map<String, dynamic> event,
   }) {
-    final title = event['title_tl'] as String?;
-    final time = event['time_tl'] as String?;
-    final message = event['message_tl'] as String?;
-    final accent = _severityColor(event['severity'] as String?);
+    final title = _eventTitle(event);
+    final detail = _eventDetail(event);
+    final accent = _eventColor(event);
     final eventId = event['event_id'] as int?;
     final unsure = _unsureOption(event);
 
@@ -876,19 +865,7 @@ class _AlertsScreenState extends State<AlertsScreen>
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: 0.10),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                _kindIcon(event['kind'] as String?),
-                color: accent,
-                size: 20,
-              ),
-            ),
+            BoltBadge(color: accent, diameter: 56),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -917,28 +894,15 @@ class _AlertsScreenState extends State<AlertsScreen>
                       ],
                     ],
                   ),
-                  if (time != null) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      time,
-                      style: TextStyle(
-                        color: Colors.grey[500],
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                  if (message != null) ...[
+                  if (detail != null) ...[
                     const SizedBox(height: 4),
                     Text(
-                      message,
+                      detail,
                       style: TextStyle(
                         color: Colors.grey[600],
                         fontSize: 14,
                         height: 1.35,
                       ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ],
                 ],
@@ -953,7 +917,7 @@ class _AlertsScreenState extends State<AlertsScreen>
     if (event['status'] != 'closed' || eventId == null || unsure == null) {
       return row;
     }
-    final unsureLabel = (unsure['label_tl'] as String?) ?? 'Hindi sigurado';
+    final unsureLabel = _answerLabel(unsure);
     return Dismissible(
       key: ValueKey('event-$eventId'),
       direction: DismissDirection.horizontal,
@@ -992,22 +956,6 @@ class _AlertsScreenState extends State<AlertsScreen>
     );
   }
 
-  Widget _buildBar(double height, bool isAnomaly) {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6.0),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 500),
-          height: height,
-          decoration: BoxDecoration(
-            color: isAnomaly ? primaryOrange : const Color(0xFFE2E8F0),
-            borderRadius: BorderRadius.circular(100),
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildLegendDot(Color color, String label) {
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -1030,60 +978,14 @@ class _AlertsScreenState extends State<AlertsScreen>
     );
   }
 
-  Widget _buildCauseRow({
-    required IconData icon,
-    required String title,
-    required String description,
-    bool isLast = false,
-  }) {
-    return Padding(
-      padding: EdgeInsets.only(bottom: isLast ? 0 : 20.0),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xFFF1F5F9),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(icon, color: const Color(0xFF94A3B8), size: 20),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(
-                    color: textDark,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  description,
-                  style: TextStyle(
-                    color: Colors.grey[600],
-                    fontSize: 13.5,
-                    height: 1.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   // ── GLASSMORPHIC MODAL ──
   void _showAnomalyDetail(BuildContext context, Map<String, dynamic> entry) {
-    showModalBottomSheet(
+    _showSheet(context, _buildActionPanel(entry));
+  }
+
+  // The frosted sheet an event's details open in.
+  Future<void> _showSheet(BuildContext context, Widget child) {
+    return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
@@ -1131,7 +1033,7 @@ class _AlertsScreenState extends State<AlertsScreen>
                             ),
                           ),
                         ),
-                        _buildActionPanel(entry),
+                        child,
                       ],
                     ),
                   );
@@ -1147,10 +1049,7 @@ class _AlertsScreenState extends State<AlertsScreen>
   Widget _buildActionPanel(Map<String, dynamic> event) {
     final eventId = event['event_id'] as int?;
     final isClosed = event['status'] == 'closed';
-    final severity = event['severity'] as String?;
-    final accent = _severityColor(severity);
-    final time = event['time_tl'] as String?;
-    final title = event['title_tl'] as String?;
+    final title = _eventTitle(event);
     final message = event['message_tl'] as String?;
     final summary = event['summary_tl'] as String?;
     final prompt = event['prompt_tl'] as String?;
@@ -1158,60 +1057,22 @@ class _AlertsScreenState extends State<AlertsScreen>
     final options = ((event['options'] as List?) ?? const [])
         .cast<Map<String, dynamic>>();
     // "Unsure" is a small X under the real answers, not a third big button.
-    final mainOptions = options.where((o) => o['answer'] != 'unsure').toList();
+    // "Oo" goes first, as a yes/no reply would.
+    final mainOptions = options.where((o) => o['answer'] != 'unsure').toList()
+      ..sort((a, b) =>
+          (b['answer'] == 'normal' ? 1 : 0) - (a['answer'] == 'normal' ? 1 : 0));
     final unsure = _unsureOption(event);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _kindIcon(event['kind'] as String?),
-                    color: accent,
-                    size: 14,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    _severityLabel(severity),
-                    style: TextStyle(
-                      color: accent,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (!isClosed) ...[
-              const SizedBox(width: 8),
-              _buildOngoingPill(),
-            ],
-          ],
-        ),
-        if (time != null) ...[
-          const SizedBox(height: 14),
-          Text(
-            time,
-            style: TextStyle(
-              color: Colors.grey[500],
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+        // The title already says how strong it was, and the message says
+        // when, so the only marker left up here is "Ongoing".
+        if (!isClosed) ...[
+          _buildOngoingPill(),
+          const SizedBox(height: 12),
         ],
         if (title != null) ...[
-          const SizedBox(height: 12),
           Text(
             title,
             style: TextStyle(
@@ -1271,7 +1132,7 @@ class _AlertsScreenState extends State<AlertsScreen>
           for (var i = 0; i < mainOptions.length; i++) ...[
             if (i > 0) const SizedBox(height: 12),
             _buildAnswerButton(
-              label: (mainOptions[i]['label_tl'] as String?) ?? '',
+              label: _answerLabel(mainOptions[i]),
               filled: i == 0,
               onPressed: () =>
                   _reviewEvent(eventId, mainOptions[i]['answer'] as String),
@@ -1291,7 +1152,7 @@ class _AlertsScreenState extends State<AlertsScreen>
                 ),
                 icon: const Icon(Icons.close_rounded, size: 18),
                 label: Text(
-                  (unsure['label_tl'] as String?) ?? 'Hindi sigurado',
+                  _answerLabel(unsure),
                   style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w700,

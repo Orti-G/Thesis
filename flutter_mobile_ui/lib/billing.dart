@@ -97,6 +97,10 @@ class _BillingScreenState extends State<BillingScreen> {
   final Color creamBg = const Color(0xFFFFFDF9);
   final Color textDark = const Color(0xFF1E1E1E);
   final Color brandOrangeText = const Color(0xFFE25319);
+  // A lighter orange for the words around the hero number, so the number
+  // keeps the deepest orange and draws the eye first. About 3:1 on the
+  // cream behind it, the lowest this can go and still read.
+  final Color heroWordInk = const Color(0xFFEC7A3A);
   final Color tierTextColor = const Color(0xFF7A3712);
 
   final DatabaseReference _dbRef = FirebaseDatabase.instance.ref();
@@ -1698,7 +1702,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         headline,
                         key: ValueKey(headline),
                         style: TextStyle(
-                          color: brandOrangeText.withValues(alpha: 0.9),
+                          color: heroWordInk,
                           fontSize: 16,
                           fontWeight: FontWeight.w700,
                         ),
@@ -1721,9 +1725,10 @@ class _BillingScreenState extends State<BillingScreen> {
                               letterSpacing: -1.5,
                             ),
                           ),
-                          const TextSpan(
+                          TextSpan(
                             text: ' kWh',
                             style: TextStyle(
+                              color: heroWordInk,
                               fontSize: 22,
                               fontWeight: FontWeight.w700,
                             ),
@@ -1735,7 +1740,7 @@ class _BillingScreenState extends State<BillingScreen> {
                     Text(
                       'expected by end of day',
                       style: TextStyle(
-                        color: brandOrangeText.withValues(alpha: 0.8),
+                        color: heroWordInk,
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),

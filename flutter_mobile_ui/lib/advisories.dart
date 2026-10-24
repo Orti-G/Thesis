@@ -865,11 +865,6 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
       onSelected: (_) => _toggleLastWeek(),
       label: const Text('Last week'),
       tooltip: on ? 'Hide last week' : 'Show last week',
-      // The check replaces this when selected; an avatar left in place
-      // gets Material's dark selection scrim painted over it.
-      avatar: on
-          ? null
-          : const Icon(Icons.add_rounded, size: 18, color: Colors.white),
       showCheckmark: true,
       checkmarkColor: orangeInk,
       labelStyle: TextStyle(
@@ -1021,7 +1016,10 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Container(
-                          padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(20),
@@ -1033,26 +1031,13 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
                               ),
                             ],
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.touch_app_rounded,
-                                size: 16,
-                                color: primaryOrange,
-                              ),
-                              const SizedBox(width: 6),
-                              const Flexible(
-                                child: Text(
-                                  'Hold a day to compare it with last week',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFF2B1A10),
-                                  ),
-                                ),
-                              ),
-                            ],
+                          child: const Text(
+                            'Hold a day to compare it with last week',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF2B1A10),
+                            ),
                           ),
                         ),
                       ),
@@ -1230,14 +1215,11 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
             "Meralco's rates change.",
       );
     } else {
-      return SliverPadding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-        sliver: SliverList.list(
-          children: [
-            for (final advisory in advisories) _buildAdvisoryCard(advisory),
-          ],
-        ),
-      );
+      // One panel, items split by hairlines: the advisories read as one
+      // week's list rather than a stack of equal boxes.
+      content = _buildListPanel([
+        for (final advisory in advisories) _buildAdvisoryItem(advisory),
+      ]);
     }
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
@@ -1245,70 +1227,58 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
     );
   }
 
-  // ── ADVISORY CARD: backend title + message, "Bakit?" for the reasoning ──
-  Widget _buildAdvisoryCard(Map<String, dynamic> advisory) {
-    final title = advisory['title_tl'] as String?;
-    final message = advisory['message_tl'] as String?;
-    final timestamp = DateTime.tryParse('${advisory['timestamp']}')?.toLocal();
-    final (icon, accent) = _advisoryStyle(advisory['category'] as String?);
-
+  // ── LIST PANEL: one white card, items split by inset hairlines ─────────
+  Widget _buildListPanel(List<Widget> items) {
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: hairline),
       ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          for (var i = 0; i < items.length; i++) ...[
+            if (i > 0)
+              Divider(
+                height: 1,
+                thickness: 1,
+                indent: 16,
+                endIndent: 16,
+                color: hairline,
+              ),
+            items[i],
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ── ADVISORY: backend title + message, "Bakit?" for the reasoning ──────
+  Widget _buildAdvisoryItem(Map<String, dynamic> advisory) {
+    final title = advisory['title_tl'] as String?;
+    final message = advisory['message_tl'] as String?;
+    final timestamp = DateTime.tryParse('${advisory['timestamp']}')?.toLocal();
+
+    // Title, message, then one footer row that carries both "Bakit?" and
+    // the age, so the 48dp toggle row does double duty.
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 2),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: accent.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(icon, color: accent, size: 17),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 5),
-                  child: Text(
-                    title ?? '',
-                    style: TextStyle(
-                      color: textDark,
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w800,
-                      height: 1.3,
-                    ),
-                  ),
-                ),
-              ),
-              if (timestamp != null) ...[
-                const SizedBox(width: 8),
-                Padding(
-                  padding: const EdgeInsets.only(top: 7),
-                  child: Text(
-                    _formatAge(timestamp),
-                    style: TextStyle(
-                      color: Colors.grey[600],
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ],
+          Text(
+            title ?? '',
+            style: TextStyle(
+              color: textDark,
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+              height: 1.3,
+            ),
           ),
           if (message != null) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: 6),
             Text(
               message,
               style: const TextStyle(
@@ -1318,28 +1288,24 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
               ),
             ),
           ],
+          const SizedBox(height: 2),
           BakitExpander(
             text: advisory['explain_tl'] as String?,
             accent: orangeInk,
+            trailing: timestamp == null
+                ? null
+                : Text(
+                    _formatAge(timestamp),
+                    style: TextStyle(
+                      color: Colors.grey[600],
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
           ),
         ],
       ),
     );
-  }
-
-  (IconData, Color) _advisoryStyle(String? category) {
-    switch (category) {
-      case 'bracket':
-        return (Icons.speed_rounded, upText);
-      case 'cycle':
-        return (Icons.calendar_month_rounded, orangeInk);
-      case 'daily':
-        return (Icons.today_rounded, orangeInk);
-      case 'rates':
-        return (Icons.price_change_rounded, orangeInk);
-      default: // weekly
-        return (Icons.date_range_rounded, orangeInk);
-    }
   }
 
   // ── DESK STATES: loading, empty and error ───────────────────────────────
@@ -1453,11 +1419,16 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
         );
       }
     } else {
+      // The featured story keeps its own card; the rest share one panel.
       content = Column(
         children: [
           _buildFeaturedNewsCard(_newsItems.first),
-          const SizedBox(height: 16),
-          for (final item in _newsItems.skip(1)) _buildNewsListItem(item),
+          if (_newsItems.length > 1) ...[
+            const SizedBox(height: 16),
+            _buildListPanel([
+              for (final item in _newsItems.skip(1)) _buildNewsListItem(item),
+            ]),
+          ],
         ],
       );
     }
@@ -1585,38 +1556,34 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
     );
   }
 
-  // ── Byline: source, kind and date in one plain line; a pin when pinned ─
+  // ── Byline: source, kind and date in one plain line, led by "Pinned"
+  // in orange when the GRID team pinned it ────────────────────────────────
   Widget _buildByline(Map<String, dynamic> item) {
     final line = [
       item['source_name'] as String? ?? 'GRID',
       _newsKind(item['kind'] as String?),
       _newsDate(item),
     ].where((part) => part.isNotEmpty).join(' · ');
+    final style = TextStyle(
+      color: Colors.grey[700],
+      fontSize: 12.5,
+      fontWeight: FontWeight.w600,
+    );
 
-    return Row(
-      children: [
-        if (item['pinned'] == true) ...[
-          Icon(
-            Icons.push_pin_rounded,
-            size: 14,
-            color: orangeInk,
-            semanticLabel: 'Pinned',
-          ),
-          const SizedBox(width: 4),
-        ],
-        Flexible(
-          child: Text(
-            line,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: Colors.grey[700],
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
+    return Text.rich(
+      TextSpan(
+        children: [
+          if (item['pinned'] == true)
+            TextSpan(
+              text: 'Pinned · ',
+              style: style.copyWith(color: orangeInk),
             ),
-          ),
-        ),
-      ],
+          TextSpan(text: line),
+        ],
+      ),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: style,
     );
   }
 
@@ -1688,16 +1655,14 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
   Widget _buildNewsListItem(Map<String, dynamic> item) {
     final imageUrl = _imageUrlOf(item);
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Material(
-        color: Colors.white,
-        shape: _newsCardShape,
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () => _showNewsDetail(item),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+    // A row inside the shared panel; the whole row is the tap target, so
+    // it needs no chevron.
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => _showNewsDetail(item),
+        child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -1728,12 +1693,10 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
                     ],
                   ),
                 ),
-                Icon(Icons.chevron_right_rounded, color: Colors.grey[500]),
               ],
             ),
           ),
         ),
-      ),
     );
   }
 
