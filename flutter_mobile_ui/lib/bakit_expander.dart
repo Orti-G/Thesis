@@ -30,8 +30,9 @@ class _BakitExpanderState extends State<BakitExpander> {
         GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: () => setState(() => _open = !_open),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+          // 48dp tall, Android's minimum touch target.
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [

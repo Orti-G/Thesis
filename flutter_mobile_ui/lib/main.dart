@@ -158,7 +158,7 @@ class _MainScreenState extends State<MainScreen> {
       FirebaseDatabase.instance.ref().child('anomaly_alert');
 
   // Screens stay in their ORIGINAL index order (Settings = index 3,
-  // Advisories/Analytics = index 4) so nothing elsewhere in the app that
+  // Advisories = index 4) so nothing elsewhere in the app that
   // references a tab by index breaks. Only the nav bar's *visual* order
   // is changed below — Settings still reports index 3, it just renders
   // in the last slot of the row.
@@ -354,7 +354,7 @@ class _MainScreenState extends State<MainScreen> {
         _goToTab(1); // Billing
         break;
       case 'rates':
-        _goToTab(4); // Analytics: rates advisory + news feed
+        _goToTab(4); // Advisories: rates advisory + news feed
         break;
       case 'device':
         _goToTab(0); // Dashboard, which shows the offline sheet if needed
@@ -448,8 +448,8 @@ class _MainScreenState extends State<MainScreen> {
                     ),
                     _buildNavItem(
                       index: 4,
-                      icon: Icons.bar_chart_rounded,
-                      label: 'Analytics',
+                      icon: Icons.tips_and_updates_outlined,
+                      label: 'Advisories',
                     ),
                     _buildNavItem(
                       index: 3,
@@ -522,14 +522,19 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ),
             const SizedBox(height: 2),
-            AnimatedDefaultTextStyle(
-              duration: const Duration(milliseconds: 200),
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                color: isSelected ? Colors.black87 : navIconColor,
+            // Shrinks rather than wraps when a long label ("Advisories")
+            // meets a large system font size.
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: AnimatedDefaultTextStyle(
+                duration: const Duration(milliseconds: 200),
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                  color: isSelected ? Colors.black87 : navIconColor,
+                ),
+                child: Text(label, maxLines: 1, softWrap: false),
               ),
-              child: Text(label),
             ),
           ],
         ),
