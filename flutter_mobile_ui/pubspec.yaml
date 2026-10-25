@@ -50,6 +50,12 @@ dependencies:
   video_player: ^2.11.1
   url_launcher: ^6.3.3
   package_info_plus: ^10.2.2
+  esp_provisioning_ble: ^1.1.0
+  flutter_blue_plus: ^2.3.13
+  permission_handler: ^11.3.1
+  crypto: ^3.0.7
+  uuid: ^4.6.0
+  share_plus: ^13.3.1
 
 flutter_icons:
   android: true
@@ -87,6 +93,23 @@ flutter:
       - assets/restart.json
       - assets/grid_animation.mp4
       - assets/3d/
+      # Setup flow and intro animations (played once, never looped).
+      - assets/Welcome.json
+      - assets/Before we start.json
+      - assets/Enter Code1.json
+      - assets/Enter Code2.json
+      - assets/appintroanimation.json
+      # Setup flow product photo (monitor.png); see assets/setup/README.txt.
+      - assets/setup/
+
+  # Plus Jakarta Sans (SIL Open Font License — assets/fonts/PlusJakartaSans-OFL.txt),
+  # used by the device setup flow.
+  fonts:
+    - family: PlusJakartaSans
+      fonts:
+        - asset: assets/fonts/PlusJakartaSans-Regular.ttf
+        - asset: assets/fonts/PlusJakartaSans-SemiBold.ttf
+          weight: 600
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

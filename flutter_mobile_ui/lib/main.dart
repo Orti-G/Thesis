@@ -15,6 +15,9 @@ import 'alert.dart';
 import 'settings.dart';
 import 'onboarding_screen.dart';
 import 'advisories.dart';
+import 'firebase_options_legacy.dart';
+import 'household_scope.dart';
+import 'pilot_notice.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 final ValueNotifier<bool> testModeNotifier = ValueNotifier(false);
@@ -27,8 +30,12 @@ final ValueNotifier<String> nicknameNotifier = ValueNotifier('My Home'); // <-- 
 final ValueNotifier<bool> dashboardReadyNotifier = ValueNotifier(false);
 final ValueNotifier<bool> splashDoneNotifier = ValueNotifier(false);
 
+// Index of the visible bottom-nav tab, so a screen can tell whether it is the
+// one on show (the dashboard only counts as a viewer while it is).
+final ValueNotifier<int> selectedTabNotifier = ValueNotifier(0);
+
 // ── FCM / LOCAL NOTIFICATIONS SETUP ───────────────────────────────────────
-const String kBackendBaseUrl = 'http://35.209.250.46:8000'; // TODO: move to config if this changes per env
+const String kBackendBaseUrl = kLegacyApiBaseUrl;
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -65,6 +72,13 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  // Second app on the original project, used only by the legacy household
+  // (see household_scope.dart).
+  await Firebase.initializeApp(
+    name: kLegacyFirebaseAppName,
+    options: LegacyFirebaseOptions.currentPlatform,
+  );
+  await HouseholdScope.load();
 
   // Register background message handler as early as possible.
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
@@ -116,7 +130,9 @@ class _AppRootState extends State<_AppRoot> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        const MainScreen(),
+        // Nothing to load until a household or device is linked; the splash
+        // runs setup first and then opens MainScreen itself.
+        if (HouseholdScope.isLinked) const MainScreen() else const ColoredBox(color: Colors.black),
         if (!_splashGone)
           IgnorePointer(
             ignoring: _fadingOut,
@@ -154,8 +170,7 @@ class _MainScreenState extends State<MainScreen> {
   final Color navIconColor = const Color(0xFF8C6B5E);
   final Color badgeRed = const Color(0xFFE53935);
 
-  final DatabaseReference _anomalyRef =
-      FirebaseDatabase.instance.ref().child('anomaly_alert');
+  final DatabaseReference _anomalyRef = HouseholdScope.ref('anomaly_alert');
 
   // Screens stay in their ORIGINAL index order (Settings = index 3,
   // Advisories = index 4) so nothing elsewhere in the app that
@@ -164,15 +179,38 @@ class _MainScreenState extends State<MainScreen> {
   // in the last slot of the row.
   late final List<Widget> _screens = [
     const Dashboard(),
-    billing.BillingScreen(),
-    AlertsScreen(),
+    PilotGate(
+      notice: const PilotBanner(
+        body:
+            "Bills and forecasts start after your first month. GRID needs a few "
+            "weeks of readings before it can estimate your bill.",
+      ),
+      child: billing.BillingScreen(),
+    ),
+    PilotGate(
+      notice: const PilotBanner(
+        body:
+            "Alerts start after your first month. GRID needs about a month "
+            "of readings to learn what's normal for your home.",
+      ),
+      child: AlertsScreen(),
+    ),
     const SettingsScreen(),
-    AdvisoriesScreen(),
+    PilotGate(
+      notice: const PilotBanner(
+        body:
+            "Advisories start after your first month. GRID needs a few weeks "
+            "of readings to compare your usage and suggest ways to use less.",
+      ),
+      child: AdvisoriesScreen(),
+    ),
   ];
 
   @override
   void initState() {
     super.initState();
+    // A fresh MainScreen (e.g. after switching devices) opens on Dashboard.
+    selectedTabNotifier.value = 0;
     // Built behind the splash now, so hold the notification-permission
     // prompt until the splash has cleared.
     if (splashDoneNotifier.value) {
@@ -368,6 +406,7 @@ class _MainScreenState extends State<MainScreen> {
   void _goToTab(int index) {
     if (mounted) {
       setState(() => _selectedNavIndex = index);
+      selectedTabNotifier.value = index;
     }
   }
 
@@ -475,7 +514,10 @@ class _MainScreenState extends State<MainScreen> {
     final bool isSelected = _selectedNavIndex == index;
 
     return GestureDetector(
-      onTap: () => setState(() => _selectedNavIndex = index),
+      onTap: () {
+        setState(() => _selectedNavIndex = index);
+        selectedTabNotifier.value = index;
+      },
       behavior: HitTestBehavior.opaque,
       child: SizedBox(
         width: 58,

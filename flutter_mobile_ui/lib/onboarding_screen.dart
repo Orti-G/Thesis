@@ -4,7 +4,11 @@ import 'package:lottie/lottie.dart';
 import 'package:video_player/video_player.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart'; // dashboardReadyNotifier
+import 'device_id_screen.dart';
 import 'disclaimer_dialog.dart';
+import 'household_scope.dart';
+import 'wifi_setup/intro_screens.dart' show kIntroSeenPrefsKey;
+import 'wifi_setup/wifi_setup_screens.dart';
 
 /// Intro video shown over the main screen at launch. The main screen is
 /// already built underneath (see `_AppRoot` in main.dart) so the dashboard
@@ -64,9 +68,27 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       await showDialog(
         context: context,
         barrierDismissible: false, // must tap Close
-        builder: (_) => const DisclaimerDialog(),
+        builder: (_) => const DisclaimerDialog(wash: false),
       );
       await prefs.setBool('hasSeenDisclaimer', true);
+    }
+
+    // Setup is required until a household or device is linked (first launch,
+    // reinstall, cleared data). The legacy code is entered through the same
+    // flow, via "Skip to linking".
+    if (!HouseholdScope.isLinked) {
+      if (!mounted) return;
+      final showIntro = !(prefs.getBool(kIntroSeenPrefsKey) ?? false);
+      await showWifiSetupFlow(context, firstRun: true, showIntro: showIntro);
+      if (!mounted) return;
+      splashDoneNotifier.value = true;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => HouseholdScope.isLinked ? const MainScreen() : const DeviceIdEntryScreen(),
+        ),
+      );
+      return;
     }
 
     await _waitForDashboard();

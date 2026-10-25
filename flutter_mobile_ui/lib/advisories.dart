@@ -11,6 +11,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'bakit_expander.dart';
+import 'household_scope.dart';
 import 'rolling_number.dart';
 
 class AdvisoriesScreen extends StatefulWidget {
@@ -36,7 +37,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
   final Color downText = const Color(0xFF2E7D32);
 
   // Same FastAPI VM used by Dashboard for historical, non-today data.
-  static const String _apiBaseUrl = 'http://35.209.250.46:8000';
+  static const String _apiBaseUrl = kLegacyApiBaseUrl;
 
   // Chart runs Sunday -> Saturday.
   static const List<String> _weekDayLabels = [
@@ -267,7 +268,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
   // own date, so a total is only ever placed on the day it belongs to. ───
   void _attachTodayListener() {
     _todaySubscription?.cancel();
-    final ref = FirebaseDatabase.instance.ref('history/today');
+    final ref = HouseholdScope.ref('history/today');
     _todaySubscription = ref.onValue.listen((event) {
       if (!mounted) return;
       double total = 0.0;
@@ -332,7 +333,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
   void _attachAdvisoriesListener() {
     _advisoriesSubscription?.cancel();
     _advisoriesSubscription =
-        FirebaseDatabase.instance.ref('advisories').onValue.listen((event) {
+        HouseholdScope.ref('advisories').onValue.listen((event) {
       if (!mounted) return;
       final records = <Map<String, dynamic>>[];
       final raw = event.snapshot.value;
@@ -370,7 +371,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
   void _attachNewsListener() {
     _newsSubscription?.cancel();
     _newsSubscription =
-        FirebaseDatabase.instance.ref('cms/published').onValue.listen((event) {
+        HouseholdScope.ref('cms/published').onValue.listen((event) {
       if (!mounted) return;
       final items = <Map<String, dynamic>>[];
       final raw = event.snapshot.value;
@@ -410,8 +411,7 @@ class _AdvisoriesScreenState extends State<AdvisoriesScreen>
     _connectionGrace = Timer(const Duration(seconds: 5), () {
       if (mounted) setState(() => _connectionGraceOver = true);
     });
-    _connectionSubscription = FirebaseDatabase.instance
-        .ref('.info/connected')
+    _connectionSubscription = HouseholdScope.db.ref('.info/connected')
         .onValue
         .listen((event) {
       if (!mounted) return;

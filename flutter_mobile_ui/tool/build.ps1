@@ -11,7 +11,10 @@ Push-Location (Join-Path $PSScriptRoot '..')
 try {
     $build = (git rev-list --count HEAD).Trim()
     Write-Host "Building GRID with build number $build"
-    flutter build @args "--build-number=$build"
+    [string[]]$extra = @("--build-number=$build")
+    if (Test-Path (Join-Path (Get-Location) "secrets.json")) { $extra += "--dart-define-from-file=secrets.json" }
+    $buildArgs = @($args) + $extra
+    flutter build $buildArgs
     $code = $LASTEXITCODE
 } finally {
     Pop-Location

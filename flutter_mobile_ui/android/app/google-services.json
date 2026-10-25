@@ -1,14 +1,33 @@
 {
   "project_info": {
-    "project_number": "194399667304",
-    "firebase_url": "https://kuro-ec80f-default-rtdb.firebaseio.com",
-    "project_id": "kuro-ec80f",
-    "storage_bucket": "kuro-ec80f.firebasestorage.app"
+    "project_number": "25815887211",
+    "firebase_url": "https://grid-demo-70ec9-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "grid-demo-70ec9",
+    "storage_bucket": "grid-demo-70ec9.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:194399667304:android:f7b3dc0cb38419a9b627dd",
+        "mobilesdk_app_id": "1:25815887211:android:83719e4010918aef61f02e",
+        "android_client_info": {
+          "package_name": "com.company.flutter_mobile_demo"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBWdG2W-8AS99-PhtzmBumieYxvsftN1Ek"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:25815887211:android:8a75367d554d155a61f02e",
         "android_client_info": {
           "package_name": "com.example.flutter_mobile_ui"
         }
@@ -16,7 +35,26 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyCltLvYGk75wUihi8Ihx7UfhWSQcTa_QpE"
+          "current_key": "AIzaSyBWdG2W-8AS99-PhtzmBumieYxvsftN1Ek"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:25815887211:android:dd0f3bd103e63ac861f02e",
+        "android_client_info": {
+          "package_name": "com.example.flutter_mobile_ui.ble"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBWdG2W-8AS99-PhtzmBumieYxvsftN1Ek"
         }
       ],
       "services": {

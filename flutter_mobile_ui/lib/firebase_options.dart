@@ -41,51 +41,51 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyBtgEeiJ7XTMzChiH0MDZTWqpEBL148hg4',
-    appId: '1:194399667304:web:1eff7c5194a78450b627dd',
-    messagingSenderId: '194399667304',
-    projectId: 'kuro-ec80f',
-    authDomain: 'kuro-ec80f.firebaseapp.com',
-    databaseURL: 'https://kuro-ec80f-default-rtdb.firebaseio.com',
-    storageBucket: 'kuro-ec80f.firebasestorage.app',
+    apiKey: 'AIzaSyDmIjqzVJVkh9kghsQCXwKAVODxXvyNCcg',
+    appId: '1:25815887211:web:10b1e98bcab88b8561f02e',
+    messagingSenderId: '25815887211',
+    projectId: 'grid-demo-70ec9',
+    authDomain: 'grid-demo-70ec9.firebaseapp.com',
+    databaseURL: 'https://grid-demo-70ec9-default-rtdb.asia-southeast1.firebasedatabase.app',
+    storageBucket: 'grid-demo-70ec9.firebasestorage.app',
+    measurementId: 'G-CKDN2CM66W',
   );
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyCltLvYGk75wUihi8Ihx7UfhWSQcTa_QpE',
-    appId: '1:194399667304:android:f7b3dc0cb38419a9b627dd',
-    messagingSenderId: '194399667304',
-    projectId: 'kuro-ec80f',
-    databaseURL: 'https://kuro-ec80f-default-rtdb.firebaseio.com',
-    storageBucket: 'kuro-ec80f.firebasestorage.app',
+    apiKey: 'AIzaSyBWdG2W-8AS99-PhtzmBumieYxvsftN1Ek',
+    appId: '1:25815887211:android:dd0f3bd103e63ac861f02e',
+    messagingSenderId: '25815887211',
+    projectId: 'grid-demo-70ec9',
+    databaseURL: 'https://grid-demo-70ec9-default-rtdb.asia-southeast1.firebasedatabase.app',
+    storageBucket: 'grid-demo-70ec9.firebasestorage.app',
   );
-
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyC8ZY_vYOUEYkq3zt9c8mGPWUhHBKBDRv8',
-    appId: '1:194399667304:ios:4ac0aba8eebaefcbb627dd',
-    messagingSenderId: '194399667304',
-    projectId: 'kuro-ec80f',
-    databaseURL: 'https://kuro-ec80f-default-rtdb.firebaseio.com',
-    storageBucket: 'kuro-ec80f.firebasestorage.app',
+    apiKey: 'AIzaSyBuL9esvLKm4WjcF1_X3tfz0Tpv9HFRznE',
+    appId: '1:25815887211:ios:df9914ca477a4eea61f02e',
+    messagingSenderId: '25815887211',
+    projectId: 'grid-demo-70ec9',
+    databaseURL: 'https://grid-demo-70ec9-default-rtdb.asia-southeast1.firebasedatabase.app',
+    storageBucket: 'grid-demo-70ec9.firebasestorage.app',
     iosBundleId: 'com.example.flutterMobileUi',
   );
-
   static const FirebaseOptions macos = FirebaseOptions(
-    apiKey: 'AIzaSyC8ZY_vYOUEYkq3zt9c8mGPWUhHBKBDRv8',
-    appId: '1:194399667304:ios:4ac0aba8eebaefcbb627dd',
-    messagingSenderId: '194399667304',
-    projectId: 'kuro-ec80f',
-    databaseURL: 'https://kuro-ec80f-default-rtdb.firebaseio.com',
-    storageBucket: 'kuro-ec80f.firebasestorage.app',
+    apiKey: 'AIzaSyBuL9esvLKm4WjcF1_X3tfz0Tpv9HFRznE',
+    appId: '1:25815887211:ios:df9914ca477a4eea61f02e',
+    messagingSenderId: '25815887211',
+    projectId: 'grid-demo-70ec9',
+    databaseURL: 'https://grid-demo-70ec9-default-rtdb.asia-southeast1.firebasedatabase.app',
+    storageBucket: 'grid-demo-70ec9.firebasestorage.app',
     iosBundleId: 'com.example.flutterMobileUi',
   );
 
   static const FirebaseOptions windows = FirebaseOptions(
-    apiKey: 'AIzaSyBtgEeiJ7XTMzChiH0MDZTWqpEBL148hg4',
-    appId: '1:194399667304:web:3a4cf68003d19f68b627dd',
-    messagingSenderId: '194399667304',
-    projectId: 'kuro-ec80f',
-    authDomain: 'kuro-ec80f.firebaseapp.com',
-    databaseURL: 'https://kuro-ec80f-default-rtdb.firebaseio.com',
-    storageBucket: 'kuro-ec80f.firebasestorage.app',
+    apiKey: 'AIzaSyDmIjqzVJVkh9kghsQCXwKAVODxXvyNCcg',
+    appId: '1:25815887211:web:5f476024587145a361f02e',
+    messagingSenderId: '25815887211',
+    projectId: 'grid-demo-70ec9',
+    authDomain: 'grid-demo-70ec9.firebaseapp.com',
+    databaseURL: 'https://grid-demo-70ec9-default-rtdb.asia-southeast1.firebasedatabase.app',
+    storageBucket: 'grid-demo-70ec9.firebasestorage.app',
+    measurementId: 'G-NL2E2RB0TS',
   );
 }

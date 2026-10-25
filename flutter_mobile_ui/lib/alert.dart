@@ -6,10 +6,11 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart' hide TextDirection;
+import 'household_scope.dart';
 import 'alerts_guide.dart';
 import 'bakit_expander.dart';
 
-const String kApiBaseUrl = 'http://35.209.250.46:8000';
+const String kApiBaseUrl = kLegacyApiBaseUrl;
 
 /// Sent by push handling in main.dart: refresh the review list and, when
 /// [focusEventId] is set, open that event's card once it's loaded. A push

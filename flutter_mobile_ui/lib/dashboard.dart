@@ -15,7 +15,11 @@ import 'package:lottie/lottie.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:math';
 import 'main.dart';
+import 'household_scope.dart';
 import 'rolling_number.dart';
+import 'viewer_presence.dart';
+import 'wifi_setup/intro_screens.dart' show HomeNameHero;
+import 'device_identity.dart';
 
 // Bumped by main.dart when a `device` push is tapped: the dashboard shows
 // the offline sheet if the GRID device is still offline.
@@ -36,13 +40,13 @@ class Dashboard extends StatefulWidget {
   State<Dashboard> createState() => _DashboardState();
 }
 
-class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
+class _DashboardState extends State<Dashboard> with TickerProviderStateMixin, WidgetsBindingObserver {
   // Firebase Subscription (live feed cards)
   StreamSubscription<DatabaseEvent>? _dbSubscription;
 
   // --- HOURLY CHART (History + Live) STATE ---
   // Base URL of the FastAPI VM — used for any date that isn't today
-  static const String _apiBaseUrl = 'http://35.209.250.46:8000';
+  static const String _apiBaseUrl = kLegacyApiBaseUrl;
 
   DateTime _selectedDate = DateTime.now();
   Map<int, double> _hourlyKwh = {}; // hour (0-23) -> total kWh for that hour
@@ -69,6 +73,20 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // from the live device-pushed figure above, which only applies to today.
   double? _pastDayEstimatedCost;
 
+  // --- HOURLY COST (scrubbed hour) ---
+  // An hour's cost is its kWh at the Meralco bracket rate the month is
+  // currently billed at, the same way the Billing screen prices usage. The
+  // fixed charge is a monthly line item, so it is not spread over hours. Past
+  // days use today's bracket, since only the live reading names one.
+  // `meralco_rates/brackets` maps "0-200" ... "over-400" to pesos per kWh.
+  static const List<String> _bracketKeys = ['0-200', '201-300', '301-400', 'over-400'];
+  StreamSubscription<DatabaseEvent>? _ratesSubscription;
+  Map<String, double> _bracketRates = {};
+  String? _liveBracket;
+  // Billed kWh over raw kWh (the backend's Meralco calibration), so hours
+  // add up to the bill; 1.0 until the live reading says otherwise.
+  double _billedRatio = 1.0;
+
   // --- IOT CONNECTION STATE (driven by the real-time `sync` RTDB field) ---
   // `sync` lives at the root of the database. `false` means the device has
   // told the backend it's offline / lost connection; `true` (or any other
@@ -76,6 +94,17 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   // timeout-guessing watchdog with the device's own reported state.
   StreamSubscription<DatabaseEvent>? _syncSubscription;
   bool _isIotConnected = true;
+
+  // --- VIEWER PRESENCE + OWNERSHIP (BLE devices only, never the legacy household) ---
+  // While this tab is on screen and the app is in the foreground, the
+  // dashboard counts as one viewer on the device's LCD.
+  final ViewerPresence _presence = ViewerPresence();
+  bool _appInForeground = true;
+
+  // True when `devices/<id>/owner_hash` matches the SHA-256 of this install's
+  // setup ID, i.e. this phone provisioned the device.
+  StreamSubscription<DatabaseEvent>? _ownerSubscription;
+  bool _isOwner = false;
   DateTime? _lastLiveDataTime;
   // Set when the device drops while the splash is still up; the sheet is
   // shown once the splash clears instead of landing on top of it.
@@ -113,6 +142,24 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   double _cumulativeThrough(int hour) => _hourlyKwh.entries
       .where((e) => e.key <= hour)
       .fold(0.0, (sum, e) => sum + e.value);
+
+  // Pesos for the kWh used during [hour] alone, or null while the rates
+  // haven't loaded (shown as a dash rather than a made-up price).
+  double? _costForHour(int hour) {
+    final key = _liveBracket != null && _bracketKeys.contains(_liveBracket)
+        ? _liveBracket!
+        : _bracketKeys[
+            _cumulativeEnergy * _billedRatio <= 200
+                ? 0
+                : _cumulativeEnergy * _billedRatio <= 300
+                ? 1
+                : _cumulativeEnergy * _billedRatio <= 400
+                ? 2
+                : 3];
+    final rate = _bracketRates[key];
+    if (rate == null) return null;
+    return (_hourlyKwh[hour] ?? 0.0) * _billedRatio * rate;
+  }
 
   static bool _isSameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
@@ -209,6 +256,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     testModeNotifier.addListener(_onTestModeChanged);
     nicknameNotifier.addListener(_onNicknameChanged);
     splashDoneNotifier.addListener(_onSplashDone);
+    selectedTabNotifier.addListener(_syncPresence);
+    WidgetsBinding.instance.addObserver(this);
     deviceStatusRequest.addListener(_onDeviceStatusRequest);
 
     if (_isTestMode) {
@@ -217,6 +266,8 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       _setupFirebaseListener();
       _attachTodayHistoryListener();
       _setupSyncListener();
+      _syncPresence();
+      _setupOwnerListener();
     }
 
     _loadScrubHint();
@@ -256,6 +307,54 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     if (mounted && !_isIotConnected) _showNoConnectionDialog();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // `inactive` (e.g. the notification shade) still counts as watching.
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _appInForeground = true;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _appInForeground = false;
+      case AppLifecycleState.inactive:
+        return;
+    }
+    _syncPresence();
+  }
+
+  /// Registers or removes this dashboard's viewer key to match whether it is
+  /// actually being watched. Every resume starts a new session ID.
+  void _syncPresence() {
+    final id = HouseholdScope.id;
+    final watching = id != null && !HouseholdScope.isLegacy && !_isTestMode && _appInForeground && selectedTabNotifier.value == 0;
+    if (watching) {
+      _presence.start(id);
+    } else {
+      _presence.stop();
+    }
+  }
+
+  // Live listener on `devices/<id>/owner_hash`: the badge follows ownership
+  // changes without an app restart.
+  void _setupOwnerListener() {
+    _ownerSubscription?.cancel();
+    final id = HouseholdScope.id;
+    if (id == null || HouseholdScope.isLegacy) return;
+
+    _ownerSubscription = HouseholdScope.ref('owner_hash').onValue.listen(
+      (event) async {
+        // Re-read on every change: this phone may have just become the owner
+        // by provisioning. A viewer who never provisioned has no setup ID.
+        final prefs = await SharedPreferences.getInstance();
+        final setupId = prefs.getString(kSetupIdPrefsKey);
+        final isOwner = setupId != null && event.snapshot.value == ownerHashOf(setupId);
+        if (mounted && isOwner != _isOwner) setState(() => _isOwner = isOwner);
+      },
+      onError: (Object e) => debugPrint('[Dashboard] owner_hash listener error: $e'),
+    );
+  }
+
   void _onTestModeChanged() {
     if (!mounted) return;
     final newValue = testModeNotifier.value;
@@ -265,8 +364,10 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
 
     if (_isTestMode) {
       _dbSubscription?.cancel();
+      _ratesSubscription?.cancel();
       _historySubscription?.cancel();
       _syncSubscription?.cancel();
+      _ownerSubscription?.cancel();
       setState(() => _isIotConnected = true);
       _startDemoMode();
     } else {
@@ -274,7 +375,9 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       _setupFirebaseListener();
       _attachTodayHistoryListener();
       _setupSyncListener();
+      _setupOwnerListener();
     }
+    _syncPresence();
   }
 
   void _startDemoMode() {
@@ -295,6 +398,10 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       _lastHistoryUpdateTime = DateTime.now();
       _cumulativeEnergy = 145.0;
       _estimatedCostFromDevice = _cumulativeEnergy * 12.0;
+      // Sample rates so the scrubbed hour has a price in demo mode.
+      _bracketRates = {'0-200': 14.9424, '201-300': 15.2917, '301-400': 15.6212, 'over-400': 16.1954};
+      _liveBracket = null;
+      _billedRatio = 1.0;
     });
     _retargetCurve();
 
@@ -349,7 +456,22 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   }
 
   void _setupFirebaseListener() {
-    DatabaseReference ref = FirebaseDatabase.instance.ref('live_reading');
+    DatabaseReference ref = HouseholdScope.ref('live_reading');
+
+    _ratesSubscription?.cancel();
+    _ratesSubscription = HouseholdScope.ref('meralco_rates/brackets').onValue.listen(
+      (event) {
+        final raw = event.snapshot.value;
+        if (!mounted || raw is! Map) return;
+        final rates = <String, double>{};
+        raw.forEach((key, value) {
+          final rate = double.tryParse(value.toString());
+          if (rate != null) rates[key.toString()] = rate;
+        });
+        setState(() => _bracketRates = rates);
+      },
+      onError: (Object e) => debugPrint('[Dashboard] rates listener error: $e'),
+    );
 
     _dbSubscription = ref.onValue.listen((event) {
       _markFirstLoad('live');
@@ -370,6 +492,11 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
             _estimatedCostFromDevice =
                 double.tryParse(data['estimated_cost'].toString()) ??
                 _estimatedCostFromDevice;
+            _liveBracket = data['bracket']?.toString();
+            final billed = double.tryParse(data['billed_kwh'].toString());
+            if (billed != null && billed > 0 && _cumulativeEnergy > 0) {
+              _billedRatio = billed / _cumulativeEnergy;
+            }
 
             final timestamp = DateTime.now();
 
@@ -457,7 +584,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
       _pastDayEstimatedCost = null;
     });
 
-    final ref = FirebaseDatabase.instance.ref('history/today');
+    final ref = HouseholdScope.ref('history/today');
     _historySubscription = ref.onValue.listen((event) {
       if (!mounted) return;
       _markFirstLoad('history');
@@ -827,7 +954,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   void _setupSyncListener() {
     _syncSubscription?.cancel();
 
-    final ref = FirebaseDatabase.instance.ref('sync');
+    final ref = HouseholdScope.ref('sync');
     _syncSubscription = ref.onValue.listen((event) {
       if (!mounted) return;
 
@@ -1302,7 +1429,9 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   @override
   void dispose() {
     _dbSubscription?.cancel();
+    _ratesSubscription?.cancel();
     _historySubscription?.cancel();
+    _ownerSubscription?.cancel();
     _syncSubscription?.cancel();
     _demoTimer?.cancel();
     _peekTimer?.cancel();
@@ -1314,6 +1443,9 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     testModeNotifier.removeListener(_onTestModeChanged);
     nicknameNotifier.removeListener(_onNicknameChanged);
     splashDoneNotifier.removeListener(_onSplashDone);
+    selectedTabNotifier.removeListener(_syncPresence);
+    WidgetsBinding.instance.removeObserver(this);
+    _presence.stop();
     deviceStatusRequest.removeListener(_onDeviceStatusRequest);
     super.dispose();
   }
@@ -1376,6 +1508,24 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     return '$displayHour $period';
   }
 
+  // "Cost 3–4 PM": the hour a scrubbed bar covers. The hour still filling up
+  // today says so instead.
+  String _costLabel(int hour) {
+    if (hour == _liveHour) return 'Cost this hour';
+    final start = _formatHourLabel(hour.toDouble()).split(' ');
+    final end = _formatHourLabel((hour + 1).toDouble()).split(' ');
+    final range = start[1] == end[1]
+        ? '${start[0]}–${end[0]} ${end[1]}'
+        : '${start[0]} ${start[1]}–${end[0]} ${end[1]}';
+    return 'Cost $range';
+  }
+
+  String _formatPeso(double? value) {
+    if (value == null) return '₱—';
+    final fixed = value.toStringAsFixed(2);
+    return '₱${fixed.replaceAllMapped(RegExp(r'(\d)(?=(\d{3})+\.)'), (m) => '${m[1]},')}';
+  }
+
   String _formatWithCommas(double value) {
     RegExp reg = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
     String mathFunc(Match match) => '${match[1]},';
@@ -1388,15 +1538,12 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
     final screenHeight = MediaQuery.of(context).size.height;
 
     // While scrubbing, the header cards re-read for the hour under the
-    // finger: the running total so far, and that total's share of the day.
+    // finger: the running total so far, and what that hour alone cost.
     final int? scrubHour = _scrubHour;
     final bool scrubbing = scrubHour != null;
     final double leftValue = scrubbing
         ? _cumulativeThrough(scrubHour)
         : _displayedTotal;
-    final int sharePercent = scrubbing && _hourlySum > 0
-        ? (_cumulativeThrough(scrubHour) / _hourlySum * 100).round()
-        : 0;
     final String dateLabel = _isTodaySelected
         ? 'Today'
         : DateFormat('EEE MMM d').format(_selectedDate);
@@ -1446,8 +1593,9 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
-                              Text(
-                                _nickname,
+                              // Lands here from the setup's "Name your home" step.
+                              HomeNameHero(
+                                name: _nickname,
                                 style: const TextStyle(
                                   fontSize: 24,
                                   fontWeight: FontWeight.w800,
@@ -1623,16 +1771,10 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                                     children: [
                                       Row(
                                         children: [
-                                          AnimatedSwitcher(
-                                            duration: swapDuration,
-                                            child: Icon(
-                                              scrubbing
-                                                  ? Icons.donut_large_rounded
-                                                  : Icons.payments_rounded,
-                                              key: ValueKey(scrubbing),
-                                              color: Colors.white,
-                                              size: 20,
-                                            ),
+                                          const Icon(
+                                            Icons.payments_rounded,
+                                            color: Colors.white,
+                                            size: 20,
                                           ),
                                           const SizedBox(width: 6),
                                           Expanded(
@@ -1640,7 +1782,7 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                                               mode: scrubbing,
                                               duration: swapDuration,
                                               text: scrubbing
-                                                  ? 'Share of day'
+                                                  ? _costLabel(scrubHour)
                                                   : _isTodaySelected
                                                   ? 'Est. Total Bill'
                                                   : 'Total Bill',
@@ -1650,39 +1792,13 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                                         ],
                                       ),
                                       const SizedBox(height: 12),
-                                      // No hourly peso data exists, so a scrubbed hour
-                                      // reads as a share of the day instead of a bill.
-                                      AnimatedSwitcher(
-                                        duration: swapDuration,
-                                        layoutBuilder: (current, previous) =>
-                                            Stack(
-                                              alignment: Alignment.centerLeft,
-                                              children: [...previous, ?current],
-                                            ),
-                                        child: scrubbing
-                                            ? Row(
-                                                key: const ValueKey('share'),
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.baseline,
-                                                textBaseline:
-                                                    TextBaseline.alphabetic,
-                                                children: [
-                                                  RollingNumber(
-                                                    '$sharePercent',
-                                                    style: headerValueStyle,
-                                                  ),
-                                                  const SizedBox(width: 2),
-                                                  const Text(
-                                                    '%',
-                                                    style: headerUnitStyle,
-                                                  ),
-                                                ],
-                                              )
-                                            : RollingNumber(
-                                                '₱${_formatWithCommas(_isTodaySelected ? _estimatedCostFromDevice : (_pastDayEstimatedCost ?? 0.0))}',
-                                                key: const ValueKey('bill'),
-                                                style: headerValueStyle,
-                                              ),
+                                      // Scrubbing reads what that one hour cost; at rest
+                                      // it is the day's estimated bill.
+                                      RollingNumber(
+                                        scrubbing
+                                            ? _formatPeso(_costForHour(scrubHour))
+                                            : '₱${_formatWithCommas(_isTodaySelected ? _estimatedCostFromDevice : (_pastDayEstimatedCost ?? 0.0))}',
+                                        style: headerValueStyle,
                                       ),
                                     ],
                                   ),
@@ -1800,7 +1916,14 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
                   // "Disconnected" when `sync` is false.
                   Align(
                     alignment: Alignment.centerLeft,
-                    child: _buildConnectionStatusBadge(),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        _buildConnectionStatusBadge(),
+                        if (_isOwner && !_isTestMode) _buildOwnerBadge(),
+                      ],
+                    ),
                   ),
 
                   const SizedBox(height: 8),
@@ -2083,6 +2206,34 @@ class _DashboardState extends State<Dashboard> with TickerProviderStateMixin {
   }
 
   // --- SUB CARD WIDGET UI HELPERS ---
+
+  // Shown next to the connection badge when this phone provisioned the
+  // device (see _setupOwnerListener).
+  Widget _buildOwnerBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: primaryOrange.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.verified_user_rounded, size: 13, color: primaryOrange),
+          const SizedBox(width: 4),
+          Text(
+            'You own this device',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+              color: primaryOrange,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   // Small pill showing live device connection state, sourced from the
   // real-time `sync` RTDB field via _setupSyncListener().

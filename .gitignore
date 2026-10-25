@@ -4,3 +4,6 @@
 
 # Claude Code personal settings
 .claude/settings.local.json
+
+# Build-time secrets passed with --dart-define-from-file (see secrets.example.json)
+flutter_mobile_ui/secrets.json

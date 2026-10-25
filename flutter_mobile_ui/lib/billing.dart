@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:lottie/lottie.dart';
 import 'package:custom_refresh_indicator/custom_refresh_indicator.dart';
+import 'household_scope.dart';
 
 enum _BillMode { endOfMonth, current }
 
@@ -103,8 +104,8 @@ class _BillingScreenState extends State<BillingScreen> {
   final Color heroWordInk = const Color(0xFFEC7A3A);
   final Color tierTextColor = const Color(0xFF7A3712);
 
-  final DatabaseReference _dbRef = FirebaseDatabase.instance.ref();
-  static const String _apiBaseUrl = 'http://35.209.250.46:8000';
+  final DatabaseReference _dbRef = HouseholdScope.ref();
+  static const String _apiBaseUrl = kLegacyApiBaseUrl;
 
   final Map<int, Future<Map<String, dynamic>>> _breakdownCache = {};
 
