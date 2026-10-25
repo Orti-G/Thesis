@@ -815,21 +815,30 @@ def build_weekly_advisory(current_days: List[dict], last_days: List[dict],
         "same_days": "parehong araw" if n == 1 else f"parehong {fmt_days(n)}",
         "pct":       "",
     }
+    change = None
     if n == 0:
-        key = "weekly.insufficient"
+        key, direction = "weekly.insufficient", "insufficient"
     elif last <= 0:
-        key = "weekly.no_baseline"
+        key, direction = "weekly.no_baseline", "no_baseline"
     else:
         change = (cur - last) / last
         slots["pct"] = fmt_pct(change)
         if change > WEEKLY_NOTABLE_CHANGE:
-            key = "weekly.up"
+            key, direction = "weekly.up", "up"
         elif change < -WEEKLY_NOTABLE_CHANGE:
-            key = "weekly.down"
+            key, direction = "weekly.down", "down"
         else:
-            key = "weekly.flat"
+            key, direction = "weekly.flat", "flat"
+    data = {
+        "days_compared":      n,
+        "direction":          direction,                       # insufficient / no_baseline / up / down / flat
+        "current_kwh":        round(cur, 4),                   # finished days this week
+        "last_same_days_kwh": round(last, 4),                  # same weekdays last week
+        "diff_kwh":           round(cur - last, 4),
+        "pct_change":         round(change * 100, 1) if change is not None else None,
+    }
     return _advisory("weekly", key, slots, EXPLAIN["weekly"],
-                     data={"days_compared": n}, avoid_id=avoid_id, rng=rng)
+                     data=data, avoid_id=avoid_id, rng=rng)
 
 
 def anomaly_kind(power: float, baseline_1hr: Optional[float],

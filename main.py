@@ -121,6 +121,8 @@ FORECAST_STALE_MIN = 30          # skip (retry next minute) if no reading in the
 _forecast_lock = threading.Lock()
 last_true_fill_date = ""
 
+RATE_SCHEDULES_REF = "/rate_schedules"   # PDFs available in meralco_rates/ on the VM
+
 # ── CMS + monthly rates (written by Update_Meralco_Firebase.ipynb, outside the VM) ─
 RATES_HISTORY_REF   = "/meralco_rates_history"   # {YYYY-MM: {fixed_charge, brackets, ...}}
 CMS_INBOX_REF       = "/cms/inbox"                # facts + headline + link + image (notebook)
@@ -129,6 +131,45 @@ RATES_PUSHED_REF    = "/advisories_state/rates_pushed_period"
 # Optional shared secret for POST /refresh-rates. Set the same value in the notebook.
 REFRESH_TOKEN       = os.environ.get("GRID_REFRESH_TOKEN")
 
+def list_rate_schedules() -> list:
+    """PDFs in meralco_rates/ named MM-YYYY_..., newest first.
+    Same naming rule as get_current_schedule_filename()."""
+    items = []
+    for f in os.listdir(RATE_SCHEDULE_DIR):
+        m = re.match(r"(\d{2})-(\d{4})", f)
+        if not f.lower().endswith(".pdf") or not m:
+            continue
+        month, year = int(m.group(1)), int(m.group(2))
+        items.append({
+            "file":   f,
+            "period": f"{year}-{month:02d}",                    # e.g. "2026-10"
+            "label":  f"{calendar.month_name[month]} {year}",   # e.g. "October 2026"
+        })
+    return sorted(items, key=lambda x: x["period"], reverse=True)
+
+def sync_rate_schedules() -> dict:
+    """Write the available rate schedules to Firebase /rate_schedules.
+    Called at startup and by POST /refresh-rates.
+    Skips the write when the file list in Firebase already matches the folder."""
+    items = list_rate_schedules()
+    ref = firebase_db.reference(RATE_SCHEDULES_REF)
+
+    existing = ref.get() or {}
+    old_files = [i.get("file") for i in (existing.get("available") or []) if isinstance(i, dict)]
+    new_files = [i["file"] for i in items]
+
+    if old_files == new_files:
+        print(f"Rate schedules unchanged: {new_files}")
+        return {"changed": False, "count": len(items), "current": existing.get("current")}
+
+    payload = {
+        "current":    items[0]["file"] if items else None,
+        "available":  items,
+        "updated_at": datetime.now(PH_TZ).isoformat(),
+    }
+    ref.set(payload)
+    print(f"Rate schedules synced: {new_files}")
+    return {"changed": True, "count": len(items), **payload}
 
 def calibration_k() -> float:
     """Meter calibration (Meralco meter ÷ device), from the forecast bundle.
@@ -235,6 +276,11 @@ def startup_event():
 
     # Set sync = false immediately on startup
     firebase_db.reference("/sync").set(False)
+
+    try:
+        sync_rate_schedules()
+    except Exception as e:
+        print(f"❌ Rate schedule sync failed: {e}")
 
     computed_cutoff = compute_billing_cutoff()
     state = load_billing_state()
@@ -1438,6 +1484,8 @@ def refresh_rates(x_grid_token: Optional[str] = Header(None)):
     MERALCO_RATES = firebase_db.reference("/meralco_rates").get()
     cms_result = publish_cms()
 
+    schedules = sync_rate_schedules()
+
     period = rate_compare.period_of(MERALCO_RATES)
     pushed_ref = firebase_db.reference(RATES_PUSHED_REF)
     first_time = bool(period) and pushed_ref.get() != period
@@ -1454,6 +1502,7 @@ def refresh_rates(x_grid_token: Optional[str] = Header(None)):
         "message":       "Meralco rates refreshed",
         "period":        period,
         "cms":           cms_result,
+        "rate_schedules": schedules,
         "rate_advisory": adv["message_tl"] if adv else
                          "none (no previous month in /meralco_rates_history, or no kWh yet)",
         "pushed":        bool(adv and first_time),
@@ -1499,10 +1548,12 @@ def _run_forecast_locked(latest, trigger_source: str) -> dict:
     accumulated_kwh = float(latest["cumul_kwh"])
 
     f = fr.forecast_now(F, fb, accumulated_kwh, now.replace(tzinfo=None), billing_end.date())
-
-    # Itemized bill on the calibrated, whole-kWh projection (as on the actual bill)
+    
+    schedule_file = None
+    # Itemized bill on the calibrated projection (2 decimal places), whole-kWh projection (as on the actual bill)
     try:
-        bill = compute_bill(get_current_schedule_filename(), round(f["projected_eom_calibrated_kWh"]))
+        schedule_file = get_current_schedule_filename()
+        bill = compute_bill(schedule_file, round(f["projected_eom_calibrated_kWh"], 2))
     except Exception as e:
         bill = {"error": str(e)}
 
@@ -1526,6 +1577,7 @@ def _run_forecast_locked(latest, trigger_source: str) -> dict:
         "projected_eom_calibrated_kWh": f["projected_eom_calibrated_kWh"],
         "bracket":                      f["bracket"],
         "projected_bill":               bill,
+        "rate_schedule_file":           schedule_file,
         "forecast_version":             f["forecast_version"],
         "anomaly_version":              ab.get("version", "june-v2"),
         "trigger_source":               trigger_source,
