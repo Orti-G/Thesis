@@ -281,57 +281,6 @@ class _BillingScreenState extends State<BillingScreen> {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
-  /// There is no "list schedules" endpoint, so probe /calculator/convert for
-  /// each candidate month (12 back, 2 ahead) and keep the ones the backend
-  /// can answer. Returns {label: filename}, oldest first.
-  Future<Map<String, String>> _fetchRatePeriods() async {
-    const names = [
-      'January',
-      'February',
-      'March',
-      'April',
-      'May',
-      'June',
-      'July',
-      'August',
-      'September',
-      'October',
-      'November',
-      'December',
-    ];
-    final now = DateTime.now();
-    final candidates = <(String, String)>[];
-    for (var offset = -12; offset <= 2; offset++) {
-      final d = DateTime(now.year, now.month + offset);
-      final file =
-          '${d.month.toString().padLeft(2, '0')}-${d.year}_rate_schedule.pdf';
-      candidates.add(('${names[d.month - 1]} ${d.year}', file));
-    }
-
-    final results = await Future.wait(
-      candidates.map((c) async {
-        try {
-          await _fetchCalculatorConvert(period: c.$2, kwh: 1);
-          return c;
-        } catch (_) {
-          return null;
-        }
-      }),
-    );
-    return {
-      for (final r in results)
-        if (r != null) r.$1: r.$2,
-    };
-  }
-
-  bool _sameMap(Map<String, String> a, Map<String, String> b) {
-    if (a.length != b.length) return false;
-    for (final e in a.entries) {
-      if (b[e.key] != e.value) return false;
-    }
-    return true;
-  }
-
   List<_BillLineItem> _buildBreakdownItems(Map<String, dynamic> data) {
     double num_(dynamic v) => (v as num?)?.toDouble() ?? 0.0;
     Map<String, dynamic> map_(dynamic v) =>
@@ -470,10 +419,38 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+  // Used until Firebase `rate_schedules` is available.
+  static const Map<String, String> _fallbackRatePeriods = {
+    'August 2026': '08-2026_rate_schedule.pdf',
+    'September 2026': '09-2026_rate_schedule.pdf',
+  };
+
+  /// `rate_schedules/available` is a list of {file, label, period}, newest
+  /// first. Returns {label: file}, oldest first, as the calculator dropdown
+  /// expects.
+  Map<String, String> _parseRateSchedules(Map schedules) {
+    final available = schedules['available'];
+    final entries = available is Map
+        ? available.values
+        : available is List
+        ? available
+        : const [];
+    final out = <String, String>{};
+    for (final e in entries.toList().reversed) {
+      if (e is! Map) continue;
+      final label = e['label']?.toString() ?? '';
+      final file = e['file']?.toString() ?? '';
+      if (label.isNotEmpty && file.isNotEmpty) out[label] = file;
+    }
+    return out;
+  }
+
   void _showBillCalculator(
     BuildContext context,
     Map<String, double> rates, {
     required double fixedCharge,
+    required Map<String, String> ratePeriods,
+    required String? currentRatePeriod,
     required String sourceFile,
   }) {
     final controller = TextEditingController();
@@ -484,44 +461,15 @@ class _BillingScreenState extends State<BillingScreen> {
     double? pesoResultAmount;
 
     // --- RATE MONTH STATE ---
-    // Seeded with a fallback, then replaced by the backend's list (and kept
-    // fresh while the sheet is open) so new schedules show up automatically.
-    Map<String, String> monthPeriods = {
-      'August 2026': '08-2026_rate_schedule.pdf',
-      'September 2026': '09-2026_rate_schedule.pdf',
-    };
-    String selectedMonth = monthPeriods.keys.last;
-    StateSetter? sheetSetState;
-    bool sheetOpen = true;
-
-    Future<void> refreshPeriods() async {
-      try {
-        final fetched = await _fetchRatePeriods();
-        if (!sheetOpen || fetched.isEmpty) return;
-        if (_sameMap(fetched, monthPeriods)) return;
-        void apply() {
-          monthPeriods = fetched;
-          if (!monthPeriods.containsKey(selectedMonth)) {
-            selectedMonth = monthPeriods.keys.last;
-            pesoResultKwh = null;
-          }
-        }
-
-        if (sheetSetState != null) {
-          sheetSetState!(apply);
-        } else {
-          apply();
-        }
-      } catch (_) {
-        // Keep the current list if the backend is unreachable.
-      }
-    }
-
-    refreshPeriods();
-    final periodsTimer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) => refreshPeriods(),
-    );
+    // From Firebase `rate_schedules` (oldest first); opens on the schedule
+    // the backend marks as current.
+    final Map<String, String> monthPeriods = ratePeriods;
+    String selectedMonth = monthPeriods.entries
+        .firstWhere(
+          (e) => e.value == currentRatePeriod,
+          orElse: () => monthPeriods.entries.last,
+        )
+        .key;
     // ------------------------
 
     showModalBottomSheet(
@@ -531,7 +479,6 @@ class _BillingScreenState extends State<BillingScreen> {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (innerContext, setSheetState) {
-            sheetSetState = setSheetState;
             final List<String> availableMonths = monthPeriods.keys.toList();
             Future<void> compute() async {
               if (loading) return;
@@ -1049,10 +996,7 @@ class _BillingScreenState extends State<BillingScreen> {
           },
         );
       },
-    ).whenComplete(() {
-      sheetOpen = false;
-      periodsTimer.cancel();
-    });
+    );
   }
 
   void _showBillBreakdown(
@@ -1067,11 +1011,15 @@ class _BillingScreenState extends State<BillingScreen> {
     required double fixedCharge,
     required String sourceFile,
     String? period,
+    Map<String, dynamic>? prefetched,
   }) {
     bool isClosing = false;
-    // Calculator flow: fetch once from /calculator/convert for the chosen
-    // rate period. Otherwise fall back to the cached /bill/breakdown call.
-    final Future<Map<String, dynamic>>? calcFuture = period == null
+    // Already have the bill (forecast/projected_bill): no request. Calculator
+    // flow: fetch once from /calculator/convert for the chosen rate period.
+    // Otherwise fall back to the cached /bill/breakdown call.
+    final Future<Map<String, dynamic>>? calcFuture = prefetched != null
+        ? Future.value(prefetched)
+        : period == null
         ? null
         : _fetchCalculatorConvert(period: period, kwh: kwh);
     showModalBottomSheet(
@@ -1613,26 +1561,30 @@ class _BillingScreenState extends State<BillingScreen> {
     required BuildContext context,
     required bool isCurrentMode,
     required double predictedDayTotal,
-    required double cumulativeEnergy,
+    required double liveBilledKwh,
     required double estimatedMonthEnd,
     required double eomBilledKwh,
     required double estimatedCostLive,
     required Map<String, double> rates,
+    double? eomBillFromDb,
     DateTime? forecastAt,
   }) {
-    final double heroKwh = isCurrentMode ? cumulativeEnergy : estimatedMonthEnd;
+    final double heroKwh = isCurrentMode ? liveBilledKwh : eomBilledKwh;
     // The forecast's own time when known; it also updates on a schedule,
     // not only when this phone pulls to refresh.
     final DateTime? updatedAt = forecastAt ?? _lastRefreshedAt;
 
     return FutureBuilder<Map<String, dynamic>>(
-      future: !isCurrentMode && eomBilledKwh > 0
+      // forecast/projected_bill/total_energy_amount is the backend's own
+      // figure; only ask the API when Firebase doesn't have it yet.
+      future: !isCurrentMode && eomBillFromDb == null && eomBilledKwh > 0
           ? _fetchBillBreakdownCached(eomBilledKwh)
           : null,
       builder: (context, billSnapshot) {
         final double billPeso = isCurrentMode
             ? estimatedCostLive
-            : ((billSnapshot.data?['total_energy_amount'] as num?)
+            : (eomBillFromDb ??
+                  (billSnapshot.data?['total_energy_amount'] as num?)
                       ?.toDouble() ??
                   _calculateBill(eomBilledKwh, rates));
 
@@ -1893,11 +1845,15 @@ class _BillingScreenState extends State<BillingScreen> {
           String? liveBracket;
           double eomBilledKwh = 0.0;
           String? eomBracket;
+          double? eomBillFromDb;
+          Map<String, dynamic>? eomBillData;
 
           Map<String, double> rates = Map.of(_fallbackRates);
           String effectivePeriod = '';
           double fixedCharge = 0.0;
           String sourceFile = '';
+          Map<String, String> ratePeriods = Map.of(_fallbackRatePeriods);
+          String? currentRatePeriod;
 
           if (snapshot.hasData && snapshot.data?.snapshot.value != null) {
             final data = snapshot.data!.snapshot.value as Map<dynamic, dynamic>;
@@ -1912,6 +1868,12 @@ class _BillingScreenState extends State<BillingScreen> {
                       estimatedMonthEnd)
                   .toDouble();
               eomBracket = forecastData['bracket'] as String?;
+              final projectedBill = forecastData['projected_bill'];
+              if (projectedBill is Map) {
+                eomBillData = Map<String, dynamic>.from(projectedBill);
+                eomBillFromDb =
+                    double.tryParse('${projectedBill['total_energy_amount']}');
+              }
               // Also refreshed by the backend at 9 AM, 3 PM and 9 PM.
               forecastAt = DateTime.tryParse(
                 '${forecastData['timestamp'] ?? ''}',
@@ -1934,6 +1896,12 @@ class _BillingScreenState extends State<BillingScreen> {
             effectivePeriod = _parseEffectivePeriod(data['meralco_rates']);
             fixedCharge = _parseFixedCharge(data['meralco_rates']);
             sourceFile = _parseSourceFile(data['meralco_rates']);
+            final schedules = data['rate_schedules'];
+            if (schedules is Map) {
+              final parsed = _parseRateSchedules(schedules);
+              if (parsed.isNotEmpty) ratePeriods = parsed;
+              currentRatePeriod = schedules['current']?.toString();
+            }
           }
 
           final bool isCurrentMode = _mode == _BillMode.current;
@@ -2113,10 +2081,11 @@ class _BillingScreenState extends State<BillingScreen> {
                     context: context,
                     isCurrentMode: isCurrentMode,
                     predictedDayTotal: predictedDayTotal,
-                    cumulativeEnergy: cumulativeEnergy,
+                    liveBilledKwh: liveBilledKwh,
                     estimatedMonthEnd: estimatedMonthEnd,
                     eomBilledKwh: eomBilledKwh,
                     estimatedCostLive: estimatedCostLive,
+                    eomBillFromDb: eomBillFromDb,
                     rates: rates,
                     forecastAt: forecastAt,
                   ),
@@ -2185,6 +2154,9 @@ class _BillingScreenState extends State<BillingScreen> {
                             tierRemainingText: remainingText,
                             fixedCharge: fixedCharge,
                             sourceFile: sourceFile,
+                            // End of month: use the forecast's own bill from
+                            // Firebase. Only Current asks the API.
+                            prefetched: isCurrentMode ? null : eomBillData,
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -2205,6 +2177,8 @@ class _BillingScreenState extends State<BillingScreen> {
                             rates,
                             fixedCharge: fixedCharge,
                             sourceFile: sourceFile,
+                            ratePeriods: ratePeriods,
+                            currentRatePeriod: currentRatePeriod,
                           ),
                         ),
 
