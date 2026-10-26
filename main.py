@@ -131,6 +131,10 @@ RATES_PUSHED_REF    = "/advisories_state/rates_pushed_period"
 # Optional shared secret for POST /refresh-rates. Set the same value in the notebook.
 REFRESH_TOKEN       = os.environ.get("GRID_REFRESH_TOKEN")
 
+# Counter when device is offline
+DEVICE_STATUS_REF = "/device_status"
+offline_since     = None
+
 def list_rate_schedules() -> list:
     """PDFs in meralco_rates/ named MM-YYYY_..., newest first.
     Same naming rule as get_current_schedule_filename()."""
@@ -344,8 +348,9 @@ async def sync_watchdog():
     Background task — runs every 10 seconds.
     Sets Firebase /sync to false if no reading received recently.
     Triggers FCM notification when device goes offline.
+    Writes /device_status so the app can count downtime from the VM's time.
     """
-    global last_sync_state
+    global last_sync_state, offline_since
 
     while True:
         await asyncio.sleep(10)
@@ -361,10 +366,22 @@ async def sync_watchdog():
         # Only trigger notification on TRANSITION from true → false
         # Avoids sending repeated notifications every 10 seconds
         if not is_synced and last_sync_state:
+            offline_since = last_reading_ts                      # downtime counts from the last reading
+            firebase_db.reference(DEVICE_STATUS_REF).set({
+                "online":        False,
+                "offline_since": offline_since.isoformat(),
+            })
             publish_advisory(nlg.build_device_advisory(
                 online=False, since=last_reading_ts, timeout_s=SYNC_TIMEOUT_SECONDS,
                 avoid_id=last_template_id("device")))
         elif is_synced and not last_sync_state:
+            now = datetime.now(PH_TZ)
+            firebase_db.reference(DEVICE_STATUS_REF).set({
+                "online":          True,
+                "back_online_at":  now.isoformat(),
+                "last_downtime_s": int((now - offline_since).total_seconds()) if offline_since else None,
+            })
+            offline_since = None
             publish_advisory(nlg.build_device_advisory(online=True))   # in-app only
 
         last_sync_state = is_synced
@@ -2039,7 +2056,56 @@ def get_bill_breakdown(
         **result,
     }
 
+@app.post("/admin/test-push")
+def admin_test_push(
+    channel: str = Query("high_channel", description="high_channel | medium_channel | low_channel"),
+    dry_run: bool = Query(False, description="true = validate tokens with FCM without showing a notification"),
+    x_grid_token: Optional[str] = Header(None),
+):
+    """Admin test: sends one push to every registered token and reports each result.
+    Does NOT delete failed tokens (unlike send_fcm_alert)."""
+    if REFRESH_TOKEN and x_grid_token != REFRESH_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
+    tokens_map = firebase_db.reference("/device_tokens").get() or {}
+    if not tokens_map:
+        return {"status": "no_tokens", "detail": "/device_tokens is empty: the app never registered, or tokens were removed"}
+
+    keys, tokens = list(tokens_map.keys()), list(tokens_map.values())
+    now = datetime.now(PH_TZ)
+    message = messaging.MulticastMessage(
+        notification=messaging.Notification(
+            title="GRID test",
+            body=f"Test push ({channel}) {now.strftime('%H:%M:%S')}",
+        ),
+        android=messaging.AndroidConfig(
+            notification=messaging.AndroidNotification(
+                channel_id=channel,
+                priority="high" if channel == "high_channel" else "default",
+            )
+        ),
+        data={"type": "test", "timestamp": now.isoformat()},
+        tokens=tokens,
+    )
+
+    try:
+        resp = messaging.send_each_for_multicast(message, dry_run=dry_run)
+    except Exception as e:
+        return {"status": "error", "detail": f"{type(e).__name__}: {e}"}
+
+    results = []
+    for key, tok, r in zip(keys, tokens, resp.responses):
+        results.append({
+            "key":        key,
+            "token_tail": tok[-12:],
+            "success":    r.success,
+            "message_id": r.message_id if r.success else None,
+            "error":      None if r.success else f"{type(r.exception).__name__}: {r.exception}",
+        })
+
+    return {"status": "ok", "dry_run": dry_run, "channel": channel,
+            "success": resp.success_count, "failed": resp.failure_count,
+            "results": results}
 
 @app.get("/calculator/convert")
 def convert(
