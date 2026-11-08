@@ -30,18 +30,17 @@ PH_TZ = ZoneInfo("Asia/Manila")
 
 # ── Firebase Setup ─────────────────────────────────────────────────────────────
 FIREBASE_KEY_PATH = os.path.join(os.path.dirname(__file__), "firebase_key.json")
-FIREBASE_DB_URL   = "https://kuro-ec80f-default-rtdb.firebaseio.com"
 
-cred = credentials.Certificate(FIREBASE_KEY_PATH)
-firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
+cred = credentials.Certificate(os.environ["FIREBASE_KEY_PATH"])
+firebase_admin.initialize_app(cred, {"databaseURL": os.environ["FIREBASE_DB_URL"]})
 
 # ── Database Config ────────────────────────────────────────────────────────────
 DB_CONFIG = {
-    "dbname":   "energy_db",
-    "user":     "energy_user",
-    "password": "thesis1234",
-    "host":     "localhost",
-    "port":     5432,
+    "dbname":   os.environ["DB_NAME"],
+    "user":     os.environ["DB_USER"],
+    "password": os.environ["DB_PASSWORD"],
+    "host":     os.environ.get("DB_HOST", "localhost"),
+    "port":     int(os.environ.get("DB_PORT", "5432")),
 }
 
 # ── Load ML Models ─────────────────────────────────────────────────────────────

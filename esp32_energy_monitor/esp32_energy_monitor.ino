@@ -18,11 +18,11 @@
 #include <PZEM004Tv30.h>
 
 // ================= WIFI =================
-char ssid[] = "PLDTHOMEFIBRMTHt5";
-char pass[] = "PLDTWIFI2wXtW";
+char ssid[] = "wifiname";
+char pass[] = "wifipassword";
 
 // ================= VM SERVER =================
-const char* serverURL = "http://35.209.250.46:8000/reading";
+const char* serverURL = "serverURL";
 
 // ================= LCD =================
 LiquidCrystal_I2C lcd(0x27, 20, 4);
